@@ -1,0 +1,1 @@
+kos.root=UUID=@LUKS_UUID@ lockdown=confidentiality lsm=landlock,lockdown,yama,bpf init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 randomize_kstack_offset=on slab_nomerge pti=on vsyscall=none debugfs=off oops=panic module.sig_enforce=1 quiet loglevel=1

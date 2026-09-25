@@ -1,0 +1,16 @@
+#!/bin/sh
+# /init inside a kernel cell (a separate Linux kernel run by `kos cell start`).
+# No disk, no network, no password material: just the KOS cell agent waiting
+# on vsock for the host to send it an app.
+PATH=/usr/bin:/bin
+export PATH
+mount -t proc  -o nosuid,nodev,noexec proc  /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t devtmpfs -o nosuid devtmpfs /dev
+mount -t tmpfs -o nosuid,nodev,noexec tmpfs /tmp
+export PYTHONPATH=/opt/kos
+while :; do
+    python3 -I -m kos.cellagent
+    echo "cell agent exited; restarting" >&2
+    sleep 1
+done

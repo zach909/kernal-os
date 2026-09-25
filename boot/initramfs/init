@@ -1,0 +1,83 @@
+#!/bin/sh
+# KOS pre-boot environment: the small "sub-operating system" that runs first.
+#
+# It lives in the initramfs (RAM only), bundled with the kernel into one signed
+# UEFI image so Secure Boot refuses to start it if anyone has modified it.
+# Its only job: ask for your password, use it to unlock the encrypted root
+# filesystem, and hand over to the real OS. The disk's key is loaded into the
+# kernel's keyring in RAM (never into a file and never readable by userspace),
+# which is how the rest of the system gets to read the decrypted disk.
+#
+# Security properties:
+#   * No rescue shell. Any failure halts; there is no way to get a prompt
+#     here without the password.
+#   * The password is read by cryptsetup itself (echo off, locked memory);
+#     it never passes through a shell variable.
+#   * Three attempts per boot with growing delays, and LUKS2 uses Argon2id,
+#     so each guess costs ~1s and ~1 GiB of RAM.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+halt_forever() {
+    echo
+    echo "kos-preboot: $*"
+    echo "kos-preboot: refusing to continue. Power the machine off."
+    # Never drop to a shell.
+    while :; do sleep 3600; done
+}
+
+mount -t proc     -o nosuid,nodev,noexec proc     /proc || halt_forever "cannot mount /proc"
+mount -t sysfs    -o nosuid,nodev,noexec sysfs    /sys  || halt_forever "cannot mount /sys"
+mount -t devtmpfs -o nosuid,mode=0755    devtmpfs /dev  || halt_forever "cannot mount /dev"
+echo 1 > /proc/sys/kernel/printk 2>/dev/null   # keep kernel messages off the prompt
+
+# kos.root=UUID=<luks uuid> (or a /dev path) comes from the signed kernel command line.
+root_spec=""
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        kos.root=*) root_spec="${arg#kos.root=}" ;;
+    esac
+done
+[ -n "$root_spec" ] || halt_forever "no kos.root= on the kernel command line"
+
+dev=""
+i=0
+while [ $i -lt 50 ]; do          # wait up to 10s for the disk to appear
+    case "$root_spec" in
+        UUID=*) dev=$(blkid -U "${root_spec#UUID=}" 2>/dev/null) ;;
+        /dev/*) [ -b "$root_spec" ] && dev="$root_spec" ;;
+    esac
+    [ -n "$dev" ] && break
+    sleep 0.2
+    i=$((i + 1))
+done
+[ -n "$dev" ] || halt_forever "root device $root_spec not found"
+
+clear
+cat <<'BANNER'
+
+  KOS pre-boot
+  ------------
+  This disk is encrypted. Type your password to unlock it.
+
+BANNER
+
+attempt=1
+while [ $attempt -le 3 ]; do
+    if cryptsetup open --type luks2 --tries 1 "$dev" kosroot; then
+        break
+    fi
+    echo "Wrong password."
+    sleep $((attempt * attempt))
+    attempt=$((attempt + 1))
+done
+[ -b /dev/mapper/kosroot ] || { echo "Too many attempts."; sleep 3; poweroff -f; halt_forever "locked"; }
+
+mkdir -p /newroot
+mount -t ext4 -o nodev,nosuid /dev/mapper/kosroot /newroot || halt_forever "cannot mount root"
+[ -x /newroot/sbin/kos-init ] || halt_forever "root filesystem has no /sbin/kos-init"
+
+umount /proc /sys
+mount --move /dev /newroot/dev
+exec switch_root /newroot /sbin/kos-init
