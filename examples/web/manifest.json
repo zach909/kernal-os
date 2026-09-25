@@ -1,0 +1,9 @@
+{
+  "name": "web",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "web:main",
+  "modes": ["tui"],
+  "permissions": ["network"],
+  "description": "Text web browser: pages are folders of links you click through; 'run' shows the page"
+}
