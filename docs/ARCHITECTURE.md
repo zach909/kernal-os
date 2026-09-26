@@ -131,6 +131,68 @@ quietly abandoning that rule. The resolution:
   an **expired** grant, or one with **no uses left** are all refused the
   same way, each independently tested.
 
+## The admin keyslot and privileged grants (`kos/admin.py`)
+This is the one place in KOS that deliberately reverses two founding
+decisions - "no root login exists" and "an autonomous grant can never
+install/run/optimize" - and it does both through one mechanism, on purpose,
+off by default.
+
+**How the keyslot works.** Modeled on LUKS: the owner's password and the
+admin's password are two different passwords that unlock the exact same
+master key, not two different keys. `kos admin setup` calls
+`authority.authorize("admin.create")` for real - a live password prompt,
+using `Grant.raw_master()` (the one place outside sealing that touches the
+literal master bytes, not a derived subkey) - then wraps that master under
+a new password: `wrapped = master XOR HMAC(admin_slot_key, "admin-wrap")`.
+Unwrapping with the correct admin password reproduces byte-identical master
+key material to the owner's own unlock (`test_owner_and_admin_unlock_to_the_same_master`),
+which is what lets an admin-authorized `Grant` derive `kapp-seal` exactly
+like an owner-authorized one - there is no cryptographic distinction once
+either password has unlocked it, only the `via_admin` flag `Authority`
+attaches to the `Grant` it returns, which callers use to decide what to do
+next (root shell vs owner shell; ordinary grant vs privileged one).
+
+**`Authority.OWNER_ONLY`** is a short, hard-coded set (`admin.remove`,
+`auth.change`) that never accepts the admin password, even though it's
+cryptographically capable of unlocking the same master - enforced in code,
+not by convention, so an admin can never erase the record of their own
+elevation or change the owner's password
+(`test_admin_cannot_remove_itself_owner_can`).
+
+**Root at login.** `kos-init`'s `login_loop` reads `grant.via_admin` off
+the `session.login` grant and passes it straight through as `start_shell`'s
+`as_root` - the owner's own password can never produce `via_admin=True`,
+by construction, so it can never reach the root path. This is the literal
+reversal of "no root login exists": now real, gated behind a password that
+does not exist until someone with full owner access explicitly runs
+`kos admin setup`.
+
+**Privileged autonomy** (`AutonomyStore.issue_privileged`/
+`redeem_privileged`) is the other reversal: `RedeemedPrivilegedGrant.key()`
+actually returns real key material, unlike a normal `RedeemedGrant`'s,
+because `issue_privileged` captures `grant.key(SEAL_KEY_LABEL)` at
+issuance and carries it (HMAC-tagged for tamper detection, same as a
+normal grant) in the grant file. `issue_privileged` refuses outright unless
+`grant.via_admin` is true - the owner's password cannot mint one no matter
+how it's called (`test_issue_privileged_needs_admin_not_owner`). Redemption
+still re-checks the target: `AppStore.install`'s pre-made-grant path calls
+`grant.check(action, m.name)` before using it, so a grant minted for
+"hello" cannot install a differently-named app just because a `.kapp` with
+that name happened to be handed to the same grant id
+(`test_privileged_grant_scoped_to_wrong_app_name_is_refused` - this was a
+real gap caught and fixed during development, not a hypothetical: the
+target for `app.install` isn't known until the file is parsed, unlike
+`cell.start` or `app.close` where the caller already knows it before
+redeeming).
+
+**The honest risk, stated plainly.** A privileged grant file is close to a
+bearer copy of full install/run/optimize authority until it expires -
+unlike a normal grant, whose `.key()` always raises, so its file alone is
+harmless. That's exactly why minting one needs the higher-trust admin
+password rather than the everyday owner one, and why `kos autonomy
+grant-privileged`'s own success message says to treat the grant file like
+a password. Use the shortest duration and fewest uses the job needs.
+
 ## Command protocol
 See `kos/protocol.py`. All app output is schema-checked and stripped of control
 characters (no terminal escape injection). Input reaches the app only for
@@ -208,3 +270,18 @@ hypervisor) as a bare-metal backend.
   password. A multi-directory `scan.watch` grant's target must match the
   comma-joined directory list byte-for-byte, which is exact but not
   friendly to type by hand.
+* `--privileged-token` is wired into `kos install` and `kos optimize` only.
+  `kos run`/`kos open`/`kos update` do not accept one yet - not because
+  they're any less capable of it, but because each has extra live logic
+  (the `network` permission prompt, `kos update all`'s directory scan,
+  `PermitStore` checks) that would need its own careful pass to keep
+  correct under the token path rather than just plumbed through quickly.
+* There is only ever one admin keyslot, not several named ones - `kos
+  admin setup` refuses if one already exists. Multiple distinct admins
+  (each removable independently) would need the keyslot storage to become
+  a small list rather than one file, which `kos/admin.py` doesn't do yet.
+* Nothing rate-limits `kos autonomy grant`/`grant-privileged` itself beyond
+  the normal password throttle - a script with the owner's password could
+  mint many grants quickly. Each still needs that real password, so this
+  is the existing throttle's job, not a new gap, but worth naming since
+  it's a new place password-guessing pressure could show up.

@@ -9,6 +9,15 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **`--privileged-token` for `run`/`open`/`update`.** Only `install` and
+  `optimize` accept one today. The other three each have extra live logic
+  (network-permission prompts, `PermitStore` checks, `update all`'s
+  directory scan) that needs its own careful pass to stay correct under
+  the token path, not just the same quick plumbing `install`/`optimize`
+  got.
+- **Multiple named admin keyslots.** Right now there's exactly one; a
+  second `kos admin setup` refuses. Independently-named, independently-
+  revocable admins would need the keyslot storage to become a small list.
 - **npm/Node apps as `.kapp`s.** Today a `.kapp` app is either Python
   (imported straight from the zip) or a static native binary (run from a
   sealed memfd). Node can't import straight from a zip the way Python can,
@@ -71,6 +80,24 @@ land instead of getting lost in chat.
 
 ## Shipped
 
+- **Admin keyslot + root login + privileged autonomy.** `kos admin setup`
+  (owner password only) adds a second password that unlocks the *same*
+  master key (LUKS-style keyslots), off by default. Logging in with it at
+  the console gives a root shell instead of the owner's - the deliberate,
+  gated reversal of "no root login exists." `kos autonomy grant-privileged`
+  needs that admin password specifically and mints a grant that genuinely
+  can install/run/optimize unattended, because it carries the real seal
+  key - unlike a normal grant, whose `.key()` always raises. Verified
+  end-to-end over a real pty and a genuinely stdin-less subprocess: admin
+  setup, owner correctly refused from minting a privileged grant, admin
+  successfully mints one, and a fully unattended `kos install` succeeds
+  with zero password prompts. 12 tests cover the crypto (owner and admin
+  unlock to the identical master), the owner-only actions
+  (`admin.remove`/`auth.change`) refusing even a valid admin password, and
+  a real gap caught and fixed during development: a privileged grant
+  minted for one app name could not be redeemed to install a different one
+  just because the same grant id was reused, since the target for
+  `app.install` isn't known until the file is parsed.
 - **Autonomous action, without ever storing the password.** `kos autonomy
   grant ACTION TARGET --for N --uses M` needs the real password once, to
   mint a temporary permission - never the password itself, which is never

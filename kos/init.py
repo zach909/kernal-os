@@ -99,9 +99,17 @@ def _owner_groups() -> list[int]:
     return out
 
 
-def start_shell(console: str) -> int:
+def start_shell(console: str, as_root: bool = False) -> int:
+    """`as_root` is the literal, deliberate reversal of "no root login
+    exists": it's only ever True when the login a moment ago verified
+    against the *admin* password specifically (see `login_loop` and
+    `Grant.via_admin`), which itself only exists if someone with full
+    owner access explicitly ran `kos admin setup`. The owner's own
+    password can never land here as root."""
     shell = os.environ.get("KOS_SHELL", "/bin/sh")
-    env = {"HOME": "/home/owner", "USER": "owner", "TERM": os.environ.get("TERM", "linux"),
+    user = "root" if as_root else "owner"
+    env = {"HOME": "/root" if as_root else "/home/owner", "USER": user,
+           "TERM": os.environ.get("TERM", "linux"),
            "PATH": "/opt/kos/bin:/usr/local/bin:/usr/bin:/bin", "KOS_ROOT": "/",
            "LANG": "C.UTF-8"}
     groups = _owner_groups()
@@ -112,10 +120,11 @@ def start_shell(console: str) -> int:
         fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
         for std in (0, 1, 2):
             os.dup2(fd, std)
-        if os.getuid() == 0:
+        if os.getuid() == 0 and not as_root:
             os.setgroups(groups)
             os.setresgid(OWNER_UID, OWNER_UID, OWNER_UID)
             os.setresuid(OWNER_UID, OWNER_UID, OWNER_UID)
+        # as_root: already uid 0 (kos-init is PID 1); nothing to drop.
 
     proc = subprocess.Popen([shell, "-l"], env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
                             else "/", preexec_fn=child_setup, close_fds=True)
@@ -140,7 +149,7 @@ def login_loop(paths: Paths, console: str) -> None:
     while True:
         prompter.info(BANNER)
         try:
-            authority.authorize("session.login").close()
+            grant = authority.authorize("session.login")
         except AuthorizationDenied:
             prompter.info("Locked.")
             time.sleep(2)
@@ -149,8 +158,13 @@ def login_loop(paths: Paths, console: str) -> None:
             prompter.info(f"auth error: {e}")
             time.sleep(5)
             continue
-        prompter.info("Unlocked. Type 'run APP' or 'run graphical APP'. Exit the shell to lock.\n")
-        start_shell(console)
+        as_root = grant.via_admin
+        grant.close()
+        if as_root:
+            prompter.info("Unlocked as ADMIN - root shell. Exit the shell to lock.\n")
+        else:
+            prompter.info("Unlocked. Type 'run APP' or 'run graphical APP'. Exit the shell to lock.\n")
+        start_shell(console, as_root=as_root)
         prompter.info("\nSession ended - locked.")
 
 

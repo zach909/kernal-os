@@ -62,6 +62,9 @@ kos control ID mouse|keyboard ...   drive a booted device with a command (same p
 kos autonomy grant ACTION TARGET --for 3600 --uses 1   issue a temporary, unattended permission
 kos autonomy list / actions / revoke ID                see/limit what autonomy can ever do
 kos close ID --token GRANT   (also cell start/stop, scan watch, permit, boot desktop) - no password, no TTY
+kos admin setup / status / remove       a second, higher-privileged password (root shell at login)
+kos autonomy grant-privileged ACTION TARGET   needs the ADMIN password - genuinely can install/run/optimize
+kos install FILE --privileged-token GRANT     (also: kos optimize) - fully unattended, admin-authorized
 kos cell start NAME --kernel K --initrd I --cpus 2,3
 kos doctor                  which kernel protections this machine has
 kos audit                   every password decision
@@ -96,6 +99,21 @@ updates, runs, or opens an app, or optimizes - those verify or derive a
 cryptographic seal, and a redeemed grant is built so it structurally cannot
 do that (see `kos/autonomy.py`). That boundary is the whole design, not a
 missing feature.
+
+**A second, higher-privileged password, and what it deliberately unlocks.**
+`kos admin setup` (needs the owner's password) creates an admin account -
+off by default, until someone with full owner access explicitly makes one.
+It reverses two things from the very first version of KOS, on purpose:
+logging in with the admin password at the real console gives a **root
+shell** instead of the owner's unprivileged one, and `kos autonomy
+grant-privileged ACTION TARGET` (admin password only) issues a grant that
+genuinely **can** install, run, update, or optimize things unattended,
+because it carries the real seal key rather than being blocked from ever
+deriving one. Both are real, tested, and off unless you turn them on:
+`kos admin status` shows whether one exists; nothing about the owner's own
+password or its normal grants changes if you never create one. Treat a
+privileged grant file the same way you'd treat a password - anyone who can
+read it can act with it until it expires.
 
 Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
 `examples/web` — a no-graphics browser: type a URL, the page appears as a

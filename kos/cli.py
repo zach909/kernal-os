@@ -55,6 +55,7 @@ from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
+from .admin import AdminError
 from .autonomy import AutonomyError
 from .watch import WatchError
 from .vfs import VFSError
@@ -75,6 +76,18 @@ def _authorize_or_redeem(paths: Paths, args, action: str, target: str):
     if token:
         from .autonomy import AutonomyStore
         return AutonomyStore(paths).redeem(token, action, target)
+    return _authority(paths)[0].authorize(action, target)
+
+
+def _authorize_or_redeem_privileged(paths: Paths, args, action: str, target: str):
+    """Like `_authorize_or_redeem`, but for the higher, `--privileged-token`
+    tier (`kos/autonomy.py`'s `PRIVILEGED_ACTIONS`) - the only kind of grant
+    that can actually derive `kapp-seal`, because minting one needed the
+    admin password specifically."""
+    token = getattr(args, "privileged_token", None)
+    if token:
+        from .autonomy import AutonomyStore
+        return AutonomyStore(paths).redeem_privileged(token, action, target)
     return _authority(paths)[0].authorize(action, target)
 
 
@@ -131,8 +144,21 @@ def cmd_pack(args, paths: Paths) -> int:
 
 
 def cmd_install(args, paths: Paths) -> int:
-    authority, _ = _authority(paths)
-    m = AppStore(paths).install(Path(args.file), authority)
+    """Normally: pass the live `Authority` straight through, unchanged -
+    `AppStore._install` parses the file and asks for the password against
+    the app's real name in one step, exactly as it always has. Only with
+    `--privileged-token` do we need to look at the name *first*, so the
+    grant we redeem is checked against exactly the app actually being
+    installed, not just whatever the grant's issuer typed by hand."""
+    token = getattr(args, "privileged_token", None)
+    if token:
+        from .autonomy import AutonomyStore
+        from .kapp import KApp
+        name = KApp.from_file(Path(args.file)).manifest.name
+        grant_or_authority = AutonomyStore(paths).redeem_privileged(token, "app.install", name)
+    else:
+        grant_or_authority, _ = _authority(paths)
+    m = AppStore(paths).install(Path(args.file), grant_or_authority)
     print(f"installed {m.name} {m.version} (modes: {', '.join(m.modes)}) - kept zipped, sealed")
     return 0
 
@@ -672,28 +698,90 @@ def cmd_scan(args, paths: Paths) -> int:
     return 0 if result.clean else 3
 
 
+def cmd_admin(args, paths: Paths) -> int:
+    """A second, higher-privileged password. Setting one up needs the
+    owner's password (you must already have full access to grant more of
+    it), and logging in with it - at the real console, via kos-init - gives
+    a root shell instead of the owner's uid-1000 one. This reverses the
+    'no root login exists' design from the first version of KOS,
+    deliberately, off by default, only for someone who explicitly creates
+    it with the keys they already hold."""
+    from .admin import AdminError, AdminStore
+
+    store = AdminStore(paths)
+    if args.admin_cmd == "status":
+        info = store.info()
+        if info.exists:
+            import time as _t
+            print(f"admin account exists, created "
+                 f"{_t.strftime('%Y-%m-%d %H:%M:%S', _t.localtime(info.created_at))}")
+        else:
+            print("no admin account (owner-only - the default)")
+        return 0
+    if args.admin_cmd == "setup":
+        authority, prompter = _authority(paths)
+        with authority.authorize("admin.create") as grant:
+            admin_password = _new_password(prompter)
+            store.create(admin_password, grant.raw_master())
+        print("admin account created. Logging in with this password at the console "
+             "gives a root shell instead of the owner's.")
+        return 0
+    if args.admin_cmd == "remove":
+        authority, _ = _authority(paths)
+        store.remove(authority)
+        print("admin account removed")
+        return 0
+    raise KAppError("usage: kos admin setup|remove|status")
+
+
 def cmd_autonomy(args, paths: Paths) -> int:
     """Temporary, scoped permission for unattended use - see kos/autonomy.py
-    for the full design and why it can never touch install/run/optimize."""
-    from .autonomy import AUTONOMOUS_ACTIONS, AutonomyStore
+    for the full two-tier design: a normal grant can never touch
+    install/run/optimize; a *privileged* grant (needs the admin password)
+    genuinely can, because it's the one thing carrying real seal-derivation
+    power - use --privileged deliberately, briefly, and narrowly."""
+    from .autonomy import AUTONOMOUS_ACTIONS, AutonomyStore, PRIVILEGED_ACTIONS
 
     store = AutonomyStore(paths)
     if args.autonomy_cmd == "list":
         import time as _t
         grants = store.list()
-        if not grants:
+        privileged = store.list_privileged()
+        if not grants and not privileged:
             print("no autonomous grants issued")
         for g in grants:
             left = max(0, g.expires_at - _t.time())
             print(f"{g.id:20} {g.action:14} {g.target:24} "
                  f"{g.uses_remaining}/{g.max_uses} uses, {left:.0f}s left")
+        for g in privileged:
+            left = max(0, g["expires_at"] - _t.time())
+            print(f"{g['id']:20} {g['action']:14} {g['target']:24} "
+                 f"{g['uses_remaining']}/{g['max_uses']} uses, {left:.0f}s left  [PRIVILEGED]")
         return 0
     if args.autonomy_cmd == "actions":
-        print("actions that can ever be granted for autonomous use:")
+        print("actions that can ever be granted for autonomous use (kos autonomy grant):")
         for a in sorted(AUTONOMOUS_ACTIONS):
             print(f"  {a}")
-        print("everything else (install/update/run/open/optimize/...) always needs the "
-             "real password, typed, at that moment - see kos/autonomy.py")
+        print("\nactions that can ever be granted PRIVILEGED (kos autonomy grant-privileged, "
+             "needs the admin password):")
+        for a in sorted(PRIVILEGED_ACTIONS):
+            print(f"  {a}")
+        print("\neverything else always needs the real password, typed, at that moment.")
+        return 0
+    if args.autonomy_cmd == "grant-privileged":
+        authority, _ = _authority(paths)
+        g_id = store.issue_privileged(args.action, args.target, authority,
+                                      duration_s=args.for_seconds, max_uses=args.uses)
+        print(f"PRIVILEGED grant issued: {g_id}")
+        print(f"  ...--privileged-token {g_id}")
+        print(f"  good for {args.uses} use(s), expires in {args.for_seconds:.0f}s")
+        print("  this genuinely carries install/run/optimize power until it expires - "
+             "treat the grant file like a password.")
+        return 0
+    if args.autonomy_cmd == "revoke-privileged":
+        authority, _ = _authority(paths)
+        store.revoke_privileged(args.grant_id, authority)
+        print(f"revoked privileged grant {args.grant_id}")
         return 0
     if args.autonomy_cmd == "grant":
         authority, _ = _authority(paths)
@@ -722,8 +810,7 @@ def cmd_autonomy(args, paths: Paths) -> int:
 
 def cmd_optimize(args, paths: Paths) -> int:
     from .optimize import optimize
-    authority, _ = _authority(paths)
-    report = optimize(paths, authority)
+    report = optimize(paths, _authorize_or_redeem_privileged(paths, args, "disk.optimize", ""))
     print(report.summary())
     return 0
 
@@ -828,6 +915,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", required=True)
     s = sub.add_parser("install", help="install a .kapp")
     s.add_argument("file")
+    s.add_argument("--privileged-token", help="redeem a privileged autonomy grant (needs admin)")
     s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
     s.add_argument("file", help="a .kapp path, or the literal word 'all'")
     s.add_argument("--from", dest="from_dir", help="directory to check for updates (with 'all')")
@@ -864,6 +952,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--revoke", action="store_true", help="take away permission instead of granting it")
     s.add_argument("--list", action="store_true", help="list every app with permission to run")
     s.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
+    s = sub.add_parser("admin", help="a second, higher-privileged password (root at login)")
+    sad = s.add_subparsers(dest="admin_cmd", required=True)
+    sad.add_parser("setup", help="create the admin account (needs the owner's password)")
+    sad.add_parser("remove", help="remove it (needs the owner's password specifically)")
+    sad.add_parser("status", help="does one exist (no password needed)")
     s = sub.add_parser("autonomy", help="temporary, scoped permission for unattended use")
     sa = s.add_subparsers(dest="autonomy_cmd", required=True)
     sg = sa.add_parser("grant", help="issue a temporary permission (needs the password)")
@@ -872,10 +965,19 @@ def build_parser() -> argparse.ArgumentParser:
     sg.add_argument("--for", dest="for_seconds", type=float, default=3600,
                     help="seconds until it expires (default 3600)")
     sg.add_argument("--uses", type=int, default=1, help="how many times it can be redeemed")
-    sa.add_parser("list", help="list active grants (no password needed)")
+    sgp = sa.add_parser("grant-privileged",
+                        help="issue a PRIVILEGED permission - needs the ADMIN password")
+    sgp.add_argument("action", help="e.g. app.install, disk.optimize - see 'kos autonomy actions'")
+    sgp.add_argument("target")
+    sgp.add_argument("--for", dest="for_seconds", type=float, default=3600,
+                     help="seconds until it expires (default 3600)")
+    sgp.add_argument("--uses", type=int, default=1, help="how many times it can be redeemed")
+    sa.add_parser("list", help="list active grants, both tiers (no password needed)")
     sa.add_parser("actions", help="list which actions can ever be granted (no password needed)")
     sr = sa.add_parser("revoke", help="revoke a grant immediately")
     sr.add_argument("grant_id")
+    srp = sa.add_parser("revoke-privileged", help="revoke a privileged grant immediately")
+    srp.add_argument("grant_id")
     s = sub.add_parser("scan", help="scan a file/zip for known-bad patterns, or watch a directory")
     ss = s.add_subparsers(dest="scan_cmd", required=True)
     sf = ss.add_parser("file", help="scan one file or zip right now (no password needed)")
@@ -894,6 +996,7 @@ def build_parser() -> argparse.ArgumentParser:
     sst = ss.add_parser("stop", help="stop a background scan watch")
     sst.add_argument("job_id")
     s = sub.add_parser("optimize", help="reclaim disk space: recompress apps, prune dead state")
+    s.add_argument("--privileged-token", help="redeem a privileged autonomy grant (needs admin)")
     s = sub.add_parser("mv", help="move/rename a file: separate passwords for move, optimize, scan")
     s.add_argument("src")
     s.add_argument("dst")
@@ -921,7 +1024,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "autonomy": cmd_autonomy,
+            "permit": cmd_permit, "autonomy": cmd_autonomy, "admin": cmd_admin,
             "scan": cmd_scan, "optimize": cmd_optimize, "mv": cmd_mv,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
 
@@ -938,7 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, WatchError,
-           AutonomyError, NoTTY, OSError) as e:
+           AutonomyError, AdminError, NoTTY, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

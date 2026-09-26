@@ -1,4 +1,25 @@
 """Autonomous action: something can run without a human present to type the
+password - but never without the password.
+
+This module has two tiers, and the line between them is deliberate, not
+provisional:
+
+* A normal grant (``issue``/``redeem``) can never derive master-key
+  material - ``RedeemedGrant.key()`` always raises. It cannot install, run,
+  update, or optimize anything, no matter what the allowlist changes to.
+* A **privileged** grant (``issue_privileged``/``redeem_privileged``) is the
+  opposite, by explicit design: it captures the real seal-derivation key at
+  issuance and carries it in the grant file, so a redeemed privileged grant
+  genuinely *can* install and run apps unattended. Minting one requires the
+  admin password specifically (see ``kos/admin.py``) - not the everyday
+  owner password - because a leaked privileged grant file is close to a
+  bearer copy of full install/run authority until it expires. Use the
+  shortest duration and fewest uses the job actually needs.
+
+The rest of this docstring (below) describes the normal-grant tier, which
+remains the default and the only tier ``kos autonomy grant`` reaches without
+the extra `--privileged` step (`kos autonomy grant-privileged`, which needs
+the admin password).
 password - but never without the password. The resolution: a human issues a
 *temporary permission* in advance, with their password, that spells out
 exactly what it authorizes and for how long or how many times. Redeeming
@@ -48,8 +69,10 @@ from typing import Optional
 
 from .auth import Authority
 from .paths import Paths, atomic_write
+from .store import SEAL_KEY_LABEL
 
 AUTONOMY_KEY_LABEL = "autonomy-mac"
+PRIVILEGED_MAC_LABEL = "autonomy-privileged-mac"
 
 # Deliberately short, and deliberately excludes anything that verifies or
 # derives a seal (install/update/run/open/optimize) - see the module
@@ -57,6 +80,14 @@ AUTONOMY_KEY_LABEL = "autonomy-mac"
 AUTONOMOUS_ACTIONS = frozenset({
     "cell.start", "cell.stop", "app.close", "scan.watch",
     "app.permit", "app.revoke", "device.desktop",
+})
+
+# The tier above: genuinely can install/run/update/optimize, because the
+# grant carries the real seal key. Minting one needs the admin password
+# specifically - see the module docstring.
+PRIVILEGED_ACTIONS = frozenset({
+    "app.install", "app.update", "app.run", "app.graphical", "app.open",
+    "disk.optimize",
 })
 
 MAX_DURATION_S = 30 * 24 * 3600  # 30 days - a grant cannot be "forever"
@@ -135,6 +166,42 @@ class RedeemedGrant:
         pass
 
 
+class RedeemedPrivilegedGrant:
+    """The higher tier: `.key()` actually works, but only for the one
+    label (`kapp-seal`) captured at issuance - not an arbitrary label the
+    way a live `auth.Grant` allows, which keeps this to exactly what
+    install/run/update/optimize need and nothing more general."""
+
+    def __init__(self, action: str, target: str, sealed_key: bytes):
+        self.action = action
+        self.target = target
+        self._sealed_key = sealed_key
+        self.via_admin = True
+
+    def check(self, action: str, target: str) -> None:
+        if (action, target) != (self.action, self.target):
+            raise AutonomyError(f"grant is for {self.action}:{self.target}, not {action}:{target}")
+
+    def key(self, label: str) -> bytes:
+        if label != SEAL_KEY_LABEL:
+            raise AutonomyError(f"a privileged grant only ever carries the {SEAL_KEY_LABEL!r} "
+                               f"key, not {label!r}")
+        return self._sealed_key
+
+    def raw_master(self) -> bytes:
+        raise AutonomyError("a privileged grant never carries the raw master key, "
+                           "only the one derived seal key it was issued for")
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "RedeemedPrivilegedGrant":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+
 class AutonomyStore:
     def __init__(self, paths: Paths):
         self.paths = paths
@@ -181,6 +248,105 @@ class AutonomyStore:
             return AutonomousGrant(**json.loads(self._file(grant_id).read_text()))
         except FileNotFoundError:
             raise AutonomyError(f"no such grant {grant_id!r}") from None
+
+    # --- the privileged tier: separate storage, separate everything -------
+
+    def _pdir(self) -> Path:
+        return self.paths.state / "autonomy_privileged"
+
+    def _pfile(self, grant_id: str) -> Path:
+        if "/" in grant_id or grant_id in ("", ".", ".."):
+            raise AutonomyError(f"invalid grant id {grant_id!r}")
+        return self._pdir() / f"{grant_id}.json"
+
+    @staticmethod
+    def _pmac(akey: bytes, g_id: str, action: str, target: str, expires_at: float,
+             max_uses: int, sealed_key_hex: str) -> str:
+        msg = "\x00".join([g_id, action, target, f"{expires_at:.3f}", str(max_uses),
+                          sealed_key_hex]).encode()
+        return hmac.new(akey, msg, hashlib.sha256).hexdigest()
+
+    def issue_privileged(self, action: str, target: str, authority: Authority, *,
+                         duration_s: float, max_uses: int) -> str:
+        """Needs the ADMIN password specifically - see the module docstring
+        for why this tier is gated tighter than a normal grant."""
+        if action not in PRIVILEGED_ACTIONS:
+            raise AutonomyError(
+                f"{action!r} is not a privileged action (allowed: "
+                f"{', '.join(sorted(PRIVILEGED_ACTIONS))}) - use 'kos autonomy grant' "
+                f"if it's in the normal allowlist instead")
+        if not 0 < duration_s <= MAX_DURATION_S:
+            raise AutonomyError(f"duration must be 1..{MAX_DURATION_S} seconds")
+        if not 1 <= max_uses <= 100000:
+            raise AutonomyError("max_uses must be 1..100000")
+
+        with authority.authorize("autonomy.grant.privileged", f"{action}:{target}") as grant:
+            if not grant.via_admin:
+                raise AutonomyError(
+                    "a privileged grant needs the ADMIN password specifically, not the "
+                    "owner's - see: kos admin setup")
+            akey = self.key.read() if self.key.exists() else \
+                self.key.create_from(grant.key(AUTONOMY_KEY_LABEL))
+            sealed_key_hex = grant.key(SEAL_KEY_LABEL).hex()
+            g_id = secrets.token_hex(8)
+            now = time.time()
+            expires_at = now + duration_s
+            mac = self._pmac(akey, g_id, action, target, expires_at, max_uses, sealed_key_hex)
+
+        self._pdir().mkdir(parents=True, exist_ok=True)
+        os.chmod(self._pdir(), 0o700)
+        doc = {"id": g_id, "action": action, "target": target, "issued_at": now,
+              "expires_at": expires_at, "max_uses": max_uses, "uses_remaining": max_uses,
+              "sealed_key_hex": sealed_key_hex, "mac": mac}
+        atomic_write(self._pfile(g_id), json.dumps(doc, indent=2).encode())
+        return g_id
+
+    def redeem_privileged(self, grant_id: str, action: str, target: str) -> RedeemedPrivilegedGrant:
+        try:
+            g = json.loads(self._pfile(grant_id).read_text())
+        except FileNotFoundError:
+            raise AutonomyError(f"no such privileged grant {grant_id!r}") from None
+        akey = self.key.read()
+        expected = self._pmac(akey, g["id"], g["action"], g["target"], g["expires_at"],
+                              g["max_uses"], g["sealed_key_hex"])
+        if not hmac.compare_digest(expected, g["mac"]):
+            raise AutonomyError(f"privileged grant {grant_id!r} failed integrity check - "
+                               f"tampered or forged, refusing")
+        if (g["action"], g["target"]) != (action, target):
+            raise AutonomyError(f"grant {grant_id!r} is for {g['action']}:{g['target']}, "
+                               f"not {action}:{target}")
+        if time.time() > g["expires_at"]:
+            raise AutonomyError(f"privileged grant {grant_id!r} expired")
+        if g["uses_remaining"] <= 0:
+            raise AutonomyError(f"privileged grant {grant_id!r} has no uses left")
+
+        remaining = g["uses_remaining"] - 1
+        if remaining <= 0:
+            self._pfile(grant_id).unlink(missing_ok=True)
+        else:
+            g["uses_remaining"] = remaining
+            atomic_write(self._pfile(grant_id), json.dumps(g, indent=2).encode())
+        return RedeemedPrivilegedGrant(action, target, bytes.fromhex(g["sealed_key_hex"]))
+
+    def revoke_privileged(self, grant_id: str, authority: Authority) -> None:
+        try:
+            g = json.loads(self._pfile(grant_id).read_text())
+        except FileNotFoundError:
+            raise AutonomyError(f"no such privileged grant {grant_id!r}") from None
+        with authority.authorize("autonomy.revoke", f"{g['action']}:{g['target']}"):
+            self._pfile(grant_id).unlink(missing_ok=True)
+
+    def list_privileged(self) -> list[dict]:
+        if not self._pdir().exists():
+            return []
+        out = []
+        for f in sorted(self._pdir().glob("*.json")):
+            try:
+                d = json.loads(f.read_text())
+                out.append({k: v for k, v in d.items() if k != "sealed_key_hex"})
+            except (ValueError, KeyError):
+                continue
+        return out
 
     def revoke(self, grant_id: str, authority: Authority) -> None:
         g = self.get(grant_id)

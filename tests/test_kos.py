@@ -39,6 +39,7 @@ from kos import cache as kcache  # noqa: E402
 from kos.store import VirusFoundError  # noqa: E402
 from kos.watch import Watcher, WatchRegistry, spawn_background  # noqa: E402
 from kos.autonomy import AutonomyError, AutonomyStore  # noqa: E402
+from kos.admin import AdminError, AdminStore  # noqa: E402
 from kos.protect import ProtectError, ProtectStore, held_unlock  # noqa: E402
 from kos.control import ControlError, build_click, parse_args  # noqa: E402
 from kos import cli as kcli  # noqa: E402
@@ -924,6 +925,133 @@ class TestAutonomy(Env):
                 break
             __import__("time").sleep(0.05)
         self.assertFalse((self.paths.state / "instances" / f"{inst_id}.json").exists())
+
+
+class TestAdmin(Env):
+    def test_admin_creation_needs_owner_password(self):
+        store = AdminStore(self.paths)
+        with self.assertRaises(AuthorizationDenied):
+            with self.authority("wrong", "wrong", "wrong").authorize("admin.create") as g:
+                store.create(b"admin-secret1", g.raw_master())
+        self.assertFalse(store.exists())
+
+    def test_owner_and_admin_unlock_to_the_same_master(self):
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+
+        with self.authority(PW).authorize("app.close", "x") as owner_grant:
+            owner_seal = owner_grant.key("kapp-seal")
+        admin_auth = self.authority(  # a fresh Authority whose ScriptedPrompter gets the admin pw
+            "admin-secret1")
+        admin_grant = admin_auth.authorize("app.close", "x")
+        self.assertTrue(admin_grant.via_admin)
+        self.assertEqual(admin_grant.key("kapp-seal"), owner_seal)
+        admin_grant.close()
+
+    def test_wrong_password_is_neither_owner_nor_admin(self):
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        with self.assertRaises(AuthorizationDenied):
+            self.authority("nope", "nope", "nope").authorize("app.close", "x")
+
+    def test_admin_cannot_remove_itself_owner_can(self):
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        with self.assertRaises(AuthorizationDenied):
+            store.remove(self.authority("admin-secret1", "admin-secret1", "admin-secret1"))
+        self.assertTrue(store.exists())
+        store.remove(self.authority(PW))
+        self.assertFalse(store.exists())
+
+    def test_login_grant_reflects_which_slot_unlocked_it(self):
+        """This is what kos-init uses to decide owner shell vs root shell."""
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        owner_login = self.authority(PW).authorize("session.login")
+        self.assertFalse(owner_login.via_admin)
+        owner_login.close()
+        admin_login = self.authority("admin-secret1").authorize("session.login")
+        self.assertTrue(admin_login.via_admin)
+        admin_login.close()
+
+
+class TestPrivilegedAutonomy(Env):
+    def _make_admin(self, password=b"admin-secret1"):
+        with self.authority(PW).authorize("admin.create") as g:
+            AdminStore(self.paths).create(password, g.raw_master())
+
+    def test_issue_privileged_needs_admin_not_owner(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AutonomyError):
+            store.issue_privileged("app.install", "hello", self.authority(PW),
+                                   duration_s=60, max_uses=1)
+
+    def test_only_the_privileged_allowlist_can_be_granted(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AutonomyError):
+            store.issue_privileged("app.close", "hello", self.authority("admin-secret1"),
+                                   duration_s=60, max_uses=1)
+
+    def test_redeemed_privileged_grant_can_actually_install(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        redeemed = store.redeem_privileged(g_id, "app.install", "hello")
+        app_store = AppStore(self.paths)
+        m = app_store.install(self.kapp, redeemed)
+        self.assertEqual(m.name, "hello")
+        self.assertIn("hello", [a.name for a in app_store.installed()])
+
+    def test_privileged_grant_scoped_to_wrong_app_name_is_refused(self):
+        """A grant issued for 'hello' can't be used to install a
+        differently-named app, even though the same grant id is valid."""
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "not-hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        with self.assertRaises(AutonomyError):
+            store.redeem_privileged(g_id, "app.install", "hello")
+
+    def test_privileged_grant_key_only_covers_kapp_seal(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("disk.optimize", "", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        redeemed = store.redeem_privileged(g_id, "disk.optimize", "")
+        with self.assertRaises(AutonomyError):
+            redeemed.key("some-other-label")
+        with self.assertRaises(AutonomyError):
+            redeemed.raw_master()
+
+    def test_tampered_privileged_grant_is_rejected(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=5)
+        f = store._pfile(g_id)
+        data = json.loads(f.read_text())
+        data["max_uses"] = 99999
+        f.write_text(json.dumps(data))
+        with self.assertRaises(AutonomyError):
+            store.redeem_privileged(g_id, "app.install", "hello")
+
+    def test_end_to_end_cli_install_via_privileged_token_no_password(self):
+        import argparse
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        args = argparse.Namespace(file=str(self.kapp), privileged_token=g_id)
+        code = kcli.cmd_install(args, self.paths)
+        self.assertEqual(code, 0)
+        self.assertIn("hello", [a.name for a in AppStore(self.paths).installed()])
 
 
 if __name__ == "__main__":

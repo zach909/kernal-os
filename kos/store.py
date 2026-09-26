@@ -62,8 +62,11 @@ class AppStore:
             raise KAppError(f"invalid app name {name!r}")
         return self.paths.apps / f"{name}.kapp", self.paths.apps / f"{name}.seal"
 
-    def install(self, src: Path, authority: Authority) -> Manifest:
-        return self._install(src, authority, update=False)
+    def install(self, src: Path, grant_or_authority) -> Manifest:
+        """`grant_or_authority` is an `Authority` (live password) or an
+        already-open grant (e.g. a redeemed privileged autonomy token, see
+        `kos/autonomy.py`) - only an `Authority` calls `.authorize()`."""
+        return self._install(src, grant_or_authority, update=False)
 
     def update(self, src: Path, authority: Authority) -> tuple[str, Manifest]:
         """Replace an installed app with a newer version of the same app.
@@ -105,7 +108,7 @@ class AppStore:
                 results.append((m.name, "flagged", e.result.summary()))
         return results
 
-    def _install(self, src: Path, authority: Authority, update: bool) -> Manifest:
+    def _install(self, src: Path, grant_or_authority, update: bool) -> Manifest:
         # Validate first so we never ask for a password for garbage.
         app = KApp.from_file(src)
         m = app.manifest
@@ -121,7 +124,17 @@ class AppStore:
             qpath = qdir / f"{m.name}-{int(time.time())}.kapp"
             atomic_write(qpath, app.data)
             raise VirusFoundError(m.name, result, qpath)
-        with authority.authorize("app.update" if update else "app.install", m.name) as grant:
+        action = "app.update" if update else "app.install"
+        if isinstance(grant_or_authority, Authority):
+            cm = grant_or_authority.authorize(action, m.name)
+        else:
+            # A pre-made grant's target was fixed when it was issued/redeemed,
+            # before this file's actual name was known - re-check it here so a
+            # grant scoped to one app can never be used to install a different
+            # one just because the uploaded .kapp happens to declare that name.
+            grant_or_authority.check(action, m.name)
+            cm = grant_or_authority
+        with cm as grant:
             seal = compute_seal(grant.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
         self.paths.ensure()
         kapp_path, seal_path = self._files(m.name)
