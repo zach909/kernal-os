@@ -73,7 +73,7 @@ class LaunchPlan:
         self.owned_fds.clear()
 
 
-def plan(app: KApp, channel_fd: int, mode: str) -> LaunchPlan:
+def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None) -> LaunchPlan:
     m = app.manifest
     kapp_fd = sealed_memfd(m.name, app.data)
     owned = [kapp_fd]
@@ -85,6 +85,8 @@ def plan(app: KApp, channel_fd: int, mode: str) -> LaunchPlan:
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
     }
+    if cache_dir is not None:
+        env["KOS_CACHE_DIR"] = str(cache_dir)
     if m.runtime == "python":
         exe = os.path.realpath(sys.executable)
         argv = [exe, "-I", "-S", "-B", "-c", _BOOTSTRAP,

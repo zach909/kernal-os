@@ -10,7 +10,22 @@
     kos list
     run NAME                        run the app as a text (TUI) page
     run graphical NAME              run the app's graphical version
-    run [graphical] NAME --cell C   run it inside kernel cell C
+    run cmd NAME                    run it with no drawing: raw command stream
+    run [graphical|cmd] NAME --cell C   run it inside kernel cell C
+    kos open [graphical|cmd] NAME   open an app in the background, return immediately
+    kos ps                          list apps opened with 'kos open'
+    kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
+    kos close ID                    stop an app opened with 'kos open'
+    kos boot desktop                choose among open apps (no desktop otherwise)
+    kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
+    kos explore [PATH]              interactive cd/ls/cat, straight into zip files
+    kos activity                    one feed: open apps + recent password decisions
+    kos permit NAME                 give an app permission to run (password still needed every run)
+    kos permit --revoke NAME        take that away
+    kos scan file PATH              scan a file or zip right now (no password needed)
+    kos scan watch DIR...           scan every file written here until Ctrl-C (password to start)
+    kos update all --from DIR       update every installed app that's newer in DIR, scanned first
+    kos optimize                    recompress apps, prune dead state, reclaim disk space
     kos cell start NAME --kernel K --initrd I [--cpus 2,3] [--memory 256]
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
@@ -31,9 +46,12 @@ from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, Passwor
 from .cells import CellError
 from .kapp import KAppError, pack
 from .paths import Paths
+from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
+from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
-from .store import SEAL_KEY_LABEL, AppStore, TamperedError
+from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
+from .vfs import VFSError
 
 
 def _authority(paths: Paths) -> tuple[Authority, TTYPrompter]:
@@ -102,6 +120,17 @@ def cmd_install(args, paths: Paths) -> int:
 
 def cmd_update(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
+    if args.file == "all":
+        if not args.from_dir:
+            raise KAppError("usage: kos update all --from DIR")
+        authority.authorize("app.update.all").close()
+        rows = AppStore(paths).update_all(Path(args.from_dir), authority)
+        if not rows:
+            print("nothing to update")
+        for name, outcome, detail in rows:
+            print(f"{name:20} {outcome:15} {detail if detail is not None else ''}")
+        flagged = [r for r in rows if r[1] == "flagged"]
+        return 3 if flagged else 0
     old, m = AppStore(paths).update(Path(args.file), authority)
     print(f"updated {m.name} {old} -> {m.version} (re-sealed)")
     return 0
@@ -141,32 +170,41 @@ def cmd_list(args, paths: Paths) -> int:
 def _parse_run_target(words: list[str]) -> tuple[str, str]:
     if len(words) == 1:
         return "tui", words[0]
-    if len(words) == 2 and words[0] == "graphical":
-        return "graphical", words[1]
-    raise KAppError("usage: run [graphical] APP")
+    if len(words) == 2 and words[0] in ("graphical", "cmd"):
+        return words[0], words[1]
+    raise KAppError("usage: run [graphical|cmd] APP")
+
+
+def _authorize_app_action(name: str, app, mode: str, authority: Authority, prompter) -> SandboxPolicy:
+    """Shared by `run` and `open`: mode check + optional network grant."""
+    m = app.manifest
+    if mode not in m.modes:
+        raise KAppError(f"{name} has no {mode} mode (it has: {', '.join(m.modes)})")
+    allow_net = False
+    if "network" in m.permissions:
+        if prompter.confirm(f"{name} asks for network access. Allow?"):
+            authority.authorize("app.network", name).close()
+            allow_net = True
+    return SandboxPolicy(allow_network=allow_net,
+                         weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
 
 
 def cmd_run(args, paths: Paths) -> int:
+    from . import cache
+    from .permit import PermitStore
     from .protocol import Channel
     mode, name = _parse_run_target(args.target)
+    PermitStore(paths).require(name)  # refused before we even ask for the password
     authority, prompter = _authority(paths)
     store = AppStore(paths)
     action = "app.graphical" if mode == "graphical" else "app.run"
     with authority.authorize(action, name) as grant:
         app = store.load_verified(name, grant)
-    m = app.manifest
-    if mode not in m.modes:
-        other = "run " + name if "tui" in m.modes else "run graphical " + name
-        raise KAppError(f"{name} has no {mode} version; try: {other}")
-    allow_net = False
-    if "network" in m.permissions and not args.cell:
-        if prompter.confirm(f"{name} asks for network access. Allow for this run?"):
-            authority.authorize("app.network", name).close()
-            allow_net = True
-    policy = SandboxPolicy(allow_network=allow_net,
-                           weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+    policy = _authorize_app_action(name, app, mode, authority, prompter) if not args.cell else \
+        SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
     paths.ensure()
     log_path = paths.logs / f"{name}.log"
+    cache_dir = None
     if args.cell:
         from .cells import CellManager, connect_cell, send_app
         rec = CellManager(paths).get(args.cell)
@@ -174,13 +212,235 @@ def cmd_run(args, paths: Paths) -> int:
         send_app(sock, app, mode)
         proc = None
     else:
+        cache_dir = cache.alloc(paths, name)
+        policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
         sock, child = socket.socketpair()
-        proc = loader.launch(loader.plan(app, child.fileno(), mode), policy, log_path)
+        proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir), policy, log_path)
         child.close()
     prompter.close()
-    code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"))
+    try:
+        code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"))
+    finally:
+        if cache_dir is not None:
+            cache.wipe(cache_dir)
     print(f"{name} exited ({code})")
     return code
+
+
+def cmd_open(args, paths: Paths) -> int:
+    """Launch an app in the background. Returns your shell immediately;
+    `kos ps` lists it, `kos attach ID` connects your terminal to it."""
+    from . import cache
+    from .broker import spawn
+    from .permit import PermitStore
+    from .registry import Instance, Registry
+
+    mode, name = args.mode or "tui", args.name
+    PermitStore(paths).require(name)  # refused before we even ask for the password
+    authority, prompter = _authority(paths)
+    store = AppStore(paths)
+    action = "app.graphical" if mode == "graphical" else "app.open"
+    with authority.authorize(action, name) as grant:
+        app = store.load_verified(name, grant)
+    policy = _authorize_app_action(name, app, mode, authority, prompter)
+    prompter.close()
+
+    paths.ensure()
+    cache_dir = cache.alloc(paths, name)
+    policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
+    registry = Registry(paths)
+    registry.prune()
+    inst_id = registry.new_id(name)
+    inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
+                    sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
+                    log_path=str(paths.logs / f"{inst_id}.log"), started=__import__("time").time())
+    spawn(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
+    print(f"opened {name} [{mode}] as {inst_id}")
+    print(f"  kos attach {inst_id}   (or: kos boot desktop)")
+    return 0
+
+
+def cmd_ps(args, paths: Paths) -> int:
+    from .registry import Registry
+    insts = Registry(paths).list()
+    if not insts:
+        print("no apps open")
+    for i in insts:
+        print(f"{i.id:24} {i.name:14} {i.mode:9} {i.status:9} pid={i.app_pid or '-'}")
+    return 0
+
+
+def cmd_attach(args, paths: Paths) -> int:
+    """Connect your terminal to an app already opened with `kos open`. No
+    new password is needed just to reconnect - it was already authorized
+    when it was opened - but every device still has to be booted again for
+    this terminal, with the password, same as any other session."""
+    from .protocol import Channel
+    from .registry import Registry
+
+    authority, prompter = _authority(paths)
+    inst = Registry(paths).get(args.id)
+    if inst.status != "running":
+        raise KAppError(f"{args.id} is not running (status: {inst.status})")
+    prompter.close()
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(inst.sock_path)
+    except OSError as e:
+        raise KAppError(f"could not attach to {inst.id}: {e}") from None
+    log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
+    code = _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
+                        detach_on_interrupt=True)
+    print(f"detached from {inst.id}" if code == 0 else f"{inst.id} exited ({code})")
+    return 0
+
+
+def cmd_close(args, paths: Paths) -> int:
+    import signal
+    import time as _time
+    from .registry import Registry
+
+    authority, _ = _authority(paths)
+    registry = Registry(paths)
+    inst = registry.get(args.id)
+    with authority.authorize("app.close", inst.id):
+        if inst.status == "running":
+            try:
+                os.kill(inst.broker_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for _ in range(20):  # give the broker a moment to shut the app down cleanly
+                if not os.path.exists(str(paths.state / "instances" / f"{inst.id}.json")):
+                    break
+                _time.sleep(0.1)
+        registry.remove(inst.id)
+    print(f"closed {inst.id}")
+    return 0
+
+
+def cmd_boot(args, paths: Paths) -> int:
+    """`kos boot desktop`: the only way a chooser of open apps ever appears.
+    Without it, `kos attach ID` still works - there is no windowing desktop
+    unless you explicitly ask for one."""
+    if args.what != "desktop":
+        raise KAppError("usage: kos boot desktop")
+    from .registry import Registry
+    from .term import RawTerminal
+
+    authority, prompter = _authority(paths)
+    authority.authorize("device.desktop").close()
+    registry = Registry(paths)
+    insts = [i for i in registry.list() if i.status == "running"]
+    prompter.close()
+    if not insts:
+        print("no apps open (kos open NAME first)")
+        return 0
+    with RawTerminal() as term:
+        term.write("\x1b[?1049l")  # desktop chooser is plain scrollback, not alt-screen
+    print("\r\nKOS desktop - open apps:\r\n")
+    for n, i in enumerate(insts, 1):
+        print(f"  {n}. {i.name} [{i.mode}]  ({i.id})\r")
+    print("\r\nq to cancel\r\n")
+    choice = input("attach to: ").strip()
+    if not choice or choice == "q":
+        return 0
+    try:
+        inst = insts[int(choice) - 1]
+    except (ValueError, IndexError):
+        raise KAppError("no such entry") from None
+    args.id = inst.id
+    return cmd_attach(args, paths)
+
+
+def _print_text(data: bytes, clean_text) -> None:
+    text = data.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        print(clean_text(line.replace("\t", "    "), 10_000))
+
+
+def _resolve_mixed(path: str):
+    """Walk a path that may cross from the real disk into a zip and, once
+    inside, into further nested zips - e.g. ``apps/hello.kapp/manifest.json``.
+    ``VFS.cd`` already treats a zip entry as just another directory, so this
+    is a plain walk down the real, absolute path one component at a time.
+    Returns (VFS positioned at the parent, final component name)."""
+    from .vfs import VFS
+
+    parts = [p for p in os.path.abspath(path).split(os.sep) if p]
+    if not parts:
+        raise KAppError("no path given")
+    vfs = VFS("/")
+    for part in parts[:-1]:
+        vfs.cd(part)
+    return vfs, parts[-1]
+
+
+def cmd_ls(args, paths: Paths) -> int:
+    vfs, last = _resolve_mixed(args.path)
+    vfs.cd(last)
+    for e in vfs.list():
+        tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
+        print(f"{e.name}{tag}")
+    return 0
+
+
+def cmd_cat(args, paths: Paths) -> int:
+    """View a file - including one living inside a zip, without extracting it."""
+    from .protocol import clean_text
+    authority, _ = _authority(paths)
+    authority.authorize("file.view", os.path.abspath(args.path)).close()
+    vfs, last = _resolve_mixed(args.path)
+    _print_text(vfs.read_bytes(last), clean_text)
+    return 0
+
+
+def cmd_explore(args, paths: Paths) -> int:
+    """An interactive shell for walking real directories and zip files as one
+    tree: `cd something.kapp` steps straight into the archive. Browsing
+    (`cd`/`ls`) needs no password; `cat` does, same as `kos view`."""
+    from .protocol import clean_text
+    from .vfs import VFS
+
+    vfs = VFS(args.start)
+    print(f"kos explore - {vfs.pwd()}  (cd, ls, cat FILE, up, exit)")
+    while True:
+        try:
+            line = input(f"{vfs.pwd()}> ").strip()
+        except EOFError:
+            print()
+            return 0
+        if not line:
+            continue
+        cmd, _, rest = line.partition(" ")
+        rest = rest.strip()
+        try:
+            if cmd in ("exit", "quit"):
+                return 0
+            elif cmd == "pwd":
+                print(vfs.pwd())
+            elif cmd == "ls":
+                for e in vfs.list():
+                    tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
+                    print(f"{e.name}{tag}")
+            elif cmd in ("cd", "up") and (cmd == "up" or not rest):
+                vfs.up()
+            elif cmd == "cd":
+                vfs.cd(rest)
+            elif cmd == "cat" and rest:
+                authority, _ = _authority(paths)
+                authority.authorize("file.view", f"{vfs.pwd()}/{rest}").close()
+                _print_text(vfs.read_bytes(rest), clean_text)
+            else:
+                print("commands: cd NAME | cd .. | ls | cat FILE | pwd | exit")
+        except VFSError as e:
+            print(f"error: {e}")
+
+
+def cmd_activity(args, paths: Paths) -> int:
+    from .activity import build_feed, render_feed
+    print(render_feed(build_feed(paths, limit=args.n)))
+    return 0
 
 
 def _on_console_vt() -> bool:
@@ -191,33 +451,114 @@ def _on_console_vt() -> bool:
     return name.startswith("/dev/tty") and name[8:].isdigit()
 
 
-def _run_session(name, mode, channel, proc, authority, log) -> int:
+def _build_surface(mode, name, term):
+    from .cmdsurface import CmdSurface
     from .devices import EvdevDevices, TerminalDevices
     from .display import FbdevBackend, GraphicalSurface, TerminalBackend
-    from .session import Session
-    from .term import RawTerminal
     from .tui import TUISurface
 
+    cols, rows = term.size()
     use_fb = (mode == "graphical" and os.path.exists("/dev/fb0") and _on_console_vt()
               and os.environ.get("KOS_DISPLAY") != "terminal")
+    if mode == "cmd":
+        return CmdSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
+    if mode == "tui":
+        return TUISurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
+    if use_fb:
+        backend = FbdevBackend(tty_fd=0)
+        return (GraphicalSurface(backend, status_in_frame=True),
+                EvdevDevices(backend.width, backend.height))
+    return GraphicalSurface(TerminalBackend(1, cols, rows)), TerminalDevices(term, cell_to_pixels=True)
+
+
+def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) -> int:
+    from .session import Session
+    from .term import RawTerminal
+
     with RawTerminal() as term:
-        cols, rows = term.size()
-        if mode == "tui":
-            surface = TUISurface(1, cols, rows, name)
-            devices = TerminalDevices(term, cell_to_pixels=False)
-        elif use_fb:
-            backend = FbdevBackend(tty_fd=0)
-            surface = GraphicalSurface(backend, status_in_frame=True)
-            devices = EvdevDevices(backend.width, backend.height)
-        else:
-            surface = GraphicalSurface(TerminalBackend(1, cols, rows))
-            devices = TerminalDevices(term, cell_to_pixels=True)
+        surface, devices = _build_surface(mode, name, term)
         try:
             return Session(name=name, mode=mode, channel=channel, proc=proc, surface=surface,
-                           devices=devices, authority=authority, log=log).run()
+                           devices=devices, authority=authority, log=log,
+                           **session_kwargs).run()
         finally:
             devices.close()
             surface.close()
+
+
+def cmd_permit(args, paths: Paths) -> int:
+    """A permit is separate from the password: it's your standing decision
+    that an app may run at all. It never skips the password - `run`/`open`
+    still ask for it every single time, same as everything else."""
+    from .permit import PermitStore
+    store = PermitStore(paths)
+    if args.list:
+        permits = store.list()
+        if not permits:
+            print("no apps permitted to run")
+        for p in permits:
+            import time as _t
+            print(f"{p.name:20} granted {_t.strftime('%Y-%m-%d %H:%M:%S', _t.localtime(p.granted_at))}")
+        return 0
+    if not args.name:
+        raise KAppError("usage: kos permit NAME | kos permit --revoke NAME | kos permit --list")
+    authority, _ = _authority(paths)
+    action = "app.revoke" if args.revoke else "app.permit"
+    with authority.authorize(action, args.name):
+        if args.revoke:
+            PermitStore(paths).revoke(args.name)
+            print(f"revoked: {args.name} may no longer run")
+        else:
+            PermitStore(paths).grant(args.name)
+            print(f"permitted: {args.name} may now run (still asks for your password every time)")
+    return 0
+
+
+def cmd_scan(args, paths: Paths) -> int:
+    """`kos scan file PATH` checks one file or zip right now, no password
+    needed (it's read-only, like `kos list`). `kos scan watch DIR...` is
+    different: starting it needs the password, the same as starting a
+    kernel cell, because from that point on it keeps running and acting -
+    scanning every file written under those directories - until you stop
+    it."""
+    from .scan import scan_file
+
+    if args.scan_cmd == "watch":
+        from .watch import ScanHit, run_watch
+        for d in args.dirs:
+            if not os.path.isdir(d):
+                raise KAppError(f"not a directory: {d}")
+        authority, prompter = _authority(paths)
+        authority.authorize("scan.watch", ", ".join(args.dirs)).close()
+        prompter.close()
+        print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
+              "Ctrl-C to stop.")
+
+        def on_hit(hit: "ScanHit") -> None:
+            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
+
+        def on_scan(path: str) -> None:
+            print(f"scanned: {path}")
+
+        try:
+            run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
+        except KeyboardInterrupt:
+            print("\nstopped")
+        return 0
+
+    result = scan_file(Path(args.path))
+    print(f"{args.path}: {result.summary()}")
+    for f in result.findings:
+        print(f"  [{f.severity}] {f.rule} in {f.path}: {f.note}")
+    return 0 if result.clean else 3
+
+
+def cmd_optimize(args, paths: Paths) -> int:
+    from .optimize import optimize
+    authority, _ = _authority(paths)
+    report = optimize(paths, authority)
+    print(report.summary())
+    return 0
 
 
 def cmd_cell(args, paths: Paths) -> int:
@@ -275,16 +616,46 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", required=True)
     s = sub.add_parser("install", help="install a .kapp")
     s.add_argument("file")
-    s = sub.add_parser("update", help="update an installed app to a newer .kapp")
-    s.add_argument("file")
+    s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
+    s.add_argument("file", help="a .kapp path, or the literal word 'all'")
+    s.add_argument("--from", dest="from_dir", help="directory to check for updates (with 'all')")
     s = sub.add_parser("view", help="view a file (asks for the password)")
     s.add_argument("file")
     s = sub.add_parser("remove", help="remove an app")
     s.add_argument("name")
     sub.add_parser("list", help="list installed apps")
-    s = sub.add_parser("run", help="run an app: run [graphical] NAME")
+    s = sub.add_parser("run", help="run an app: run [graphical|cmd] NAME")
     s.add_argument("target", nargs="+")
     s.add_argument("--cell", help="run inside this kernel cell")
+    s = sub.add_parser("open", help="open an app in the background: open [graphical|cmd] NAME")
+    s.add_argument("mode", nargs="?", choices=["graphical", "cmd"], default=None)
+    s.add_argument("name")
+    sub.add_parser("ps", help="list apps opened with 'kos open'")
+    s = sub.add_parser("attach", help="attach your terminal to an open app")
+    s.add_argument("id")
+    s = sub.add_parser("close", help="stop an app opened with 'kos open'")
+    s.add_argument("id")
+    s = sub.add_parser("boot", help="boot desktop: choose among open apps")
+    s.add_argument("what", choices=["desktop"])
+    s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
+    s.add_argument("path")
+    s = sub.add_parser("cat", help="view a file, including one inside a zip")
+    s.add_argument("path")
+    s = sub.add_parser("explore", help="interactively cd/ls/cat through real dirs and zips")
+    s.add_argument("start", nargs="?", default=".")
+    s = sub.add_parser("activity", help="one feed: open apps + recent password decisions")
+    s.add_argument("-n", type=int, default=30)
+    s = sub.add_parser("permit", help="give (or revoke) an app permission to run at all")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--revoke", action="store_true", help="take away permission instead of granting it")
+    s.add_argument("--list", action="store_true", help="list every app with permission to run")
+    s = sub.add_parser("scan", help="scan a file/zip for known-bad patterns, or watch a directory")
+    ss = s.add_subparsers(dest="scan_cmd", required=True)
+    sf = ss.add_parser("file", help="scan one file or zip right now (no password needed)")
+    sf.add_argument("path")
+    sw = ss.add_parser("watch", help="scan every file written under these directories until Ctrl-C")
+    sw.add_argument("dirs", nargs="+")
+    s = sub.add_parser("optimize", help="reclaim disk space: recompress apps, prune dead state")
     s = sub.add_parser("cell", help="manage parallel kernel cells")
     cs = s.add_subparsers(dest="cell_cmd", required=True)
     c = cs.add_parser("start")
@@ -303,7 +674,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
-            "install": cmd_install, "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run,
+            "install": cmd_install, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
+            "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
+            "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
+            "explore": cmd_explore, "activity": cmd_activity,
+            "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
 
 
@@ -312,13 +687,13 @@ def main(argv: list[str] | None = None) -> int:
     paths = Paths.from_env()
     try:
         return COMMANDS[args.cmd](args, paths)
-    except TamperedError as e:
+    except (TamperedError, VirusFoundError) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
-    except (AuthorizationDenied, AuthError) as e:
+    except (AuthorizationDenied, AuthError, PermitError) as e:
         eprint(f"denied: {e}")
         return 2
-    except (KAppError, SandboxError, CellError, NoTTY, OSError) as e:
+    except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

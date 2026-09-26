@@ -6,6 +6,11 @@ Type `run` and Enter to view the current page's text. Backspace on an empty
 line goes up (back). Esc exits.
 
 It only gets network access if you allowed it with your password at launch.
+
+Every page it fetches goes through the same static scanner everything else
+in KOS goes through, before you ever see a byte of it: pages with a flagged
+pattern are still shown (the scanner is heuristic, not a reason to hide
+things from you), but the flag is right there in the status line.
 """
 
 import urllib.parse
@@ -13,6 +18,7 @@ import urllib.request
 from html.parser import HTMLParser
 
 from kos.sdk import App
+from kos.scan import scan_bytes
 
 MAX_PAGE = 2 << 20
 
@@ -62,9 +68,11 @@ def fetch(url):
         raise ValueError("only http(s) URLs")
     req = urllib.request.Request(url, headers={"User-Agent": "kos-web/1.0"})
     with urllib.request.urlopen(req, timeout=15) as r:
-        body = r.read(MAX_PAGE).decode(r.headers.get_content_charset() or "utf-8", "replace")
+        raw = r.read(MAX_PAGE)
+        body = raw.decode(r.headers.get_content_charset() or "utf-8", "replace")
         page = Page(r.geturl())
     page.feed(body)
+    page.scan = scan_bytes(raw, label=page.base)
     return page
 
 
@@ -125,4 +133,9 @@ def main():
                 lines.append("  (empty folder: no links; type 'run' to view the page)")
         lines += ["", f"  > {typed}_", f"  {msg}"]
         title = (page.title.strip() if page else "") or "web"
-        app.screen(title, lines, status="URL+Enter: go | Enter: open | run: view | Bksp: back | Esc")
+        scan_note = ""
+        if page is not None and getattr(page, "scan", None) is not None:
+            scan_note = " | SCAN: clean" if page.scan.clean else \
+                f" | SCAN: FLAGGED ({page.scan.summary()})"
+        app.screen(title, lines,
+                  status=f"URL+Enter: go | Enter: open | run: view | Bksp: back | Esc{scan_note}")

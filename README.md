@@ -26,6 +26,10 @@ power on
 | Mouse/keyboard are "booted" | `kos/devices.py`, `kos/session.py`: apps never touch devices. The OS reads them and sends **commands** (`key`, `pointer`, `button`) to the app; the app answers with commands (`screen`, `frame`) that the OS checks and draws. Password prompts are an OS overlay the app can't see or cover. Ctrl-C always quits. |
 | Everything goes through the security system | Apps run as `nobody` under Landlock + namespaces (`kos/sandbox.py`): no reading your files, no writing, no network unless you allow it with your password. If the kernel can't enforce this, apps don't start. |
 | Multi-kernel in parallel | `kos/cells.py`: a *cell* is a separate Linux kernel (KVM micro-VM) pinned to its own CPU cores. `run hello --cell c1` runs the app inside it over the same command protocol. |
+| Virus scanning | `kos/scan.py`: a static/heuristic scanner (EICAR + hand-written rules for reverse shells, obfuscated `eval`, credential-file reads, fork bombs, curl-pipe-shell, ...) that recurses into zips without extracting them. Every `install` and `update` is scanned *before* the password prompt; a flagged file is quarantined, never installed. `kos scan watch DIR` scans every file written under a directory - started with your password, like a cell, so it's bounded and visible, not a silent background daemon. |
+| Apps need permission to run | `kos/permit.py`: a persistent grant, separate from the password - `kos permit NAME` decides an app is allowed to run *at all*, once. It never replaces the password: `run`/`open` still ask for it on every single launch regardless. |
+| Per-app cache, wiped on exit | `kos/cache.py`: each run gets one private, writable scratch directory inside its sandbox (the sandbox previously allowed *no* writable directory at all). The moment that app's process ends - clean exit, `kos close`, anything - the directory is overwritten and deleted. |
+| Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
 ## Commands
 
@@ -34,16 +38,58 @@ kos setup                  choose your password
 kos install app.kapp       install (kept zipped, sealed)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list
-run NAME                   text page       run graphical NAME   graphical
-kos view FILE              view a file (password first)
+run [graphical|cmd] NAME   run in the foreground: text page, graphical, or raw command stream
+kos open [graphical|cmd] NAME   open in the background, return immediately
+kos ps                     apps opened with 'kos open'
+kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
+kos close ID                actually stop one
+kos boot desktop            choose among open apps - no desktop otherwise
+kos ls PATH / kos cat PATH  browse/view real dirs and zips, never extracted
+kos explore [PATH]          interactively cd/ls/cat, straight into zip files
+kos activity                one feed: what's open + recent password decisions
+kos view FILE               view a file (password first)
+kos permit NAME             give an app permission to run (password still needed every run)
+kos scan file PATH          scan a file/zip right now (no password needed)
+kos scan watch DIR...       scan every file written here until Ctrl-C (password to start)
+kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
+kos optimize                 recompress apps, prune dead state, reclaim disk space
 kos cell start NAME --kernel K --initrd I --cpus 2,3
-kos doctor                 which kernel protections this machine has
-kos audit                  every password decision
+kos doctor                  which kernel protections this machine has
+kos audit                   every password decision
 ```
 
-Included apps: `examples/hello` (text + graphical demo) and `examples/web` —
-a no-graphics browser: type a URL, the page appears as a folder of links you
-click through, type `run` to view the page text.
+Three ways to run an app: `run NAME` (a text page), `run graphical NAME`
+(pixels), `run cmd NAME` (no drawing at all - the raw stream of commands the
+OS is sending the app and the app is sending back, for scripting or for
+seeing exactly what crosses the wire).
+
+Several apps can be open at once: `kos open` launches one in the background
+and hands your shell straight back. `kos ps` lists what's open, `kos attach
+ID` connects your terminal/mouse/keyboard to one of them (each device still
+needs booting with the password for that terminal), and Ctrl-C detaches
+without killing it - only `kos close` does that. There's no multi-app
+desktop view unless you ask for one with `kos boot desktop`.
+
+`kos ls`/`kos cat`/`kos explore` treat real directories and zip files
+(including `.kapp` apps) as one continuous tree - `cd`-ing into a zip is
+just another `cd`, and nothing is ever extracted to disk to look at it.
+
+Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
+`examples/web` — a no-graphics browser: type a URL, the page appears as a
+folder of links you click through, type `run` to view the page text. Every
+page it fetches is scanned before you see it; the status line says so.
+
+Everything that enters the system is scanned before it's trusted: `install`
+and `update` refuse and quarantine a flagged `.kapp`, without ever asking
+for your password on it, and `kos scan watch DIR` extends that to any
+directory you point it at. Installing an app doesn't grant it permission to
+run - `kos permit NAME` does that separately, once; the password is still
+asked on every single launch regardless. Each run gets a private, writable
+cache directory that is securely wiped the moment that process ends, so
+nothing an app writes outlives it. `kos optimize` reclaims disk space:
+recompressing installed apps (re-sealed at the new bytes), dropping old
+quarantine files and dead background-app records, and trimming the audit
+log.
 
 ## Try it on any Linux machine
 
@@ -66,11 +112,18 @@ python3 -m unittest discover -s tests -v
 * **Tested here:** password/grants/audit, app sealing and tamper detection,
   running from the zip in RAM, the sandbox (verified: app can't read
   `/etc/passwd`, write files, use the network or signal PID 1), the command
-  protocol, device booting flow, rendering, update/downgrade, the cell agent.
+  protocol, device booting flow, rendering, update/downgrade, the cell agent,
+  the `open`/`ps`/`attach`/`close` background lifecycle (including a real
+  fork+daemonize broker, over a real pty), `cmd` mode, zip `cd`/browsing,
+  the scanner (EICAR + heuristics, recursing into zips), install/update
+  quarantine, the inotify watcher, permits, per-run cache wipe-on-exit
+  (verified over a real pty: gone after a clean exit), and `kos optimize`'s
+  recompress-and-reseal.
 * **Written but not yet booted:** the initramfs, kos-init as real PID 1, the
   image builder, framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).
 * The userland is Python (stdlib only) to move fast. Python can't fully wipe
   secrets from memory; the security core should be ported to Rust.
 
-See `docs/ARCHITECTURE.md` for the threat model.
+See `docs/ARCHITECTURE.md` for the threat model and `docs/IDEAS.md` for the
+running backlog of what's next.
