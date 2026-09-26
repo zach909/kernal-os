@@ -71,6 +71,22 @@ land instead of getting lost in chat.
 
 ## Shipped
 
+- **Autonomous action, without ever storing the password.** `kos autonomy
+  grant ACTION TARGET --for N --uses M` needs the real password once, to
+  mint a temporary permission - never the password itself, which is never
+  written to disk. `kos close ID --token GRANT` (also `cell.start`/`stop`,
+  `app.permit`/`revoke`, `scan.watch`'s start, `boot desktop`) can then
+  redeem it later with zero password and zero terminal, proven end-to-end
+  with a real subprocess given `stdin=DEVNULL` - genuinely no way to type
+  anything, and it still worked. The permanent limit, not a gap to close
+  later: a redeemed grant's `.key()` always raises, so it can never derive
+  `kapp-seal` or any other master-key material - meaning it structurally
+  cannot install, update, run, open, or optimize anything, no matter what
+  the allowlist is ever extended to include. 10 tests cover issuance
+  requiring the real password, the allowlist rejecting everything else,
+  successful redemption, the key-derivation refusal, use-count exhaustion,
+  expiry, wrong action/target, a tampered grant file's HMAC failing, and
+  revocation.
 - **`kos control`/`kos attach` no longer share one broker slot, `kos scan
   watch --background`, `kos mv` for whole directories.** `kos control` now
   has its own door into the broker (`Broker.control_sock_path`), so sending

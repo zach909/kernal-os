@@ -134,7 +134,11 @@ class CellManager:
         busy = {c for cell in self.cells() if cell["running"] for c in cell["cpus"]}
         return busy
 
-    def start(self, spec: CellSpec, authority: Authority) -> dict:
+    def start(self, spec: CellSpec, grant_or_authority) -> dict:
+        """`grant_or_authority` is either an `Authority` (live password) or
+        an already-open grant/context (e.g. a redeemed autonomy token) -
+        either way it's used as the context manager for the privileged
+        window; only an `Authority` calls `.authorize()` itself."""
         spec.validate()
         busy = self.check_host()
         overlap = busy & set(spec.cpus)
@@ -142,7 +146,9 @@ class CellManager:
             raise CellError(f"cores {sorted(overlap)} already belong to another cell")
         if spec.cpus and max(spec.cpus) >= (os.cpu_count() or 1):
             raise CellError("requested core does not exist")
-        with authority.authorize("cell.start", spec.name):
+        cm = grant_or_authority.authorize("cell.start", spec.name) \
+            if isinstance(grant_or_authority, Authority) else grant_or_authority
+        with cm:
             self.paths.ensure()
             spec.cid = self._next_cid()
             log = str(self.paths.logs / f"cell-{spec.name}.console")
@@ -153,9 +159,11 @@ class CellManager:
         atomic_write(self._file(spec.name), json.dumps(rec, indent=2).encode())
         return rec
 
-    def stop(self, name: str, authority: Authority) -> None:
+    def stop(self, name: str, grant_or_authority) -> None:
         rec = json.loads(self._file(name).read_text())
-        with authority.authorize("cell.stop", name):
+        cm = grant_or_authority.authorize("cell.stop", name) \
+            if isinstance(grant_or_authority, Authority) else grant_or_authority
+        with cm:
             if _alive(rec["pid"]):
                 os.killpg(rec["pid"], signal.SIGTERM)
         self._file(name).unlink()

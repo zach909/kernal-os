@@ -38,6 +38,7 @@ from kos.optimize import optimize  # noqa: E402
 from kos import cache as kcache  # noqa: E402
 from kos.store import VirusFoundError  # noqa: E402
 from kos.watch import Watcher, WatchRegistry, spawn_background  # noqa: E402
+from kos.autonomy import AutonomyError, AutonomyStore  # noqa: E402
 from kos.protect import ProtectError, ProtectStore, held_unlock  # noqa: E402
 from kos.control import ControlError, build_click, parse_args  # noqa: E402
 from kos import cli as kcli  # noqa: E402
@@ -813,6 +814,116 @@ class TestBackgroundWatch(Env):
         os.kill(job.pid, signal.SIGTERM)
         self._wait(lambda: not (self.paths.state / "watchjobs" / f"{job.id}.json").exists())
         self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+
+class TestAutonomy(Env):
+    def test_issue_needs_the_real_password(self):
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AuthorizationDenied):
+            store.issue("app.close", "hello", self.authority("wrong", "wrong", "wrong"),
+                       duration_s=60, max_uses=1)
+        self.assertEqual(store.list(), [])
+
+    def test_only_the_short_allowlist_can_be_granted(self):
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AutonomyError):
+            store.issue("app.run", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        with self.assertRaises(AutonomyError):
+            store.issue("app.install", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        with self.assertRaises(AutonomyError):
+            store.issue("disk.optimize", "", self.authority(PW), duration_s=60, max_uses=1)
+
+    def test_redeem_with_no_password_and_no_authority_object_at_all(self):
+        """The whole point: redeeming needs nothing but the grant id - no
+        password, no TTY, no Authority instance in sight."""
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        redeemed = store.redeem(g.id, "app.close", "hello")
+        redeemed.check("app.close", "hello")
+        redeemed.close()
+
+    def test_redeemed_grant_can_never_derive_master_key_material(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        redeemed = store.redeem(g.id, "app.close", "hello")
+        with self.assertRaises(AutonomyError):
+            redeemed.key("kapp-seal")
+
+    def test_max_uses_is_enforced(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=2)
+        store.redeem(g.id, "app.close", "hello")
+        store.redeem(g.id, "app.close", "hello")
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_expiry_is_enforced(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=0.2, max_uses=5)
+        import time
+        time.sleep(0.4)
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_wrong_action_or_target_is_refused(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=5)
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "someone-else")
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "cell.stop", "hello")
+
+    def test_tampered_grant_file_is_rejected(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=5)
+        f = store._file(g.id)
+        data = json.loads(f.read_text())
+        data["max_uses"] = 999999  # try to grant itself unlimited uses without the password
+        f.write_text(json.dumps(data))
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_revoke_needs_the_password_and_removes_it_immediately(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=5)
+        with self.assertRaises(AuthorizationDenied):
+            store.revoke(g.id, self.authority("wrong", "wrong", "wrong"))
+        store.revoke(g.id, self.authority(PW))
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_end_to_end_close_via_token_needs_no_authority_at_all(self):
+        """Proves the real CLI path: kos close ID --token GRANT works with
+        zero interactive prompts, driven entirely by a pre-issued grant."""
+        import argparse
+        store_app = AppStore(self.paths)
+        store_app.install(self.kapp, self.authority(PW))
+        with self.authority(PW).authorize("app.open", "hello") as grant:
+            app = store_app.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode="cmd", broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, "cmd", SandboxPolicy(), registry, Path(inst.log_path))
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            if any(i.id == inst_id and i.status == "running" for i in registry.list()):
+                break
+            __import__("time").sleep(0.05)
+
+        astore = AutonomyStore(self.paths)
+        g = astore.issue("app.close", inst_id, self.authority(PW), duration_s=60, max_uses=1)
+
+        args = argparse.Namespace(id=inst_id, token=g.id)
+        code = kcli.cmd_close(args, self.paths)  # no TTY, no Authority - just the token
+        self.assertEqual(code, 0)
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            if not (self.paths.state / "instances" / f"{inst_id}.json").exists():
+                break
+            __import__("time").sleep(0.05)
+        self.assertFalse((self.paths.state / "instances" / f"{inst_id}.json").exists())
 
 
 if __name__ == "__main__":

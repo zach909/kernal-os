@@ -59,6 +59,9 @@ kos mv SRC DST                one password each for move, optimize, and scan - d
 kos scan protect DIR          lock a directory: no writes for anyone until a watch covers it
 kos scan unprotect DIR        unlock it permanently
 kos control ID mouse|keyboard ...   drive a booted device with a command (same password, same gate)
+kos autonomy grant ACTION TARGET --for 3600 --uses 1   issue a temporary, unattended permission
+kos autonomy list / actions / revoke ID                see/limit what autonomy can ever do
+kos close ID --token GRANT   (also cell start/stop, scan watch, permit, boot desktop) - no password, no TTY
 kos cell start NAME --kernel K --initrd I --cpus 2,3
 kos doctor                  which kernel protections this machine has
 kos audit                   every password decision
@@ -79,6 +82,20 @@ desktop view unless you ask for one with `kos boot desktop`.
 `kos ls`/`kos cat`/`kos explore` treat real directories and zip files
 (including `.kapp` apps) as one continuous tree - `cd`-ing into a zip is
 just another `cd`, and nothing is ever extracted to disk to look at it.
+
+**Autonomous action, without ever storing the password.** `kos autonomy
+grant app.close hello-abc123 --for 3600 --uses 1` needs your real password
+once, right then, to mint a *temporary permission* - not the password
+itself, which is never written down anywhere. That permission can later be
+redeemed - `kos close hello-abc123 --token GRANT_ID` - by a cron job or any
+other unattended process, with no terminal and no password at all, but only
+for the exact action it names, only until it expires or runs out of uses.
+The set of actions that can ever be granted this way is short and fixed
+(`kos autonomy actions`) and deliberately excludes anything that installs,
+updates, runs, or opens an app, or optimizes - those verify or derive a
+cryptographic seal, and a redeemed grant is built so it structurally cannot
+do that (see `kos/autonomy.py`). That boundary is the whole design, not a
+missing feature.
 
 Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
 `examples/web` — a no-graphics browser: type a URL, the page appears as a

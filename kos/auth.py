@@ -65,6 +65,8 @@ ACTIONS: dict[str, str] = {
     "fs.move": "move or rename a file",
     "fs.verify": "scan a file after changing it",
     "disk.optimize": "optimize disk space",
+    "autonomy.grant": "issue a temporary autonomous permission",
+    "autonomy.revoke": "revoke an autonomous permission",
     "cell.start": "start kernel cell",
     "cell.stop": "stop kernel cell",
 }
