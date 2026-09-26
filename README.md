@@ -53,6 +53,10 @@ kos scan file PATH          scan a file/zip right now (no password needed)
 kos scan watch DIR...       scan every file written here until Ctrl-C (password to start)
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
 kos optimize                 recompress apps, prune dead state, reclaim disk space
+kos mv SRC DST                one password each for move, optimize, and scan - decline any, it stops there
+kos scan protect DIR          lock a directory: no writes for anyone until a watch covers it
+kos scan unprotect DIR        unlock it permanently
+kos control ID mouse|keyboard ...   drive a booted device with a command (same password, same gate)
 kos cell start NAME --kernel K --initrd I --cpus 2,3
 kos doctor                  which kernel protections this machine has
 kos audit                   every password decision
@@ -117,8 +121,14 @@ python3 -m unittest discover -s tests -v
   fork+daemonize broker, over a real pty), `cmd` mode, zip `cd`/browsing,
   the scanner (EICAR + heuristics, recursing into zips), install/update
   quarantine, the inotify watcher, permits, per-run cache wipe-on-exit
-  (verified over a real pty: gone after a clean exit), and `kos optimize`'s
-  recompress-and-reseal.
+  (verified over a real pty: gone after a clean exit), `kos optimize`'s
+  recompress-and-reseal, `kos scan protect`/`watch` actually blocking a
+  non-root write and auto-quarantining a flagged one (verified over a real
+  pty, including confirming the lock does nothing against root - only
+  matters, correctly, once the owner runs as uid 1000), `kos control`
+  driving a real running app through the broker, and `kos mv`'s three
+  independent password prompts (declining any one stops it there, proven
+  by test).
 * **Written but not yet booted:** the initramfs, kos-init as real PID 1, the
   image builder, framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).

@@ -47,6 +47,53 @@ It is wired in at two points:
 Out of scope for one file: a maintained signature feed. What's here is real
 static analysis of a small, documented rule set, not a placeholder.
 
+## Protected directories (`kos/protect.py`)
+A directory that has been `kos scan protect`ed is kept at mode 0500 (read
+and list, no write) whenever nothing is watching it - the kernel's own
+permission check refuses any create/write/move into it, for anyone,
+including the owner. That is deliberately a real, load-bearing security
+boundary, not a courtesy: mode bits are enforced by the kernel for every
+process on the system, which is a stronger guarantee than anything KOS
+itself could add in userspace. `kos scan watch` is the only thing that
+raises it back to 0700, and only for exactly as long as it is running and
+actively scanning everything written there (`held_unlock` in `protect.py`
+relocks in a `finally`, so a crash, an error, or Ctrl-C all relock it the
+same way). A file the scanner flags while a protected directory is unlocked
+is moved to quarantine immediately, not just reported.
+This only works for a process that actually respects Unix permissions -
+i.e. not root. On the real system the owner's shell runs as uid 1000
+(`kos-init`), so this is a genuine boundary there; a root process on a
+general-purpose Linux box (including this dev container) bypasses file
+mode entirely, which is *why* development testing of this feature had to
+be done as a non-root user (`su nobody`) to mean anything - documented
+directly in the test and verified by hand before trusting it.
+
+## Device control (`kos/control.py`)
+`kos control ID mouse|keyboard ...` builds the exact same wire commands a
+real boot + physical click/keystroke would send (see `session.py`'s
+`route()`), and requires the same password as booting that device, once per
+invocation. It is not a second, weaker input path - it is a scriptable way
+to use the one input path that already exists, gated the same way.
+A password before *every single* input event was asked for at one point in
+this project and is not what this implements, because it cannot be: typing
+a password is itself a sequence of keystrokes, so "a password before each
+keystroke" has no base case and can never complete, and mouse movement fires
+far too often (hundreds of times a second) for an interactive prompt per
+event to mean anything other than the OS being unusable. What *is* real
+here: `kos control` asks fresh, every time you run it, for whatever
+commands that one invocation sends - there is no batching that lets one
+password authorize an unbounded stream of later input.
+
+## The `kos mv` pipeline (`cli.cmd_mv`)
+Three separate password prompts in sequence - move, then `optimize`, then
+scan the new location - sharing one `Authority` so each of the three
+`authorize()` calls asks fresh. Declining any step raises immediately and
+stops the command there; whatever already completed is not undone (undoing
+a declined step would itself be an unauthorized action). This works because
+a file move is a single, deliberate, human-paced action - nothing like the
+keystroke/mouse case above, where per-event prompting is impossible rather
+than merely inconvenient.
+
 ## Command protocol
 See `kos/protocol.py`. All app output is schema-checked and stripped of control
 characters (no terminal escape injection). Input reaches the app only for
@@ -86,3 +133,17 @@ hypervisor) as a bare-metal backend.
   password at the same step, so a recompressed app never goes stale
   relative to its own seal - but it does mean `kos optimize` needs the
   password, same as any other action that changes what's on disk.
+* `kos control` connects to the same single-attach broker slot a real
+  `kos attach` uses (see the "one attach at a time" note above), so sending
+  a control command while a real terminal is attached takes that slot away
+  from it. This is fine for the common case (`kos open` then drive it
+  purely with `kos control`, never attaching a terminal at all) but it is
+  a real conflict, not a polished feature, if you mix the two.
+* `kos mv`'s three steps are not a transaction: there is no rollback. A
+  decline partway through leaves whatever already happened in place. This
+  is intentional (see "The kos mv pipeline" above) but worth restating
+  here as a gap for anyone expecting atomic all-or-nothing semantics.
+* A protected directory's lock (`kos/protect.py`) is plain Unix file mode,
+  which only stops a process that honors it - a root process ignores it
+  completely. It is a real boundary for the owner's own uid-1000 shell on
+  the real system, not a sandbox against a root-level attacker.

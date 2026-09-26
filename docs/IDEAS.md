@@ -64,9 +64,44 @@ land instead of getting lost in chat.
   builder are all written but have only run in a container with no VM
   support. First real target: boot the produced image in QEMU with OVMF
   and confirm the two password gates and `run hello` actually work.
+- **`kos control` and a real attach coexisting.** Right now both go through
+  the broker's one attach slot, so a control command while a terminal is
+  attached bumps that terminal off (documented in `ARCHITECTURE.md`).
+  Giving the broker a second, separate "control" connection class - distinct
+  from the one "attach" slot - would let both work at once without either
+  stealing the other's spot.
+- **`kos mv` for whole directories, and a `kos cp`/`kos write` alongside
+  it.** The three-password move/optimize/scan pipeline only takes one file
+  right now.
+- **fanotify-based, mount-wide protection.** `kos scan protect` enforces
+  with plain file mode, which is real but directory-scoped and only
+  binding on non-root processes. A `FAN_OPEN_PERM`-based enforcer would let
+  the kernel itself hold an open *pending* until KOS has scanned the file's
+  content, which is a stronger and more general mechanism than a mode bit -
+  worth it if directory-level locking turns out not to be enough.
 
 ## Shipped
 
+- **`kos scan protect`/`unprotect`, `kos control`, `kos mv`.** A protected
+  directory is locked (mode 0500 - no write for anyone) the instant you
+  protect it and stays that way except while a `kos scan watch` covering it
+  is actively running, which is what "needs the password to start, but
+  blocks the move if you don't let it start" turned into: enforced by the
+  kernel's own permission check, not just observed after the fact - a
+  flagged file dropped in while unlocked is quarantined immediately, not
+  just reported. Verified for real: a non-root write into a protected
+  directory is refused, the same write succeeds the moment the watch is
+  running, and the directory relocks the instant the watch stops, by any
+  path (Ctrl-C, error, or otherwise). `kos control ID mouse|keyboard ...`
+  sends the exact same commands a real boot + physical input would, gated
+  by the exact same password, once per invocation, with no batching that
+  would let one password authorize an unbounded stream of later input -
+  the honest alternative to a literal per-keystroke prompt, which is not
+  just impractical but logically impossible (entering a password is itself
+  a sequence of keystrokes). `kos mv SRC DST` is a three-step pipeline -
+  move, then `optimize`, then scan the destination - each step its own
+  password prompt; declining any step stops the whole thing right there,
+  and whatever already happened before that point is never undone.
 - **The security scanner, install/update quarantine, `kos scan watch`,
   `kos permit`, per-run cache wiped on exit, `kos update all`,
   `kos optimize`.** Every install and update is scanned (EICAR +

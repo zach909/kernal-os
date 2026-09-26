@@ -38,6 +38,8 @@ from kos.optimize import optimize  # noqa: E402
 from kos import cache as kcache  # noqa: E402
 from kos.store import VirusFoundError  # noqa: E402
 from kos.watch import Watcher  # noqa: E402
+from kos.protect import ProtectError, ProtectStore, held_unlock  # noqa: E402
+from kos.control import ControlError, build_click, parse_args  # noqa: E402
 from kos import cli as kcli  # noqa: E402
 
 PW = "correct horse battery"
@@ -545,6 +547,163 @@ class TestWatcher(unittest.TestCase):
             result = scan_file(Path(events[0]))
             self.assertFalse(result.clean)
             self.assertEqual(result.findings[0].rule, "eicar-test-file")
+
+
+class TestProtect(Env):
+    def test_protecting_locks_and_blocks_a_nonroot_writer(self):
+        target = Path(self.tmp.name) / "vault"
+        target.mkdir()
+        store = ProtectStore(self.paths)
+        store.protect(str(target), self.authority(PW))
+        self.assertTrue(store.is_protected(str(target)))
+        # The owning process here is root (test harness), which ignores mode
+        # bits entirely, so assert on the mode itself - that's what a real,
+        # non-root KOS owner process is actually stopped by (verified by
+        # hand against a real non-root user during development).
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+    def test_held_unlock_unlocks_then_relocks_even_on_error(self):
+        target = Path(self.tmp.name) / "vault2"
+        target.mkdir()
+        store = ProtectStore(self.paths)
+        store.protect(str(target), self.authority(PW))
+        try:
+            with held_unlock(str(target), protected=True):
+                self.assertEqual(oct(target.stat().st_mode)[-3:], "700")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+    def test_unprotect_removes_from_list_and_unlocks(self):
+        target = Path(self.tmp.name) / "vault3"
+        target.mkdir()
+        store = ProtectStore(self.paths)
+        store.protect(str(target), self.authority(PW))
+        store.unprotect(str(target), self.authority(PW))
+        self.assertFalse(store.is_protected(str(target)))
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "700")
+
+    def test_wrong_password_does_not_protect(self):
+        target = Path(self.tmp.name) / "vault4"
+        target.mkdir()
+        with self.assertRaises(AuthorizationDenied):
+            ProtectStore(self.paths).protect(str(target), self.authority("wrong", "wrong", "wrong"))
+        self.assertFalse(ProtectStore(self.paths).is_protected(str(target)))
+
+
+class TestControl(unittest.TestCase):
+    def test_keyboard_words_become_attach_plus_key_events(self):
+        cmds = parse_args("keyboard", ["h", "i", "enter"])
+        self.assertEqual(cmds[0], {"cmd": "device", "device": "keyboard", "state": "attached"})
+        self.assertEqual([c["key"] for c in cmds[1:]], ["h", "i", "enter"])
+
+    def test_mouse_click_becomes_press_then_release(self):
+        cmds = parse_args("mouse", ["click", "left", "10", "20"])
+        self.assertEqual(cmds[0]["cmd"], "device")
+        self.assertEqual(cmds[1], build_click("left", 10, 20, pressed=True))
+        self.assertEqual(cmds[2], build_click("left", 10, 20, pressed=False))
+
+    def test_rejects_bad_input(self):
+        with self.assertRaises(ControlError):
+            parse_args("mouse", ["click", "left", "999999", "0"])
+        with self.assertRaises(ControlError):
+            parse_args("keyboard", ["not-a-real-key-name"])
+        with self.assertRaises(ControlError):
+            parse_args("joystick", ["x"])
+
+
+class TestControlEndToEnd(Env):
+    def test_control_reaches_the_running_app_through_the_broker(self):
+        """kos control sends the exact same wire commands a real boot+click
+        would - verified here by sending one straight through the broker's
+        socket to a real running instance and reading the app's reply."""
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        action = "app.open"
+        with self.authority(PW).authorize(action, "hello") as grant:
+            app = store.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode="cmd", broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, "cmd", SandboxPolicy(), registry, Path(inst.log_path))
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            insts = {i.id: i for i in registry.list()}
+            if inst_id in insts and insts[inst_id].status == "running":
+                inst = insts[inst_id]
+                break
+            __import__("time").sleep(0.05)
+
+        # kos control's own send() connects, writes, and disconnects (fire-and-
+        # forget, matching a real device's input - see the broker's single-
+        # attach-slot note in ARCHITECTURE.md). To see the app's reply here,
+        # send over one held-open connection instead, the same commands
+        # kos control would build.
+        import socket as _socket, json as _json
+        commands = parse_args("mouse", ["click", "left", "5", "5"])
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.connect(inst.sock_path)
+        sock.settimeout(3)
+        for cmd in commands:
+            sock.sendall(_json.dumps(cmd, separators=(",", ":")).encode() + b"\n")
+        got = b""
+        try:
+            while b'"cmd":"log"' not in got:
+                got += sock.recv(4096)
+        except OSError:
+            pass
+        sock.close()
+        self.assertIn(b'"clicks=1', got)
+
+        import signal
+        os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
+
+
+class TestMv(Env):
+    def _args(self, src, dst):
+        import argparse
+        return argparse.Namespace(src=str(src), dst=str(dst))
+
+    def test_declining_move_changes_nothing(self):
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "a.txt"
+        src.write_text("hi")
+        dst = Path(self.tmp.name) / "b.txt"
+        fake = self.authority("wrong", "wrong", "wrong")
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            with self.assertRaises(AuthorizationDenied):
+                kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertTrue(src.exists())
+        self.assertFalse(dst.exists())
+
+    def test_declining_optimize_step_leaves_the_move_done(self):
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "a.txt"
+        src.write_text("hi")
+        dst = Path(self.tmp.name) / "b.txt"
+        # step 1 (move) succeeds, step 2 (optimize) fails 3x and raises
+        fake = self.authority(PW, "wrong", "wrong", "wrong")
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            with self.assertRaises(AuthorizationDenied):
+                kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertFalse(src.exists())
+        self.assertTrue(dst.exists())  # the move already happened; not undone
+
+    def test_full_pipeline_one_password_per_step(self):
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "a.txt"
+        src.write_text("hello world, nothing dangerous here")
+        dst = Path(self.tmp.name) / "b.txt"
+        fake = self.authority(PW, PW, PW)  # exactly one per step, no more
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            code = kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertEqual(code, 0)
+        self.assertFalse(src.exists())
+        self.assertTrue(dst.exists())
+        self.assertEqual(dst.read_text(), "hello world, nothing dangerous here")
 
 
 if __name__ == "__main__":

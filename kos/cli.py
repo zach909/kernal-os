@@ -16,6 +16,8 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
+    kos control ID mouse move X Y / click BUTTON X Y / scroll DY X Y
+    kos control ID keyboard KEY [KEY...]   drive a booted device with a command
     kos boot desktop                choose among open apps (no desktop otherwise)
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
@@ -26,6 +28,7 @@
     kos scan watch DIR...           scan every file written here until Ctrl-C (password to start)
     kos update all --from DIR       update every installed app that's newer in DIR, scanned first
     kos optimize                    recompress apps, prune dead state, reclaim disk space
+    kos mv SRC DST                  move a file: separate passwords for move, optimize, scan
     kos cell start NAME --kernel K --initrd I [--cpus 2,3] [--memory 256]
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
@@ -47,6 +50,7 @@ from .cells import CellError
 from .kapp import KAppError, pack
 from .paths import Paths
 from .permit import PermitError
+from .protect import ProtectError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
@@ -296,6 +300,27 @@ def cmd_attach(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_control(args, paths: Paths) -> int:
+    """Send commands to a booted device on an open app instead of touching
+    a real mouse/keyboard - the same wire commands, the same password gate
+    (`device.control`, once per invocation) as physically booting one."""
+    from .control import ControlError, parse_args, send
+    from .registry import Registry
+
+    inst = Registry(paths).get(args.id)
+    if inst.status != "running":
+        raise KAppError(f"{args.id} is not running (status: {inst.status})")
+    commands = parse_args(args.device, args.words)  # validate before asking for the password
+    authority, _ = _authority(paths)
+    with authority.authorize("device.control", f"{inst.id} {args.device}"):
+        try:
+            send(inst.sock_path, commands)
+        except OSError as e:
+            raise ControlError(f"could not reach {inst.id}: {e}") from None
+    print(f"sent {len(commands) - 1} command(s) to {inst.id}'s {args.device}")
+    return 0
+
+
 def cmd_close(args, paths: Paths) -> int:
     import signal
     import time as _time
@@ -520,8 +545,32 @@ def cmd_scan(args, paths: Paths) -> int:
     different: starting it needs the password, the same as starting a
     kernel cell, because from that point on it keeps running and acting -
     scanning every file written under those directories - until you stop
-    it."""
+    it. `kos scan protect DIR` goes further: the directory is locked (no
+    write access for anyone, not even you) the instant you protect it, and
+    stays locked except while a `kos scan watch` covering it is actively
+    running - that's what "needs the password to start, but blocks you from
+    moving a file in if you don't let it start" means literally."""
+    from .protect import ProtectStore, held_unlock
     from .scan import scan_file
+
+    if args.scan_cmd == "protect":
+        ProtectStore(paths).protect(args.dir, _authority(paths)[0])
+        print(f"locked: {os.path.realpath(args.dir)} - nothing can be written there "
+              f"until 'kos scan watch' is running against it")
+        return 0
+
+    if args.scan_cmd == "unprotect":
+        ProtectStore(paths).unprotect(args.dir, _authority(paths)[0])
+        print(f"unlocked permanently: {os.path.realpath(args.dir)}")
+        return 0
+
+    if args.scan_cmd == "protected":
+        rows = ProtectStore(paths).list()
+        if not rows:
+            print("no protected directories")
+        for r in rows:
+            print(r.path)
+        return 0
 
     if args.scan_cmd == "watch":
         from .watch import ScanHit, run_watch
@@ -531,19 +580,44 @@ def cmd_scan(args, paths: Paths) -> int:
         authority, prompter = _authority(paths)
         authority.authorize("scan.watch", ", ".join(args.dirs)).close()
         prompter.close()
+        store = ProtectStore(paths)
+        real_dirs = [os.path.realpath(d) for d in args.dirs]
+        protected_flags = [store.is_protected(d) for d in real_dirs]
+        for d, was_protected in zip(real_dirs, protected_flags):
+            if was_protected:
+                print(f"unlocked (protected): {d}")
         print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
-              "Ctrl-C to stop.")
+              "Ctrl-C to stop; a protected directory relocks the instant this stops.")
 
         def on_hit(hit: "ScanHit") -> None:
-            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
+            qdir = paths.state / "quarantine"
+            qdir.mkdir(parents=True, exist_ok=True)
+            import time as _t
+            qpath = qdir / f"{Path(hit.path).name}-{int(_t.time())}"
+            try:
+                os.replace(hit.path, qpath)
+                where = f"quarantined to {qpath}"
+            except OSError as e:
+                where = f"could NOT be quarantined ({e}) - still on disk at {hit.path}"
+            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()} - {where}")
 
         def on_scan(path: str) -> None:
             print(f"scanned: {path}")
 
+        contexts = [held_unlock(d, p) for d, p in zip(real_dirs, protected_flags)]
         try:
-            run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
-        except KeyboardInterrupt:
-            print("\nstopped")
+            for ctx in contexts:
+                ctx.__enter__()
+            try:
+                run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
+            except KeyboardInterrupt:
+                print("\nstopped")
+        finally:
+            for ctx in reversed(contexts):
+                ctx.__exit__(None, None, None)
+            for d, was_protected in zip(real_dirs, protected_flags):
+                if was_protected:
+                    print(f"relocked (protected): {d}")
         return 0
 
     result = scan_file(Path(args.path))
@@ -558,6 +632,52 @@ def cmd_optimize(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
     report = optimize(paths, authority)
     print(report.summary())
+    return 0
+
+
+def cmd_mv(args, paths: Paths) -> int:
+    """Move or rename a file through KOS instead of around it: three
+    separate password prompts, one per step - move, then optimize, then
+    scan the new location - and declining any one of them stops the whole
+    command right there (raises, same as every other declined action in
+    KOS). Whatever already happened before the decline stands; it is never
+    undone, because undoing something already done would itself be an
+    action nobody authorized. So: decline step 1 and nothing moves at all;
+    decline step 2 and the move already happened but nothing is optimized;
+    decline step 3 and the move (and optimize, if you allowed it) already
+    happened but the moved file is left unscanned.
+    """
+    import shutil
+    from .optimize import optimize
+    from .scan import scan_file
+
+    src, dst = os.path.abspath(args.src), os.path.abspath(args.dst)
+    if not os.path.exists(src):
+        raise KAppError(f"no such file: {args.src}")
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+
+    authority, _ = _authority(paths)
+    with authority.authorize("fs.move", f"{src} -> {dst}"):
+        try:
+            os.replace(src, dst)
+        except OSError:
+            shutil.move(src, dst)
+    print(f"moved: {src} -> {dst}")
+
+    report = optimize(paths, authority)
+    print(f"optimize: {report.summary()}")
+
+    with authority.authorize("fs.verify", dst):
+        if os.path.isdir(dst):
+            results = [scan_file(p) for p in Path(dst).rglob("*") if p.is_file()]
+            flagged = [r for r in results if not r.clean]
+            print(f"scan: {len(results)} file(s) checked, {len(flagged)} flagged")
+            for r in flagged:
+                print(f"  {r.summary()}")
+        else:
+            result = scan_file(Path(dst))
+            print(f"scan: {result.summary()}")
     return 0
 
 
@@ -655,7 +775,15 @@ def build_parser() -> argparse.ArgumentParser:
     sf.add_argument("path")
     sw = ss.add_parser("watch", help="scan every file written under these directories until Ctrl-C")
     sw.add_argument("dirs", nargs="+")
+    sp = ss.add_parser("protect", help="lock a directory: no writes until a watch covers it")
+    sp.add_argument("dir")
+    su_ = ss.add_parser("unprotect", help="unlock a directory permanently")
+    su_.add_argument("dir")
+    ss.add_parser("protected", help="list locked directories (no password needed)")
     s = sub.add_parser("optimize", help="reclaim disk space: recompress apps, prune dead state")
+    s = sub.add_parser("mv", help="move/rename a file: separate passwords for move, optimize, scan")
+    s.add_argument("src")
+    s.add_argument("dst")
     s = sub.add_parser("cell", help="manage parallel kernel cells")
     cs = s.add_subparsers(dest="cell_cmd", required=True)
     c = cs.add_parser("start")
@@ -678,7 +806,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
+            "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize, "mv": cmd_mv,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
 
 
@@ -690,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
     except (TamperedError, VirusFoundError) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
-    except (AuthorizationDenied, AuthError, PermitError) as e:
+    except (AuthorizationDenied, AuthError, PermitError, ProtectError) as e:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:
