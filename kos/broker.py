@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import loader
+from . import cache, loader
 from .kapp import KApp
 from .registry import Instance, Registry
 from .sandbox import SandboxPolicy
@@ -50,11 +50,12 @@ def daemonize(log_path: Path) -> None:
 
 class Broker:
     def __init__(self, inst: Instance, registry: Registry, app_channel: socket.socket,
-                 app_proc: subprocess.Popen):
+                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None):
         self.inst = inst
         self.registry = registry
         self.app_channel = app_channel
         self.app_proc = app_proc
+        self.cache_dir = cache_dir
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             os.unlink(inst.sock_path)
@@ -163,11 +164,13 @@ class Broker:
             os.unlink(self.inst.sock_path)
         except FileNotFoundError:
             pass
+        if self.cache_dir is not None:
+            cache.wipe(self.cache_dir)
         self.registry.remove(self.inst.id)
 
 
 def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
-          registry: Registry, log_path: Path) -> None:
+          registry: Registry, log_path: Path, cache_dir: Optional[Path] = None) -> None:
     """Fork the broker for one instance. Called from the foreground CLI
     process right after the app has been verified with the password; the
     parent returns immediately (your shell comes back), the child becomes
@@ -184,9 +187,9 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
     try:
         inst.broker_pid = os.getpid()
         daemonize(log_path)
-        proc = loader.launch(loader.plan(app, b.fileno(), mode), policy, log_path)
+        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir), policy, log_path)
         b.close()
-        Broker(inst, registry, a, proc).run()
+        Broker(inst, registry, a, proc, cache_dir).run()
     except BaseException as e:  # pragma: no cover - last-resort broker crash path
         try:
             print(f"kos-broker: {e!r}", file=sys.stderr)

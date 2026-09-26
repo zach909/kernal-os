@@ -24,6 +24,7 @@ from pathlib import Path
 from .auth import Authority, Grant
 from .kapp import MAX_ARCHIVE, NAME_RE, KApp, KAppError, Manifest, compute_seal
 from .paths import Paths, atomic_write
+from .scan import ScanResult, scan_bytes
 
 SEAL_KEY_LABEL = "kapp-seal"
 
@@ -34,6 +35,15 @@ def version_key(v: str) -> tuple:
 
 class TamperedError(Exception):
     pass
+
+
+class VirusFoundError(KAppError):
+    def __init__(self, name: str, result: ScanResult, quarantine_path: Path):
+        self.result = result
+        self.quarantine_path = quarantine_path
+        findings = "; ".join(f"{f.rule} ({f.path})" for f in result.findings)
+        super().__init__(f"{name}: {result.summary()} - {findings}. "
+                         f"Not installed; moved to {quarantine_path}")
 
 
 @dataclass(frozen=True)
@@ -68,10 +78,49 @@ class AppStore:
             raise KAppError(f"refusing update {old.version} -> {new.version}: not newer")
         return old.version, self._install(src, authority, update=True)
 
+    def update_all(self, src_dir: Path, authority: Authority) -> list[tuple[str, str, object]]:
+        """`kos update all --from DIR`: check every .kapp in DIR against
+        every installed app and update whichever are both newer and clean.
+        Returns one (name, outcome, detail) row per candidate found, so the
+        caller can report skips and scan hits, not just successes."""
+        installed = {a.name: a for a in self.installed()}
+        results: list[tuple[str, str, object]] = []
+        for candidate in sorted(Path(src_dir).glob("*.kapp")):
+            try:
+                m = KApp.from_file(candidate).manifest
+            except KAppError as e:
+                results.append((candidate.name, "invalid", str(e)))
+                continue
+            old = installed.get(m.name)
+            if old is None:
+                results.append((m.name, "not-installed", None))
+                continue
+            if version_key(m.version) <= version_key(old.version):
+                results.append((m.name, "already-current", old.version))
+                continue
+            try:
+                self._install(candidate, authority, update=True)
+                results.append((m.name, "updated", f"{old.version} -> {m.version}"))
+            except VirusFoundError as e:
+                results.append((m.name, "flagged", e.result.summary()))
+        return results
+
     def _install(self, src: Path, authority: Authority, update: bool) -> Manifest:
         # Validate first so we never ask for a password for garbage.
         app = KApp.from_file(src)
         m = app.manifest
+        # Every install/update goes through the security scanner before anything
+        # else happens - including before the password prompt, so a flagged
+        # file never even gets that far.
+        result = scan_bytes(app.data, label=m.name)
+        if not result.clean:
+            self.paths.ensure()
+            qdir = self.paths.state / "quarantine"
+            qdir.mkdir(parents=True, exist_ok=True)
+            import time
+            qpath = qdir / f"{m.name}-{int(time.time())}.kapp"
+            atomic_write(qpath, app.data)
+            raise VirusFoundError(m.name, result, qpath)
         with authority.authorize("app.update" if update else "app.install", m.name) as grant:
             seal = compute_seal(grant.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
         self.paths.ensure()

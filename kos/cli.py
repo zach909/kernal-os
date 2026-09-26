@@ -20,6 +20,12 @@
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
     kos activity                    one feed: open apps + recent password decisions
+    kos permit NAME                 give an app permission to run (password still needed every run)
+    kos permit --revoke NAME        take that away
+    kos scan file PATH              scan a file or zip right now (no password needed)
+    kos scan watch DIR...           scan every file written here until Ctrl-C (password to start)
+    kos update all --from DIR       update every installed app that's newer in DIR, scanned first
+    kos optimize                    recompress apps, prune dead state, reclaim disk space
     kos cell start NAME --kernel K --initrd I [--cpus 2,3] [--memory 256]
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
@@ -40,10 +46,11 @@ from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, Passwor
 from .cells import CellError
 from .kapp import KAppError, pack
 from .paths import Paths
+from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
-from .store import SEAL_KEY_LABEL, AppStore, TamperedError
+from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
 from .vfs import VFSError
 
 
@@ -113,6 +120,17 @@ def cmd_install(args, paths: Paths) -> int:
 
 def cmd_update(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
+    if args.file == "all":
+        if not args.from_dir:
+            raise KAppError("usage: kos update all --from DIR")
+        authority.authorize("app.update.all").close()
+        rows = AppStore(paths).update_all(Path(args.from_dir), authority)
+        if not rows:
+            print("nothing to update")
+        for name, outcome, detail in rows:
+            print(f"{name:20} {outcome:15} {detail if detail is not None else ''}")
+        flagged = [r for r in rows if r[1] == "flagged"]
+        return 3 if flagged else 0
     old, m = AppStore(paths).update(Path(args.file), authority)
     print(f"updated {m.name} {old} -> {m.version} (re-sealed)")
     return 0
@@ -172,8 +190,11 @@ def _authorize_app_action(name: str, app, mode: str, authority: Authority, promp
 
 
 def cmd_run(args, paths: Paths) -> int:
+    from . import cache
+    from .permit import PermitStore
     from .protocol import Channel
     mode, name = _parse_run_target(args.target)
+    PermitStore(paths).require(name)  # refused before we even ask for the password
     authority, prompter = _authority(paths)
     store = AppStore(paths)
     action = "app.graphical" if mode == "graphical" else "app.run"
@@ -183,6 +204,7 @@ def cmd_run(args, paths: Paths) -> int:
         SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
     paths.ensure()
     log_path = paths.logs / f"{name}.log"
+    cache_dir = None
     if args.cell:
         from .cells import CellManager, connect_cell, send_app
         rec = CellManager(paths).get(args.cell)
@@ -190,11 +212,17 @@ def cmd_run(args, paths: Paths) -> int:
         send_app(sock, app, mode)
         proc = None
     else:
+        cache_dir = cache.alloc(paths, name)
+        policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
         sock, child = socket.socketpair()
-        proc = loader.launch(loader.plan(app, child.fileno(), mode), policy, log_path)
+        proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir), policy, log_path)
         child.close()
     prompter.close()
-    code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"))
+    try:
+        code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"))
+    finally:
+        if cache_dir is not None:
+            cache.wipe(cache_dir)
     print(f"{name} exited ({code})")
     return code
 
@@ -202,10 +230,13 @@ def cmd_run(args, paths: Paths) -> int:
 def cmd_open(args, paths: Paths) -> int:
     """Launch an app in the background. Returns your shell immediately;
     `kos ps` lists it, `kos attach ID` connects your terminal to it."""
+    from . import cache
     from .broker import spawn
+    from .permit import PermitStore
     from .registry import Instance, Registry
 
     mode, name = args.mode or "tui", args.name
+    PermitStore(paths).require(name)  # refused before we even ask for the password
     authority, prompter = _authority(paths)
     store = AppStore(paths)
     action = "app.graphical" if mode == "graphical" else "app.open"
@@ -215,13 +246,15 @@ def cmd_open(args, paths: Paths) -> int:
     prompter.close()
 
     paths.ensure()
+    cache_dir = cache.alloc(paths, name)
+    policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
     registry = Registry(paths)
     registry.prune()
     inst_id = registry.new_id(name)
     inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
                     sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
                     log_path=str(paths.logs / f"{inst_id}.log"), started=__import__("time").time())
-    spawn(inst, app, mode, policy, registry, Path(inst.log_path))
+    spawn(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     print(f"opened {name} [{mode}] as {inst_id}")
     print(f"  kos attach {inst_id}   (or: kos boot desktop)")
     return 0
@@ -453,6 +486,81 @@ def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) ->
             surface.close()
 
 
+def cmd_permit(args, paths: Paths) -> int:
+    """A permit is separate from the password: it's your standing decision
+    that an app may run at all. It never skips the password - `run`/`open`
+    still ask for it every single time, same as everything else."""
+    from .permit import PermitStore
+    store = PermitStore(paths)
+    if args.list:
+        permits = store.list()
+        if not permits:
+            print("no apps permitted to run")
+        for p in permits:
+            import time as _t
+            print(f"{p.name:20} granted {_t.strftime('%Y-%m-%d %H:%M:%S', _t.localtime(p.granted_at))}")
+        return 0
+    if not args.name:
+        raise KAppError("usage: kos permit NAME | kos permit --revoke NAME | kos permit --list")
+    authority, _ = _authority(paths)
+    action = "app.revoke" if args.revoke else "app.permit"
+    with authority.authorize(action, args.name):
+        if args.revoke:
+            PermitStore(paths).revoke(args.name)
+            print(f"revoked: {args.name} may no longer run")
+        else:
+            PermitStore(paths).grant(args.name)
+            print(f"permitted: {args.name} may now run (still asks for your password every time)")
+    return 0
+
+
+def cmd_scan(args, paths: Paths) -> int:
+    """`kos scan file PATH` checks one file or zip right now, no password
+    needed (it's read-only, like `kos list`). `kos scan watch DIR...` is
+    different: starting it needs the password, the same as starting a
+    kernel cell, because from that point on it keeps running and acting -
+    scanning every file written under those directories - until you stop
+    it."""
+    from .scan import scan_file
+
+    if args.scan_cmd == "watch":
+        from .watch import ScanHit, run_watch
+        for d in args.dirs:
+            if not os.path.isdir(d):
+                raise KAppError(f"not a directory: {d}")
+        authority, prompter = _authority(paths)
+        authority.authorize("scan.watch", ", ".join(args.dirs)).close()
+        prompter.close()
+        print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
+              "Ctrl-C to stop.")
+
+        def on_hit(hit: "ScanHit") -> None:
+            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
+
+        def on_scan(path: str) -> None:
+            print(f"scanned: {path}")
+
+        try:
+            run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
+        except KeyboardInterrupt:
+            print("\nstopped")
+        return 0
+
+    result = scan_file(Path(args.path))
+    print(f"{args.path}: {result.summary()}")
+    for f in result.findings:
+        print(f"  [{f.severity}] {f.rule} in {f.path}: {f.note}")
+    return 0 if result.clean else 3
+
+
+def cmd_optimize(args, paths: Paths) -> int:
+    from .optimize import optimize
+    authority, _ = _authority(paths)
+    report = optimize(paths, authority)
+    print(report.summary())
+    return 0
+
+
 def cmd_cell(args, paths: Paths) -> int:
     from .cells import CellManager, CellSpec
     mgr = CellManager(paths)
@@ -508,8 +616,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", required=True)
     s = sub.add_parser("install", help="install a .kapp")
     s.add_argument("file")
-    s = sub.add_parser("update", help="update an installed app to a newer .kapp")
-    s.add_argument("file")
+    s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
+    s.add_argument("file", help="a .kapp path, or the literal word 'all'")
+    s.add_argument("--from", dest="from_dir", help="directory to check for updates (with 'all')")
     s = sub.add_parser("view", help="view a file (asks for the password)")
     s.add_argument("file")
     s = sub.add_parser("remove", help="remove an app")
@@ -536,6 +645,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("start", nargs="?", default=".")
     s = sub.add_parser("activity", help="one feed: open apps + recent password decisions")
     s.add_argument("-n", type=int, default=30)
+    s = sub.add_parser("permit", help="give (or revoke) an app permission to run at all")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--revoke", action="store_true", help="take away permission instead of granting it")
+    s.add_argument("--list", action="store_true", help="list every app with permission to run")
+    s = sub.add_parser("scan", help="scan a file/zip for known-bad patterns, or watch a directory")
+    ss = s.add_subparsers(dest="scan_cmd", required=True)
+    sf = ss.add_parser("file", help="scan one file or zip right now (no password needed)")
+    sf.add_argument("path")
+    sw = ss.add_parser("watch", help="scan every file written under these directories until Ctrl-C")
+    sw.add_argument("dirs", nargs="+")
+    s = sub.add_parser("optimize", help="reclaim disk space: recompress apps, prune dead state")
     s = sub.add_parser("cell", help="manage parallel kernel cells")
     cs = s.add_subparsers(dest="cell_cmd", required=True)
     c = cs.add_parser("start")
@@ -558,6 +678,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
+            "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
 
 
@@ -566,10 +687,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = Paths.from_env()
     try:
         return COMMANDS[args.cmd](args, paths)
-    except TamperedError as e:
+    except (TamperedError, VirusFoundError) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
-    except (AuthorizationDenied, AuthError) as e:
+    except (AuthorizationDenied, AuthError, PermitError) as e:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:

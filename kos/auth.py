@@ -55,6 +55,11 @@ ACTIONS: dict[str, str] = {
     "device.desktop": "boot desktop",
     "app.open": "open app",
     "app.close": "close app",
+    "app.permit": "give app permission to run",
+    "app.revoke": "revoke app's permission to run",
+    "app.update.all": "update all apps",
+    "scan.watch": "start virus scan watcher",
+    "disk.optimize": "optimize disk space",
     "cell.start": "start kernel cell",
     "cell.stop": "stop kernel cell",
 }

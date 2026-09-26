@@ -97,6 +97,12 @@ class App:
         except OSError:
             pass
 
+    def cache_dir(self) -> Optional[str]:
+        """This run's private scratch directory, or None if this launch
+        didn't provide one. It is wiped the moment this app's process ends -
+        never use it for anything you need to keep."""
+        return os.environ.get("KOS_CACHE_DIR")
+
     def resource(self, name: str) -> bytes:
         """Read a file from this app's own zip (still never extracted)."""
         import zipfile
