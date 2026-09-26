@@ -34,16 +34,40 @@ kos setup                  choose your password
 kos install app.kapp       install (kept zipped, sealed)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list
-run NAME                   text page       run graphical NAME   graphical
-kos view FILE              view a file (password first)
+run [graphical|cmd] NAME   run in the foreground: text page, graphical, or raw command stream
+kos open [graphical|cmd] NAME   open in the background, return immediately
+kos ps                     apps opened with 'kos open'
+kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
+kos close ID                actually stop one
+kos boot desktop            choose among open apps - no desktop otherwise
+kos ls PATH / kos cat PATH  browse/view real dirs and zips, never extracted
+kos explore [PATH]          interactively cd/ls/cat, straight into zip files
+kos activity                one feed: what's open + recent password decisions
+kos view FILE               view a file (password first)
 kos cell start NAME --kernel K --initrd I --cpus 2,3
-kos doctor                 which kernel protections this machine has
-kos audit                  every password decision
+kos doctor                  which kernel protections this machine has
+kos audit                   every password decision
 ```
 
-Included apps: `examples/hello` (text + graphical demo) and `examples/web` —
-a no-graphics browser: type a URL, the page appears as a folder of links you
-click through, type `run` to view the page text.
+Three ways to run an app: `run NAME` (a text page), `run graphical NAME`
+(pixels), `run cmd NAME` (no drawing at all - the raw stream of commands the
+OS is sending the app and the app is sending back, for scripting or for
+seeing exactly what crosses the wire).
+
+Several apps can be open at once: `kos open` launches one in the background
+and hands your shell straight back. `kos ps` lists what's open, `kos attach
+ID` connects your terminal/mouse/keyboard to one of them (each device still
+needs booting with the password for that terminal), and Ctrl-C detaches
+without killing it - only `kos close` does that. There's no multi-app
+desktop view unless you ask for one with `kos boot desktop`.
+
+`kos ls`/`kos cat`/`kos explore` treat real directories and zip files
+(including `.kapp` apps) as one continuous tree - `cd`-ing into a zip is
+just another `cd`, and nothing is ever extracted to disk to look at it.
+
+Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
+`examples/web` — a no-graphics browser: type a URL, the page appears as a
+folder of links you click through, type `run` to view the page text.
 
 ## Try it on any Linux machine
 
@@ -66,11 +90,14 @@ python3 -m unittest discover -s tests -v
 * **Tested here:** password/grants/audit, app sealing and tamper detection,
   running from the zip in RAM, the sandbox (verified: app can't read
   `/etc/passwd`, write files, use the network or signal PID 1), the command
-  protocol, device booting flow, rendering, update/downgrade, the cell agent.
+  protocol, device booting flow, rendering, update/downgrade, the cell agent,
+  the `open`/`ps`/`attach`/`close` background lifecycle (including a real
+  fork+daemonize broker, over a real pty), `cmd` mode, and zip `cd`/browsing.
 * **Written but not yet booted:** the initramfs, kos-init as real PID 1, the
   image builder, framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).
 * The userland is Python (stdlib only) to move fast. Python can't fully wipe
   secrets from memory; the security core should be ported to Rust.
 
-See `docs/ARCHITECTURE.md` for the threat model.
+See `docs/ARCHITECTURE.md` for the threat model and `docs/IDEAS.md` for the
+running backlog of what's next.

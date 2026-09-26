@@ -86,6 +86,8 @@ def validate_app_message(msg: Any, mode: str) -> dict:
     if not isinstance(msg, dict) or not isinstance(msg.get("cmd"), str):
         raise ProtocolError("message must be an object with a 'cmd'")
     cmd = msg["cmd"]
+    if mode == "cmd" and cmd in ("screen", "frame"):
+        raise ProtocolError("cmd mode has no drawing surface; use log")
     if cmd == "screen" and mode == "tui":
         lines = msg.get("lines", [])
         if not isinstance(lines, list) or len(lines) > MAX_LINES:

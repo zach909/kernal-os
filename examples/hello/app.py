@@ -25,7 +25,9 @@ def main():
         if cmd != "pointer":
             history = (history + [f"{cmd}: {ev}"])[-8:]
 
-        if app.mode == "tui":
+        if app.mode == "cmd":
+            app.log(f"clicks={clicks} typed={typed!r}")
+        elif app.mode == "tui":
             app.screen("Hello", [
                 "",
                 "  Welcome to KOS. This page is text, drawn by the OS from my commands.",

@@ -109,7 +109,7 @@ class AppStore:
         The seal is checked *before* the archive is parsed, so a tampered zip
         never reaches the zip parser.
         """
-        if grant.action not in ("app.run", "app.graphical") or grant.target != name:
+        if grant.action not in ("app.run", "app.graphical", "app.open") or grant.target != name:
             raise TamperedError("grant does not cover running this app")
         kapp_path, seal_path = self._files(name)
         try:

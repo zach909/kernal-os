@@ -42,3 +42,10 @@ hypervisor) as a bare-metal backend.
   broker over SO_PEERCRED.
 * No seccomp filter yet; Landlock + namespaces only.
 * Updates are checked for version order but not for publisher signature yet.
+* Background apps (`kos open`): the broker's Unix socket path is under
+  `<state>/instances/`, which must fit in `sizeof(sockaddr_un.sun_path)`
+  (108 bytes on Linux) - fine under the real `/var/lib/kos` root, but a very
+  deeply nested `KOS_ROOT` in development can exceed it.
+* While nobody is `attach`ed to a `kos open`ed app, its output is read and
+  dropped by the broker rather than buffered, so a burst of output with no
+  one attached is lost rather than replayed on the next attach.

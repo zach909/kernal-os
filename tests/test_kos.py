@@ -27,6 +27,11 @@ from kos.sandbox import SandboxPolicy  # noqa: E402
 from kos.session import Session  # noqa: E402
 from kos.store import AppStore, TamperedError  # noqa: E402
 from kos.term import KeyParser  # noqa: E402
+from kos.vfs import VFS, VFSError  # noqa: E402
+from kos.registry import Instance, Registry  # noqa: E402
+from kos.broker import spawn  # noqa: E402
+from kos.cmdsurface import CmdSurface  # noqa: E402
+from kos.protocol import validate_app_message as _vam  # noqa: E402
 
 PW = "correct horse battery"
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "hello"
@@ -228,6 +233,174 @@ class TestSandboxedRun(Env):
         argv = qemu_argv(CellSpec("web", "/k", "/i", cpus=[2, 3], cid=5), "/log")
         self.assertEqual(argv[:3], ["taskset", "-c", "2,3"])
         self.assertIn("vhost-vsock-device,guest-cid=5", argv)
+
+
+class TestVFS(Env):
+    def test_cd_into_zip_without_extracting(self):
+        vfs = VFS(self.tmp.name)
+        vfs.cd("hello.kapp")
+        names = {e.name for e in vfs.list()}
+        self.assertIn("manifest.json", names)
+        self.assertIn("app.py", names)
+        data = vfs.read_bytes("manifest.json")
+        self.assertIn(b'"hello"', data)
+        self.assertFalse(Path(self.tmp.name, "manifest.json").exists())  # never extracted
+        vfs.up()
+        self.assertEqual(vfs.pwd(), self.tmp.name)
+
+    def test_bad_moves_rejected(self):
+        vfs = VFS(self.tmp.name)
+        with self.assertRaises(VFSError):
+            vfs.cd("does-not-exist")
+        with self.assertRaises(VFSError):
+            vfs.up()  # already at the top
+
+
+class TestCmdMode(unittest.TestCase):
+    def test_screen_and_frame_rejected_in_cmd_mode(self):
+        with self.assertRaises(Exception):
+            _vam({"cmd": "screen", "title": "x", "lines": []}, "cmd")
+        with self.assertRaises(Exception):
+            _vam({"cmd": "frame", "ops": []}, "cmd")
+        self.assertEqual(_vam({"cmd": "log", "msg": "hi"}, "cmd"), {"cmd": "log", "msg": "hi"})
+
+    def test_cmd_surface_echoes_commands(self):
+        r, w = os.pipe()
+        surface = CmdSurface(w, 80, 24, "hello")
+        surface.emit(">", {"cmd": "key", "key": "a"})
+        surface.emit("<", {"cmd": "log", "msg": "got it"})
+        os.close(w)
+        with os.fdopen(r) as rf:
+            out = rf.read()
+        self.assertIn('> {"cmd":"key","key":"a"}', out)
+        self.assertIn('< {"cmd":"log","msg":"got it"}', out)
+
+
+def _alive_pid(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+class TestOpenAttachClose(Env):
+    """The `open`/`ps`/`attach`/`close` lifecycle, exercised in cmd mode so
+    no real terminal is needed: `open` launches the app in the background
+    under a broker, `attach` drives it, Ctrl-C detaches (app keeps running),
+    `close` actually stops it."""
+
+    def _open(self, mode="cmd"):
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        action = "app.graphical" if mode == "graphical" else "app.open"
+        with self.authority(PW).authorize(action, "hello") as grant:
+            app = store.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode=mode, broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, mode, SandboxPolicy(), registry, Path(inst.log_path))
+        return registry, inst_id
+
+    def _wait_running(self, registry, inst_id, timeout=5):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            insts = {i.id: i for i in registry.list()}
+            if inst_id in insts and insts[inst_id].status == "running":
+                return insts[inst_id]
+            time.sleep(0.05)
+        raise AssertionError("instance never reached 'running'")
+
+    def test_open_ps_attach_detach_close(self):
+        registry, inst_id = self._open("cmd")
+        inst = self._wait_running(registry, inst_id)
+        self.assertTrue(inst.app_pid)
+        self.assertEqual([i.id for i in registry.list()], [inst_id])
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(inst.sock_path)
+        from kos.devices import ScriptedDevices
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        devices = ScriptedDevices()
+        r_fd, w_fd = os.pipe()
+        cmdsurface = CmdSurface(w_fd, 80, 24, "hello")
+        s = Session(name="hello", mode="cmd", channel=Channel(sock), proc=None,
+                    surface=cmdsurface, devices=devices, authority=auth,
+                    detach_on_interrupt=True)
+        keys = lambda text: [{"type": "key", "key": c} for c in text]
+        devices.push(*keys("y"), *keys(PW), {"type": "key", "key": "enter"})   # mouse
+        devices.push(*keys("y"), *keys(PW), {"type": "key", "key": "enter"})   # keyboard
+        devices.push({"type": "button", "button": "left", "pressed": True, "x": 1, "y": 1})
+        devices.push({"type": "interrupt"})  # Ctrl-C: must DETACH, not kill the app
+        code = s.run(first_frame_timeout=0.2)
+        os.close(w_fd)
+        self.assertEqual(code, 0)
+        self.assertTrue(s.detached)
+        with os.fdopen(r_fd) as rf:
+            log = rf.read()
+        self.assertIn('"cmd":"button"', log)   # our click really reached the app
+        self.assertIn('"cmd":"log"', log)      # and the app really answered
+
+        # still running after detach
+        self.assertEqual(registry.get(inst_id).status, "running")
+        self.assertTrue(_alive_pid(registry.get(inst_id).broker_pid))
+
+        # close actually stops it
+        import signal
+        import time
+        os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
+        for _ in range(50):
+            if not (self.paths.state / "instances" / f"{inst_id}.json").exists():
+                break
+            time.sleep(0.1)
+        self.assertFalse((self.paths.state / "instances" / f"{inst_id}.json").exists())
+        self.assertFalse(os.path.exists(inst.sock_path))
+
+    def test_two_opens_are_independent(self):
+        registry, id1 = self._open("cmd")
+        registry, id2 = self._open("cmd")
+        self._wait_running(registry, id1)
+        self._wait_running(registry, id2)
+        ids = {i.id for i in registry.list()}
+        self.assertEqual(ids, {id1, id2})
+        import signal
+        import time
+        os.kill(registry.get(id1).broker_pid, signal.SIGTERM)
+        os.kill(registry.get(id2).broker_pid, signal.SIGTERM)
+        for _ in range(50):
+            if not registry.list():
+                break
+            time.sleep(0.1)
+        self.assertEqual(registry.list(), [])
+
+
+class TestActivity(Env):
+    def test_feed_merges_open_apps_and_audit(self):
+        from kos.activity import build_feed, render_feed
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        registry, inst_id = TestOpenAttachClose._open(self, "cmd")
+        self._wait_running_local(registry, inst_id)
+        items = build_feed(self.paths)
+        texts = [i.text for i in items]
+        self.assertTrue(any("hello" in t and "open" in t for t in texts))
+        self.assertTrue(any("app.install" in t for t in texts))
+        self.assertIn("hello", render_feed(items))
+        import signal
+        os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
+
+    def _wait_running_local(self, registry, inst_id, timeout=5):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            insts = {i.id: i for i in registry.list()}
+            if inst_id in insts and insts[inst_id].status == "running":
+                return
+            time.sleep(0.05)
+        raise AssertionError("instance never reached 'running'")
 
 
 if __name__ == "__main__":

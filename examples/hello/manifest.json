@@ -3,6 +3,6 @@
   "version": "1.0",
   "runtime": "python",
   "entry": "app:main",
-  "modes": ["tui", "graphical"],
+  "modes": ["tui", "graphical", "cmd"],
   "description": "Demo: a text page, or a graphical page with buttons and a drawing area"
 }

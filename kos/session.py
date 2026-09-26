@@ -53,6 +53,8 @@ class SessionPrompter:
         try:
             for ev in self._read_keys():
                 if ev["type"] == "interrupt":
+                    if self.s.detach_on_interrupt:
+                        self.s.detached = True
                     self.s.stop_requested = True
                     return False
                 if ev["type"] == "key" and ev["key"].lower() in ("y", "n", "escape", "enter"):
@@ -68,6 +70,8 @@ class SessionPrompter:
         try:
             for ev in self._read_keys():
                 if ev["type"] == "interrupt":
+                    if self.s.detach_on_interrupt:
+                        self.s.detached = True
                     self.s.stop_requested = True
                     return None
                 if ev["type"] != "key":
@@ -100,7 +104,8 @@ class SessionPrompter:
 class Session:
     def __init__(self, *, name: str, mode: str, channel: Channel,
                  proc: Optional[subprocess.Popen], surface, devices, authority: Authority,
-                 boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None):
+                 boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
+                 detach_on_interrupt: bool = False):
         self.name, self.mode = name, mode
         self.channel = channel
         self.proc = proc
@@ -115,6 +120,8 @@ class Session:
         self.exit_code: Optional[int] = None
         self.notice = ""
         self._notice_until = 0.0
+        self.detach_on_interrupt = detach_on_interrupt
+        self.detached = False
         self.pending: deque = deque()
         self.prompter = prompter or SessionPrompter(self)
         # Every password asked during the session goes through the trusted overlay.
@@ -138,6 +145,12 @@ class Session:
         self._notice_until = time.monotonic() + 3
         self.surface_dirty = True
 
+    def _send(self, cmd: dict) -> None:
+        emit = getattr(self.surface, "emit", None)
+        if emit:
+            emit(">", cmd)
+        self.channel.send(cmd)
+
     def _app_alive(self) -> bool:
         if self.channel.closed:
             return False
@@ -159,7 +172,7 @@ class Session:
             self.flash(f"{dev}: {e}")
             return
         self.booted.add(dev)
-        self.channel.send({"cmd": "device", "device": dev, "state": "attached"})
+        self._send({"cmd": "device", "device": dev, "state": "attached"})
         self._log(f"booted {dev} ({how})")
         self.flash(f"{dev} booted")
 
@@ -167,13 +180,15 @@ class Session:
     def route(self, ev: dict) -> None:
         t = ev["type"]
         if t == "interrupt":
+            if self.detach_on_interrupt:
+                self.detached = True
             self.stop_requested = True
             return
         if t == "key":
             if "keyboard" not in self.booted:
                 self.flash("keyboard not booted for this app")
                 return
-            self.channel.send({"cmd": "key", "key": ev["key"]})
+            self._send({"cmd": "key", "key": ev["key"]})
             return
         if "mouse" not in self.booted:
             return
@@ -183,18 +198,21 @@ class Session:
         if t == "pointer":
             self.surface.set_pointer(ev["x"], ev["y"])
             self.surface_dirty = True
-            self.channel.send({"cmd": "pointer", "x": x, "y": y})
+            self._send({"cmd": "pointer", "x": x, "y": y})
         elif t == "button":
             self.surface.set_pointer(ev["x"], ev["y"])
             self.surface_dirty = True
-            self.channel.send({"cmd": "button", "button": ev["button"],
-                               "pressed": ev["pressed"], "x": x, "y": y})
+            self._send({"cmd": "button", "button": ev["button"],
+                        "pressed": ev["pressed"], "x": x, "y": y})
         elif t == "scroll":
-            self.channel.send({"cmd": "scroll", "dy": ev["dy"], "x": x, "y": y})
+            self._send({"cmd": "scroll", "dy": ev["dy"], "x": x, "y": y})
 
     def handle_app(self) -> None:
         for raw in self.channel.receive():
             msg = validate_app_message(raw, self.mode)
+            emit = getattr(self.surface, "emit", None)
+            if emit:
+                emit("<", msg)
             if msg["cmd"] in ("screen", "frame"):
                 self.surface.present(msg)
                 self.surface_dirty = True
@@ -223,7 +241,7 @@ class Session:
     # --- main loop ---------------------------------------------------------
     def run(self, first_frame_timeout: float = 1.5) -> int:
         w, h = self.surface.hello_size()
-        self.channel.send({"cmd": "hello", "mode": self.mode, "width": w, "height": h})
+        self._send({"cmd": "hello", "mode": self.mode, "width": w, "height": h})
         started = time.monotonic()
         try:
             while not self.stop_requested and self._app_alive():
@@ -235,7 +253,12 @@ class Session:
                     self.boot_next_device()
                     continue
                 self.pull_input(0.25, include_app=True)
-                if any(e["type"] == "interrupt" for e in self.pending):
+                # An interrupt that arrives before boot prompts have even started
+                # must still stop us; once boot_queue is empty the drain below finds
+                # it in order via route(), so this only needs to fire here.
+                if self.boot_queue and any(e["type"] == "interrupt" for e in self.pending):
+                    if self.detach_on_interrupt:
+                        self.detached = True
                     self.stop_requested = True
                 # While boot prompts are still due, keep input for the trusted prompt.
                 while self.pending and not self.boot_queue and not self.stop_requested:
@@ -256,7 +279,8 @@ class Session:
         return self.exit_code or 0
 
     def shutdown(self) -> None:
-        self.channel.send({"cmd": "quit"})
+        if not self.detached:
+            self._send({"cmd": "quit"})
         if self.proc is not None:
             try:
                 self.proc.wait(timeout=1.0)

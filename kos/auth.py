@@ -52,6 +52,9 @@ ACTIONS: dict[str, str] = {
     "app.network": "give app network access",
     "device.mouse": "boot mouse",
     "device.keyboard": "boot keyboard",
+    "device.desktop": "boot desktop",
+    "app.open": "open app",
+    "app.close": "close app",
     "cell.start": "start kernel cell",
     "cell.stop": "stop kernel cell",
 }
