@@ -14,12 +14,17 @@ Uses inotify directly (ctypes; Python's stdlib has no binding for it).
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import secrets
+import signal
 import struct
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from .paths import Paths, atomic_write
 from .scan import ScanResult, scan_file
 
 _libc = ctypes.CDLL(None, use_errno=True)
@@ -125,3 +130,135 @@ def run_watch(paths: list[str], on_hit: Callable[[ScanHit], None],
                     on_hit(ScanHit(path, result))
     finally:
         w.close()
+
+
+def quarantine_hit(paths: Paths, hit: ScanHit) -> str:
+    """Move a flagged file out of harm's way. Shared by the foreground and
+    background forms of `kos scan watch` so both quarantine the same way."""
+    qdir = paths.state / "quarantine"
+    qdir.mkdir(parents=True, exist_ok=True)
+    qpath = qdir / f"{Path(hit.path).name}-{int(time.time())}"
+    os.replace(hit.path, qpath)
+    return str(qpath)
+
+
+# --- background watch jobs: same fork+daemonize+registry pattern as `kos open` ---
+
+@dataclass
+class WatchJob:
+    id: str
+    dirs: list[str]
+    protected_dirs: list[str] = field(default_factory=list)
+    pid: int = 0
+    log_path: str = ""
+    started: float = 0.0
+    status: str = "starting"  # starting -> running -> exited
+
+
+def _alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+class WatchRegistry:
+    def __init__(self, paths: Paths):
+        self.dir = paths.state / "watchjobs"
+
+    def new_id(self) -> str:
+        return f"watch-{secrets.token_hex(3)}"
+
+    def _file(self, job_id: str) -> Path:
+        if "/" in job_id or job_id in ("", ".", ".."):
+            raise WatchError(f"invalid watch job id {job_id!r}")
+        return self.dir / f"{job_id}.json"
+
+    def write(self, job: WatchJob) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.dir, 0o700)
+        atomic_write(self._file(job.id), json.dumps(asdict(job), indent=2).encode())
+
+    def get(self, job_id: str) -> WatchJob:
+        try:
+            return WatchJob(**json.loads(self._file(job_id).read_text()))
+        except FileNotFoundError:
+            raise WatchError(f"no such watch job {job_id!r}") from None
+
+    def remove(self, job_id: str) -> None:
+        try:
+            self._file(job_id).unlink()
+        except FileNotFoundError:
+            pass
+
+    def list(self) -> list[WatchJob]:
+        if not self.dir.exists():
+            return []
+        out = []
+        for f in sorted(self.dir.glob("*.json")):
+            try:
+                job = WatchJob(**json.loads(f.read_text()))
+            except (ValueError, TypeError, KeyError):
+                continue
+            if job.status != "exited" and not _alive(job.pid):
+                job.status = "exited"
+            out.append(job)
+        return out
+
+
+def spawn_background(dirs: list[str], protected_dirs: list[str], paths: Paths,
+                     log_path: Path) -> WatchJob:
+    """Fork a background watch job. The parent returns immediately with the
+    job record (your shell comes back); the child becomes the detached
+    watcher, unlocking any protected directories for as long as it runs and
+    relocking them - via the same `finally` a foreground watch uses - the
+    instant it stops, by any path (`kos scan stop`, crash, anything)."""
+    from .broker import daemonize
+    from .protect import held_unlock
+
+    registry = WatchRegistry(paths)
+    job_id = registry.new_id()
+    pid = os.fork()
+    if pid:  # parent
+        job = WatchJob(id=job_id, dirs=dirs, protected_dirs=protected_dirs, pid=pid,
+                       log_path=str(log_path), started=time.time(), status="running")
+        registry.write(job)
+        return job
+    # child: becomes the watcher
+    try:
+        daemonize(log_path)
+        stop = {"flag": False}
+
+        def handle_sigterm(signum, frame):
+            stop["flag"] = True
+
+        signal.signal(signal.SIGTERM, handle_sigterm)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # only `kos scan stop` stops this
+
+        def on_hit(hit: ScanHit) -> None:
+            try:
+                where = quarantine_hit(paths, hit)
+                print(f"FLAGGED {hit.path}: {hit.result.summary()} - quarantined to {where}")
+            except OSError as e:
+                print(f"FLAGGED {hit.path}: {hit.result.summary()} - "
+                     f"could NOT quarantine ({e})")
+
+        contexts = [held_unlock(d, d in protected_dirs) for d in dirs]
+        try:
+            for ctx in contexts:
+                ctx.__enter__()
+            run_watch(dirs, on_hit, lambda: stop["flag"])
+        finally:
+            for ctx in reversed(contexts):
+                ctx.__exit__(None, None, None)
+            registry.remove(job_id)
+    except BaseException as e:  # pragma: no cover - last-resort crash path
+        print(f"kos-watch: {e!r}")
+        registry.remove(job_id)
+        os._exit(1)
+    os._exit(0)

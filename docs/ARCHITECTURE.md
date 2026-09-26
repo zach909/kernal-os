@@ -120,9 +120,15 @@ hypervisor) as a bare-metal backend.
 * While nobody is `attach`ed to a `kos open`ed app, its output is read and
   dropped by the broker rather than buffered, so a burst of output with no
   one attached is lost rather than replayed on the next attach.
-* `kos scan watch` runs in the foreground of the terminal that started it
-  (there is no `kos open`-style background form of it yet); it stops with
-  Ctrl-C or when that terminal closes.
+* `kos scan watch --background` (and `kos open`'s broker before it) forks
+  and detaches; when the process later exits (via SIGTERM from `kos scan
+  stop`/`kos close`, or on its own), the OS is responsible for reaping the
+  resulting zombie. The real `kos-init` PID 1 does this in a loop by
+  design. A general-purpose container used only for developing KOS (not
+  running it) may not, so a stopped background job can briefly show as a
+  zombie in `ps` there - harmless, and unrelated to whether the KOS-visible
+  state (the registry entry, the relock, the quarantine) updated correctly,
+  which it does within one watch poll interval regardless.
 * The scanner's rule set is hand-written and small; it will not catch
   everything a real signature-feed-backed antivirus would, and it is
   regex-based, so a determined obfuscator can evade it. It is a real first

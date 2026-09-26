@@ -2,12 +2,21 @@
 background, and the only thing that ever touches its command channel.
 
 One broker per opened app. It owns the OS-side end of the app's socketpair
-(the same channel a foreground ``run`` would use directly) and listens on a
-Unix socket for a terminal to ``attach``. At most one attach connection is
-served at a time - a second attach simply replaces the first, which is how
-you move an app from one terminal to another. While nobody is attached the
-app keeps running; the broker just has nowhere to forward its output, so
-that output is dropped rather than blocking the app for long.
+(the same channel a foreground ``run`` would use directly) and listens on
+two Unix sockets:
+
+* the **attach** socket - one live, held-open connection at a time, for a
+  real terminal (``kos attach``). A second attach simply replaces the
+  first, which is how you move an app from one terminal to another.
+* the **control** socket (``control_sock_path``) - a separate door for
+  ``kos control``: each connection is read until it closes and forwarded
+  straight to the app, then discarded. It never touches ``self.attached``,
+  so sending a control command no longer bumps a real attached terminal off
+  the way it would if both shared one slot.
+
+While nobody is attached the app keeps running; the broker just has nowhere
+to forward its output, so that output is dropped rather than blocking the
+app for long.
 
 ``kos close`` stops a broker with SIGTERM: it asks the app to exit over the
 protocol, gives it a moment, then kills its whole process group.
@@ -33,6 +42,10 @@ from .sandbox import SandboxPolicy
 MAX_APP_READ = 1 << 16
 
 
+def control_sock_path(sock_path: str) -> str:
+    return sock_path + ".control"
+
+
 def daemonize(log_path: Path) -> None:
     """Detach the current (already-forked) process from the controlling
     terminal so a closed shell can't send it SIGHUP."""
@@ -56,16 +69,23 @@ class Broker:
         self.app_channel = app_channel
         self.app_proc = app_proc
         self.cache_dir = cache_dir
-        self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.listener = self._bind(inst.sock_path)
+        self.control_listener = self._bind(control_sock_path(inst.sock_path))
+        self.attached: Optional[socket.socket] = None
+        self._control_pending: dict[socket.socket, bytearray] = {}
+        self._stop = False
+
+    @staticmethod
+    def _bind(path: str) -> socket.socket:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            os.unlink(inst.sock_path)
+            os.unlink(path)
         except FileNotFoundError:
             pass
-        self.listener.bind(inst.sock_path)
-        os.chmod(inst.sock_path, 0o600)
-        self.listener.listen(1)
-        self.attached: Optional[socket.socket] = None
-        self._stop = False
+        s.bind(path)
+        os.chmod(path, 0o600)
+        s.listen(4)
+        return s
 
     def _handle_sigterm(self, signum, frame) -> None:
         self._stop = True
@@ -109,6 +129,32 @@ class Broker:
                 pass
         self.attached = conn
 
+    def _accept_control(self) -> None:
+        conn, _ = self.control_listener.accept()
+        self._control_pending[conn] = bytearray()
+
+    def _pump_control(self, conn: socket.socket) -> None:
+        """A control connection is read-until-close and forwarded whole -
+        it never becomes `self.attached`, so it can never bump a real
+        attach off its slot."""
+        try:
+            data = conn.recv(65536)
+        except OSError:
+            data = b""
+        if not data:
+            buf = self._control_pending.pop(conn, b"")
+            if buf:
+                try:
+                    self.app_channel.sendall(bytes(buf))
+                except OSError:
+                    pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        self._control_pending[conn] += data
+
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, signal.SIG_IGN)  # only `kos close` stops a broker
@@ -120,19 +166,25 @@ class Broker:
             while not self._stop:
                 if self.app_proc.poll() is not None:
                     break
-                fds = [self.listener, self.app_channel] + ([self.attached] if self.attached else [])
+                fds = ([self.listener, self.control_listener, self.app_channel]
+                      + ([self.attached] if self.attached else [])
+                      + list(self._control_pending))
                 try:
                     r, _, _ = select.select(fds, [], [], 1.0)
                 except InterruptedError:
                     continue
                 if self.listener in r:
                     self._accept()
+                if self.control_listener in r:
+                    self._accept_control()
                 if self.app_channel in r:
                     if not self._pump_app():
                         app_alive = False
                         break
                 if self.attached is not None and self.attached in r:
                     self._pump_attach()
+                for conn in [c for c in self._control_pending if c in r]:
+                    self._pump_control(conn)
         finally:
             self._shutdown(app_alive)
 
@@ -154,16 +206,19 @@ class Broker:
                     pass
         else:
             self.app_proc.wait()
-        for s in (self.attached, self.app_channel, self.listener):
+        for s in [self.attached, self.app_channel, self.listener,
+                 self.control_listener, *self._control_pending]:
             if s is not None:
                 try:
                     s.close()
                 except OSError:
                     pass
-        try:
-            os.unlink(self.inst.sock_path)
-        except FileNotFoundError:
-            pass
+        self._control_pending.clear()
+        for path in (self.inst.sock_path, control_sock_path(self.inst.sock_path)):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
         if self.cache_dir is not None:
             cache.wipe(self.cache_dir)
         self.registry.remove(self.inst.id)

@@ -55,6 +55,7 @@ from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
+from .watch import WatchError
 from .vfs import VFSError
 
 
@@ -572,8 +573,38 @@ def cmd_scan(args, paths: Paths) -> int:
             print(r.path)
         return 0
 
+    if args.scan_cmd == "jobs":
+        from .watch import WatchRegistry
+        jobs = WatchRegistry(paths).list()
+        if not jobs:
+            print("no background scan watches running")
+        for j in jobs:
+            print(f"{j.id:16} {j.status:9} pid={j.pid or '-':<7} {', '.join(j.dirs)}")
+        return 0
+
+    if args.scan_cmd == "stop":
+        import signal
+        import time as _time
+        from .watch import WatchRegistry
+        registry = WatchRegistry(paths)
+        job = registry.get(args.job_id)
+        authority, _ = _authority(paths)
+        with authority.authorize("scan.watch", job.id):
+            if job.status == "running":
+                try:
+                    os.kill(job.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                for _ in range(20):
+                    if not os.path.exists(str(paths.state / "watchjobs" / f"{job.id}.json")):
+                        break
+                    _time.sleep(0.1)
+            registry.remove(job.id)
+        print(f"stopped {job.id}")
+        return 0
+
     if args.scan_cmd == "watch":
-        from .watch import ScanHit, run_watch
+        from .watch import ScanHit, quarantine_hit, run_watch, spawn_background
         for d in args.dirs:
             if not os.path.isdir(d):
                 raise KAppError(f"not a directory: {d}")
@@ -582,29 +613,34 @@ def cmd_scan(args, paths: Paths) -> int:
         prompter.close()
         store = ProtectStore(paths)
         real_dirs = [os.path.realpath(d) for d in args.dirs]
-        protected_flags = [store.is_protected(d) for d in real_dirs]
-        for d, was_protected in zip(real_dirs, protected_flags):
-            if was_protected:
-                print(f"unlocked (protected): {d}")
+        protected_dirs = [d for d in real_dirs if store.is_protected(d)]
+
+        if args.background:
+            paths.ensure()
+            log_path = paths.logs / f"scan-{Path(real_dirs[0]).name}-{os.getpid()}.log"
+            job = spawn_background(real_dirs, protected_dirs, paths, log_path)
+            print(f"watching in the background as {job.id} - {', '.join(real_dirs)}")
+            print(f"  kos scan jobs   |   kos scan stop {job.id}")
+            return 0
+
+        for d in protected_dirs:
+            print(f"unlocked (protected): {d}")
         print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
               "Ctrl-C to stop; a protected directory relocks the instant this stops.")
 
         def on_hit(hit: "ScanHit") -> None:
-            qdir = paths.state / "quarantine"
-            qdir.mkdir(parents=True, exist_ok=True)
-            import time as _t
-            qpath = qdir / f"{Path(hit.path).name}-{int(_t.time())}"
             try:
-                os.replace(hit.path, qpath)
-                where = f"quarantined to {qpath}"
+                where = quarantine_hit(paths, hit)
+                print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()} - "
+                     f"quarantined to {where}")
             except OSError as e:
-                where = f"could NOT be quarantined ({e}) - still on disk at {hit.path}"
-            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()} - {where}")
+                print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()} - "
+                     f"could NOT be quarantined ({e}) - still on disk")
 
         def on_scan(path: str) -> None:
             print(f"scanned: {path}")
 
-        contexts = [held_unlock(d, p) for d, p in zip(real_dirs, protected_flags)]
+        contexts = [held_unlock(d, d in protected_dirs) for d in real_dirs]
         try:
             for ctx in contexts:
                 ctx.__enter__()
@@ -615,9 +651,8 @@ def cmd_scan(args, paths: Paths) -> int:
         finally:
             for ctx in reversed(contexts):
                 ctx.__exit__(None, None, None)
-            for d, was_protected in zip(real_dirs, protected_flags):
-                if was_protected:
-                    print(f"relocked (protected): {d}")
+            for d in protected_dirs:
+                print(f"relocked (protected): {d}")
         return 0
 
     result = scan_file(Path(args.path))
@@ -773,13 +808,18 @@ def build_parser() -> argparse.ArgumentParser:
     ss = s.add_subparsers(dest="scan_cmd", required=True)
     sf = ss.add_parser("file", help="scan one file or zip right now (no password needed)")
     sf.add_argument("path")
-    sw = ss.add_parser("watch", help="scan every file written under these directories until Ctrl-C")
+    sw = ss.add_parser("watch", help="scan every file written under these directories until stopped")
     sw.add_argument("dirs", nargs="+")
+    sw.add_argument("--background", action="store_true",
+                    help="run in the background (like 'kos open'); see 'kos scan jobs'/'stop'")
     sp = ss.add_parser("protect", help="lock a directory: no writes until a watch covers it")
     sp.add_argument("dir")
     su_ = ss.add_parser("unprotect", help="unlock a directory permanently")
     su_.add_argument("dir")
     ss.add_parser("protected", help="list locked directories (no password needed)")
+    ss.add_parser("jobs", help="list background scan watches (no password needed)")
+    sst = ss.add_parser("stop", help="stop a background scan watch")
+    sst.add_argument("job_id")
     s = sub.add_parser("optimize", help="reclaim disk space: recompress apps, prune dead state")
     s = sub.add_parser("mv", help="move/rename a file: separate passwords for move, optimize, scan")
     s.add_argument("src")
@@ -821,7 +861,8 @@ def main(argv: list[str] | None = None) -> int:
     except (AuthorizationDenied, AuthError, PermitError, ProtectError) as e:
         eprint(f"denied: {e}")
         return 2
-    except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:
+    except (KAppError, SandboxError, CellError, RegistryError, VFSError, WatchError, NoTTY,
+           OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

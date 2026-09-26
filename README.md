@@ -51,6 +51,8 @@ kos view FILE               view a file (password first)
 kos permit NAME             give an app permission to run (password still needed every run)
 kos scan file PATH          scan a file/zip right now (no password needed)
 kos scan watch DIR...       scan every file written here until Ctrl-C (password to start)
+kos scan watch DIR... --background   same, but backgrounded like 'kos open'
+kos scan jobs / kos scan stop ID     list / stop a background watch
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
 kos optimize                 recompress apps, prune dead state, reclaim disk space
 kos mv SRC DST                one password each for move, optimize, and scan - decline any, it stops there

@@ -45,11 +45,6 @@ land instead of getting lost in chat.
   antivirus. A pluggable, updatable signature source (still scanned
   through the same recursion, still gated the same way) would be the
   natural next step if this needs to catch more than the heuristics do.
-- **`kos scan watch` as a background instance.** Right now it only runs in
-  the foreground of the terminal that started it. Giving it the same
-  `kos open`/broker treatment as apps - start it, walk away, `kos ps`
-  shows it, `kos close` stops it - would match how everything else
-  long-running in KOS already works.
 - **Rust port of the security core.** Already written down in
   `ARCHITECTURE.md` as a known gap: Python can't guarantee a password or
   derived key is wiped from every copy the interpreter makes.
@@ -64,15 +59,9 @@ land instead of getting lost in chat.
   builder are all written but have only run in a container with no VM
   support. First real target: boot the produced image in QEMU with OVMF
   and confirm the two password gates and `run hello` actually work.
-- **`kos control` and a real attach coexisting.** Right now both go through
-  the broker's one attach slot, so a control command while a terminal is
-  attached bumps that terminal off (documented in `ARCHITECTURE.md`).
-  Giving the broker a second, separate "control" connection class - distinct
-  from the one "attach" slot - would let both work at once without either
-  stealing the other's spot.
-- **`kos mv` for whole directories, and a `kos cp`/`kos write` alongside
-  it.** The three-password move/optimize/scan pipeline only takes one file
-  right now.
+- **`kos cp`/`kos write`, alongside `kos mv`.** The three-password
+  move/optimize/scan pipeline covers moving something; a copy or a
+  from-scratch write through the same pipeline doesn't exist yet.
 - **fanotify-based, mount-wide protection.** `kos scan protect` enforces
   with plain file mode, which is real but directory-scoped and only
   binding on non-root processes. A `FAN_OPEN_PERM`-based enforcer would let
@@ -82,6 +71,19 @@ land instead of getting lost in chat.
 
 ## Shipped
 
+- **`kos control`/`kos attach` no longer share one broker slot, `kos scan
+  watch --background`, `kos mv` for whole directories.** `kos control` now
+  has its own door into the broker (`Broker.control_sock_path`), so sending
+  a control command no longer bumps a live `kos attach` off its connection
+  - verified by holding an attach open, sending a control command, and
+  confirming the attach both survived and saw the reply. `kos scan watch
+  DIR --background` runs the exact same watch loop (including protected-
+  directory unlock/relock) detached, with `kos scan jobs`/`kos scan stop
+  ID` to manage it - the same fork+daemonize+registry pattern `kos open`
+  already used for apps. `kos mv` moving a whole directory tree, not just
+  one file, turned out to already work (`shutil.move` and the scan step's
+  recursive walk both already handled it) - confirmed by test rather than
+  needing new code.
 - **`kos scan protect`/`unprotect`, `kos control`, `kos mv`.** A protected
   directory is locked (mode 0500 - no write for anyone) the instant you
   protect it and stays that way except while a `kos scan watch` covering it

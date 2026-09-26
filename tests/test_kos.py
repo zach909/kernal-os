@@ -37,7 +37,7 @@ from kos.permit import PermitError, PermitStore  # noqa: E402
 from kos.optimize import optimize  # noqa: E402
 from kos import cache as kcache  # noqa: E402
 from kos.store import VirusFoundError  # noqa: E402
-from kos.watch import Watcher  # noqa: E402
+from kos.watch import Watcher, WatchRegistry, spawn_background  # noqa: E402
 from kos.protect import ProtectError, ProtectStore, held_unlock  # noqa: E402
 from kos.control import ControlError, build_click, parse_args  # noqa: E402
 from kos import cli as kcli  # noqa: E402
@@ -661,6 +661,52 @@ class TestControlEndToEnd(Env):
         import signal
         os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
 
+    def test_control_does_not_evict_a_live_attach(self):
+        """The fix: kos control has its own door into the broker now, so it
+        no longer takes over the one attach slot a real terminal is using."""
+        from kos.control import send as control_send
+
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        with self.authority(PW).authorize("app.open", "hello") as grant:
+            app = store.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode="cmd", broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, "cmd", SandboxPolicy(), registry, Path(inst.log_path))
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            insts = {i.id: i for i in registry.list()}
+            if inst_id in insts and insts[inst_id].status == "running":
+                inst = insts[inst_id]
+                break
+            __import__("time").sleep(0.05)
+
+        # a real attach, held open
+        attach = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        attach.connect(inst.sock_path)
+        attach.settimeout(3)
+
+        # a control command, through the separate control door
+        commands = parse_args("keyboard", ["h"])
+        control_send(inst.sock_path, commands)
+
+        # the attach connection must still be alive and see the app's reply
+        # to the control command (proving it reached the app), not be reset
+        got = b""
+        try:
+            while b'"cmd":"log"' not in got:
+                got += attach.recv(4096)
+        except OSError:
+            self.fail("the attach connection was closed - control evicted it")
+        attach.close()
+        self.assertIn(b"typed='h'", got)
+
+        import signal
+        os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
+
 
 class TestMv(Env):
     def _args(self, src, dst):
@@ -704,6 +750,69 @@ class TestMv(Env):
         self.assertFalse(src.exists())
         self.assertTrue(dst.exists())
         self.assertEqual(dst.read_text(), "hello world, nothing dangerous here")
+
+    def test_moves_a_whole_directory_and_scans_every_file_in_it(self):
+        """Confirms a backlog item ('kos mv for whole directories') was
+        already covered: os.replace/shutil.move handle a directory tree as
+        one unit, and the scan step already walks a directory recursively."""
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "proj"
+        (src / "sub").mkdir(parents=True)
+        (src / "a.txt").write_text("clean file one")
+        (src / "sub" / "b.txt").write_text("clean file two")
+        dst = Path(self.tmp.name) / "proj-moved"
+        fake = self.authority(PW, PW, PW)
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            code = kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertEqual(code, 0)
+        self.assertFalse(src.exists())
+        self.assertTrue((dst / "a.txt").exists())
+        self.assertTrue((dst / "sub" / "b.txt").exists())
+
+
+class TestBackgroundWatch(Env):
+    def _wait(self, cond, timeout=5):
+        deadline = __import__("time").monotonic() + timeout
+        while __import__("time").monotonic() < deadline:
+            if cond():
+                return
+            __import__("time").sleep(0.05)
+        raise AssertionError("condition never became true")
+
+    def test_background_watch_scans_and_quarantines(self):
+        registry = WatchRegistry(self.paths)
+        watchdir = Path(self.tmp.name) / "w"
+        watchdir.mkdir()
+        job = spawn_background([str(watchdir)], [], self.paths, self.paths.logs / "w.log")
+        self._wait(lambda: any(j.id == job.id and j.status == "running"
+                               for j in registry.list()))
+
+        (watchdir / "evil.bin").write_bytes(EICAR)
+        self._wait(lambda: not (watchdir / "evil.bin").exists())
+        quarantined = list((self.paths.state / "quarantine").glob("evil.bin-*"))
+        self.assertEqual(len(quarantined), 1)
+
+        import signal
+        os.kill(job.pid, signal.SIGTERM)
+        self._wait(lambda: not (self.paths.state / "watchjobs" / f"{job.id}.json").exists())
+
+    def test_background_watch_unlocks_and_relocks_a_protected_dir(self):
+        registry = WatchRegistry(self.paths)
+        target = Path(self.tmp.name) / "vault"
+        target.mkdir()
+        ProtectStore(self.paths).protect(str(target), self.authority(PW))
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+        job = spawn_background([str(target)], [str(target)], self.paths,
+                               self.paths.logs / "v.log")
+        self._wait(lambda: any(j.id == job.id and j.status == "running"
+                               for j in registry.list()))
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "700")
+
+        import signal
+        os.kill(job.pid, signal.SIGTERM)
+        self._wait(lambda: not (self.paths.state / "watchjobs" / f"{job.id}.json").exists())
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
 
 
 if __name__ == "__main__":

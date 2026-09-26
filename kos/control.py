@@ -83,9 +83,13 @@ def parse_args(device: str, args: list[str]) -> list[dict]:
 
 
 def send(sock_path: str, commands: list[dict]) -> None:
+    """Connects to the broker's dedicated *control* door, not the one
+    ``kos attach`` uses - see ``broker.control_sock_path`` - so this never
+    bumps a real attached terminal off its slot."""
+    from .broker import control_sock_path
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        s.connect(sock_path)
+        s.connect(control_sock_path(sock_path))
         for cmd in commands:
             s.sendall(json.dumps(cmd, separators=(",", ":")).encode() + b"\n")
     finally:
