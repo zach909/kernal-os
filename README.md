@@ -111,9 +111,14 @@ genuinely **can** install, run, update, or optimize things unattended,
 because it carries the real seal key rather than being blocked from ever
 deriving one. Both are real, tested, and off unless you turn them on:
 `kos admin status` shows whether one exists; nothing about the owner's own
-password or its normal grants changes if you never create one. Treat a
-privileged grant file the same way you'd treat a password - anyone who can
-read it can act with it until it expires.
+password or its normal grants changes if you never create one. **The admin
+account itself only ever lasts until the next reboot** - its keyslot lives
+on `/run` (tmpfs), not the persistent disk, so `kos-init` mounting a fresh,
+empty `/run` on every boot wipes it unconditionally, before anyone has even
+logged in. Root access and privileged autonomy are something you re-decide
+every session, never a standing account sitting on disk. Treat a privileged
+grant file the same way you'd treat a password - anyone who can read it can
+act with it until it expires.
 
 Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
 `examples/web` — a no-graphics browser: type a URL, the page appears as a

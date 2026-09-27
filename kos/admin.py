@@ -14,6 +14,16 @@ What "admin" actually changes, concretely:
   see ``kos/init.py``. This is the literal, deliberate reversal of "no root
   login exists": a real superuser account, gated by its own password, off
   by default until someone with the keys creates one.
+* **The admin account itself only lasts until the next reboot.** Its
+  keyslot is written to ``paths.runtime`` (``/run/kos`` - tmpfs) rather
+  than ``paths.etc`` (``/etc/kos`` - the encrypted, persistent disk), so it
+  is gone, unconditionally, the instant the machine restarts: ``kos-init``
+  mounts a fresh, empty ``/run`` on every single boot (see ``init.py``'s
+  ``MOUNTS``), before anyone has even logged in, so there is no window
+  where a stale admin keyslot from a previous boot could be unlocked. Root
+  access and privileged autonomy are both something you re-decide every
+  session, not a standing account sitting on disk. ``kos admin setup``
+  after every reboot you want one; nothing carries over automatically.
 * Only the admin password can mint a *privileged* autonomy grant (see
   ``kos/autonomy.py``'s ``issue_privileged``/``redeem_privileged``) - one
   that, unlike a normal grant, carries the actual seal-derivation key and
@@ -65,7 +75,7 @@ class AdminInfo:
 class AdminStore:
     def __init__(self, paths: Paths):
         self.paths = paths
-        self.file = paths.etc / "admin.json"
+        self.file = paths.runtime / "admin.json"  # tmpfs: gone at every reboot, by construction
 
     def exists(self) -> bool:
         return self.file.exists()

@@ -45,8 +45,17 @@ class Paths:
     def auth_file(self) -> Path:
         return self.etc / "auth.json"
 
+    @property
+    def runtime(self) -> Path:
+        """RAM-only storage: ``/run`` on the real system, mounted as tmpfs
+        fresh and empty by ``kos-init`` on every single boot (see
+        ``init.py``'s ``MOUNTS``). Anything kept only here - the admin
+        keyslot - is gone the instant the machine reboots, by construction,
+        not by a timer or a cleanup job that could fail to run."""
+        return self.root / "run" / "kos"
+
     def ensure(self) -> None:
-        for d in (self.etc, self.state, self.apps, self.logs, self.cells):
+        for d in (self.etc, self.state, self.apps, self.logs, self.cells, self.runtime):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
 

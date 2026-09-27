@@ -152,6 +152,23 @@ either password has unlocked it, only the `via_admin` flag `Authority`
 attaches to the `Grant` it returns, which callers use to decide what to do
 next (root shell vs owner shell; ordinary grant vs privileged one).
 
+**The keyslot lives on tmpfs, not the encrypted disk.**
+`AdminStore.file` is `paths.runtime / "admin.json"` (`/run/kos` on the real
+system), never `paths.etc`. `/run` is mounted fresh and empty by
+`kos-init` on every single boot (`init.py`'s `MOUNTS`), before the first
+login prompt even appears, so the admin keyslot cannot survive a reboot by
+construction - there is no code path that has to remember to delete it,
+and no window where a stale keyslot from a previous boot could be unlocked.
+`kos admin status` after a reboot correctly reports none exists;
+`kos admin setup` has to be run again, deliberately, each session it's
+wanted (`test_admin_lives_on_tmpfs_and_does_not_survive_a_reboot`, which
+simulates the remount directly). Privileged autonomy grants are unaffected
+by this: `issue_privileged` copies the real seal key into the grant file
+at issuance rather than referencing the admin keyslot, so a grant already
+issued keeps working across a reboot for its own remaining duration/uses,
+even though the admin account that created it is gone - the two have
+independent, separately-chosen lifetimes on purpose.
+
 **`Authority.OWNER_ONLY`** is a short, hard-coded set (`admin.remove`,
 `auth.change`) that never accepts the admin password, even though it's
 cryptographically capable of unlocking the same master - enforced in code,

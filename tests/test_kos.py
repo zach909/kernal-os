@@ -935,6 +935,27 @@ class TestAdmin(Env):
                 store.create(b"admin-secret1", g.raw_master())
         self.assertFalse(store.exists())
 
+    def test_admin_lives_on_tmpfs_and_does_not_survive_a_reboot(self):
+        """The admin keyslot must be gone after every reboot, unconditionally
+        - not on a timer, not via cleanup code that could fail to run, but
+        because kos-init mounts a fresh, empty /run on every single boot."""
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        self.assertTrue(str(store.file).startswith(str(self.paths.runtime)))
+        self.assertFalse(str(store.file).startswith(str(self.paths.etc)))
+        self.assertTrue(store.exists())
+
+        import shutil
+        shutil.rmtree(self.paths.runtime)  # simulates kos-init's fresh /run on boot
+        self.paths.runtime.mkdir(parents=True)
+
+        self.assertFalse(AdminStore(self.paths).exists())
+        # the owner's password is on the persistent disk and is unaffected
+        g2 = self.authority(PW).authorize("app.close", "x")
+        self.assertFalse(g2.via_admin)
+        g2.close()
+
     def test_owner_and_admin_unlock_to_the_same_master(self):
         store = AdminStore(self.paths)
         with self.authority(PW).authorize("admin.create") as g:

@@ -97,7 +97,14 @@ land instead of getting lost in chat.
   a real gap caught and fixed during development: a privileged grant
   minted for one app name could not be redeemed to install a different one
   just because the same grant id was reused, since the target for
-  `app.install` isn't known until the file is parsed.
+  `app.install` isn't known until the file is parsed. **The admin keyslot
+  itself only ever lasts until the next reboot** - it lives on `/run`
+  (tmpfs), which `kos-init` mounts fresh and empty on every boot, so root
+  access and privileged autonomy are re-decided every session rather than
+  a standing account on disk (already-issued privileged grants are
+  unaffected - they carry their own seal key and keep working for their
+  own remaining duration independent of whether the admin account that
+  minted them still exists).
 - **Autonomous action, without ever storing the password.** `kos autonomy
   grant ACTION TARGET --for N --uses M` needs the real password once, to
   mint a temporary permission - never the password itself, which is never
