@@ -39,6 +39,7 @@ class Instance:
     started: float
     app_pid: int = 0
     status: str = "starting"  # starting -> running -> exited
+    system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
 
 
 def _alive(pid: int) -> bool:

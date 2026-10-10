@@ -16,7 +16,8 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
-    kos boot desktop                choose among open apps (no desktop otherwise)
+    kos desktop install             pack, scan, install + permit the taskbar and App Library
+    kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
     kos activity                    one feed: open apps + recent password decisions
@@ -30,6 +31,10 @@
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
     kos audit                       show the authorization log
+    kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
+    kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
+    kos do WORDS...                 one line of human language, run as one command
+    kos line [--explain]            the line shell: every line you type is a command
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ import sys
 from pathlib import Path
 
 from . import loader
+from .admin import AdminError, WriteBlocked
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
@@ -51,6 +57,8 @@ from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
+from .system import (SystemBridge, authorize_app_action, close_instance,
+                     open_background)
 from .vfs import VFSError
 
 
@@ -177,16 +185,7 @@ def _parse_run_target(words: list[str]) -> tuple[str, str]:
 
 def _authorize_app_action(name: str, app, mode: str, authority: Authority, prompter) -> SandboxPolicy:
     """Shared by `run` and `open`: mode check + optional network grant."""
-    m = app.manifest
-    if mode not in m.modes:
-        raise KAppError(f"{name} has no {mode} mode (it has: {', '.join(m.modes)})")
-    allow_net = False
-    if "network" in m.permissions:
-        if prompter.confirm(f"{name} asks for network access. Allow?"):
-            authority.authorize("app.network", name).close()
-            allow_net = True
-    return SandboxPolicy(allow_network=allow_net,
-                         weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+    return authorize_app_action(name, app, mode, authority, prompter)
 
 
 def cmd_run(args, paths: Paths) -> int:
@@ -219,7 +218,9 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"))
+        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
+                            bridge=bridge)
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -230,35 +231,14 @@ def cmd_run(args, paths: Paths) -> int:
 def cmd_open(args, paths: Paths) -> int:
     """Launch an app in the background. Returns your shell immediately;
     `kos ps` lists it, `kos attach ID` connects your terminal to it."""
-    from . import cache
-    from .broker import spawn
     from .permit import PermitStore
-    from .registry import Instance, Registry
-
     mode, name = args.mode or "tui", args.name
     PermitStore(paths).require(name)  # refused before we even ask for the password
     authority, prompter = _authority(paths)
-    store = AppStore(paths)
-    action = "app.graphical" if mode == "graphical" else "app.open"
-    with authority.authorize(action, name) as grant:
-        app = store.load_verified(name, grant)
-    policy = _authorize_app_action(name, app, mode, authority, prompter)
-    prompter.close()
-
-    paths.ensure()
-    cache_dir = cache.alloc(paths, name)
-    policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
-    registry = Registry(paths)
-    registry.prune()
-    inst_id = registry.new_id(name)
-    inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
-                    sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
-                    log_path=str(paths.logs / f"{inst_id}.log"), started=__import__("time").time())
-    spawn(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
-    print(f"opened {name} [{mode}] as {inst_id}")
-    print(f"  kos attach {inst_id}   (or: kos boot desktop)")
+    inst = open_background(paths, authority, name, mode, release=prompter.close)
+    print(f"opened {name} [{mode}] as {inst.id}")
+    print(f"  kos attach {inst.id}   (or: kos boot desktop)")
     return 0
-
 
 def cmd_ps(args, paths: Paths) -> int:
     from .registry import Registry
@@ -270,19 +250,9 @@ def cmd_ps(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_attach(args, paths: Paths) -> int:
-    """Connect your terminal to an app already opened with `kos open`. No
-    new password is needed just to reconnect - it was already authorized
-    when it was opened - but every device still has to be booted again for
-    this terminal, with the password, same as any other session."""
+def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) -> int:
+    """Connect this terminal to an app already running under a broker."""
     from .protocol import Channel
-    from .registry import Registry
-
-    authority, prompter = _authority(paths)
-    inst = Registry(paths).get(args.id)
-    if inst.status != "running":
-        raise KAppError(f"{args.id} is not running (status: {inst.status})")
-    prompter.close()
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -290,67 +260,109 @@ def cmd_attach(args, paths: Paths) -> int:
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    code = _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True)
+    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
+                        detach_on_interrupt=True, bridge=bridge, **session_kwargs)
+
+
+def cmd_attach(args, paths: Paths) -> int:
+    """Connect your terminal to an app already opened with `kos open`. No
+    new password is needed just to reconnect - it was already authorized
+    when it was opened - but every device still has to be booted again for
+    this terminal, with the password, same as any other session."""
+    from .registry import Registry
+
+    authority, prompter = _authority(paths)
+    inst = Registry(paths).get(args.id)
+    if inst.status != "running":
+        raise KAppError(f"{args.id} is not running (status: {inst.status})")
+    prompter.close()
+    code = _attach_session(paths, authority, inst)
     print(f"detached from {inst.id}" if code == 0 else f"{inst.id} exited ({code})")
     return 0
 
 
 def cmd_close(args, paths: Paths) -> int:
-    import signal
-    import time as _time
-    from .registry import Registry
-
     authority, _ = _authority(paths)
-    registry = Registry(paths)
-    inst = registry.get(args.id)
-    with authority.authorize("app.close", inst.id):
-        if inst.status == "running":
-            try:
-                os.kill(inst.broker_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            for _ in range(20):  # give the broker a moment to shut the app down cleanly
-                if not os.path.exists(str(paths.state / "instances" / f"{inst.id}.json")):
-                    break
-                _time.sleep(0.1)
-        registry.remove(inst.id)
+    inst = close_instance(paths, authority, args.id)
     print(f"closed {inst.id}")
     return 0
 
 
+def _ensure_open(paths: Paths, name: str, mode: str) -> str:
+    """The instance id of a running ``name``; opens it (password) if it isn't."""
+    from .registry import Registry
+    for inst in Registry(paths).list():
+        if inst.name == name and inst.mode == mode and inst.status == "running":
+            return inst.id
+    if name not in {a.name for a in AppStore(paths).installed()}:
+        raise KAppError(f"{name} is not installed (run: kos desktop install)")
+    authority, prompter = _authority(paths)
+    return open_background(paths, authority, name, mode, release=prompter.close).id
+
+
 def cmd_boot(args, paths: Paths) -> int:
-    """`kos boot desktop`: the only way a chooser of open apps ever appears.
-    Without it, `kos attach ID` still works - there is no windowing desktop
-    unless you explicitly ask for one."""
+    """`kos boot desktop`: the desktop is just two apps - the taskbar and the
+    App Library - and a way of moving between running apps (kos/desktop.py).
+    There is no windowing system; the taskbar *is* the home screen."""
     if args.what != "desktop":
         raise KAppError("usage: kos boot desktop")
+    from .desktop import Desktop, DesktopError
     from .registry import Registry
-    from .term import RawTerminal
 
+    mode = "graphical" if args.graphical else "tui"
     authority, prompter = _authority(paths)
     authority.authorize("device.desktop").close()
-    registry = Registry(paths)
-    insts = [i for i in registry.list() if i.status == "running"]
     prompter.close()
-    if not insts:
-        print("no apps open (kos open NAME first)")
-        return 0
-    with RawTerminal() as term:
-        term.write("\x1b[?1049l")  # desktop chooser is plain scrollback, not alt-screen
-    print("\r\nKOS desktop - open apps:\r\n")
-    for n, i in enumerate(insts, 1):
-        print(f"  {n}. {i.name} [{i.mode}]  ({i.id})\r")
-    print("\r\nq to cancel\r\n")
-    choice = input("attach to: ").strip()
-    if not choice or choice == "q":
-        return 0
+    home = _ensure_open(paths, "taskbar", mode)
+    library = _ensure_open(paths, "app-library", mode)
+
+    def attach(instance_id: str, ctx: dict) -> dict:
+        authority, prompter = _authority(paths)
+        inst = Registry(paths).get(instance_id)
+        if inst.status != "running":
+            raise KAppError(f"{instance_id} is not running")
+        prompter.close()
+        outcome: dict = {}
+        _attach_session(paths, authority, inst, outcome=outcome,
+                        preboot=tuple(ctx["preboot"]), right_click_to=ctx["right_click_to"])
+        return outcome
+
     try:
-        inst = insts[int(choice) - 1]
-    except (ValueError, IndexError):
-        raise KAppError("no such entry") from None
-    args.id = inst.id
-    return cmd_attach(args, paths)
+        return Desktop(home, library, attach).run()
+    except DesktopError as e:
+        raise KAppError(str(e)) from None
+
+
+def cmd_desktop(args, paths: Paths) -> int:
+    """`kos desktop install`: pack, scan, install and permit the two apps the
+    desktop is made of. Same gates as any other app: each install is scanned
+    first and asks for the password; permitting asks once more."""
+    import tempfile
+    from .desktop import SYSTEM_APPS
+    from .permit import PermitStore
+
+    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "examples" / "system"
+    authority, _ = _authority(paths)
+    store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in SYSTEM_APPS:
+            if name in have:
+                print(f"{name}: already installed")
+                continue
+            kapp = Path(tmp) / f"{name}.kapp"
+            pack(src / name, kapp)
+            m = store.install(kapp, authority)
+            print(f"installed {m.name} {m.version}")
+    permits = PermitStore(paths)
+    need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
+    if need:
+        with authority.authorize("app.permit", " ".join(need)):
+            for n in need:
+                permits.grant(n)
+        print(f"permitted: {', '.join(need)}")
+    print("desktop ready: kos boot desktop   (or just say: desktop)")
+    return 0
 
 
 def _print_text(data: bytes, clean_text) -> None:
@@ -604,6 +616,125 @@ def cmd_audit(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_admin(args, paths: Paths) -> int:
+    """The elevated administrator keyboard. It is booted by the password you
+    type to unlock (see kos/init.py); `admin boot` boots it again with the
+    password if the lease ran out. `admin lock` drops it - taking privilege
+    away never needs a password."""
+    from .admin import AdminKeyboard
+    kb = AdminKeyboard(paths)
+    action = args.admin_cmd or "status"
+    if action == "status":
+        print(kb.status())
+        return 0
+    if action == "lock":
+        kb.shutdown()
+        print("administrator keyboard locked")
+        return 0
+    authority, prompter = _authority(paths)
+    with authority.authorize("admin.boot") as grant:
+        lease = kb.boot(grant)
+    prompter.close()
+    print(kb.status())
+    if lease.weak:
+        eprint("WARNING: KOS_DEV_ADMIN_WEAK=1 - not on the KOS kernel; keyboard is not exclusive.")
+    return 0
+
+
+def cmd_owed(args, paths: Paths) -> int:
+    from .requires import Ledger
+    owed = Ledger(paths).owed()
+    if not owed:
+        print("nothing is owed")
+    for e in owed:
+        print(f"{e['target']}  ({e['trigger']}) still owes: {', '.join(e['pending'])}")
+    return 0
+
+
+def cmd_settle(args, paths: Paths) -> int:
+    """Do what earlier writes still owe: the security scan and the disk optimize."""
+    from .admin import settle
+    authority, prompter = _authority(paths)
+    for line in settle(paths, authority):
+        print(line)
+    prompter.close()
+    return 0
+
+
+def cmd_write(args, paths: Paths) -> int:
+    """Write a file. Needs the booted administrator keyboard, the password
+    typed on it, a clean security scan, and a disk optimize - in that order."""
+    from .admin import (AdminKeyboard, AdminPrompter, open_admin_devices, write_file)
+    kb = AdminKeyboard(paths)
+    if args.text is not None and args.stdin:
+        raise KAppError("give the text with --text or --stdin, not both")
+    if args.text is None and not args.stdin:
+        raise KAppError("nothing to write: write FILE TEXT  (or --stdin)")
+    data = (sys.stdin.buffer.read() if args.stdin else args.text.encode())
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)  # exclusive keyboards, or None on a WEAK lease
+    try:
+        prompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        report = write_file(paths, Authority(paths, prompter), kb, args.path, data)
+    finally:
+        if devices is not None:
+            devices.close()
+    print(report.summary())
+    return 0
+
+
+def _execute_line(argv: list[str]) -> int:
+    """Run one interpreted command in-process. argparse exits on bad usage;
+    in the line shell that must not end the shell."""
+    try:
+        return main(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+
+
+def cmd_do(args, paths: Paths) -> int:
+    """Interpret one line of human language and run it as exactly one command."""
+    from .lang import HELP, interpret
+    line = interpret(" ".join(args.words))
+    if args.explain:
+        print(line.explain())
+    if line.kind in ("command", "code"):
+        return _execute_line(list(line.argv))
+    if line.kind == "help":
+        print(HELP)
+        return 0
+    if line.kind == "unknown":
+        eprint("I don't know that command." + (f" Did you mean '{line.hint}'?" if line.hint else ""))
+        return 65
+    return 0
+
+
+def cmd_exec(args, paths: Paths) -> int:
+    """A line of code is a command: run it as a sandboxed one-shot app."""
+    from .coderun import run_code
+    opened = []
+
+    def get_authority() -> Authority:        # only asked for when there is something to run
+        authority, prompter = _authority(paths)
+        opened.append(prompter)
+        return authority
+
+    try:
+        return run_code(paths, get_authority, args.code, args.lang)
+    finally:
+        for prompter in opened:
+            prompter.close()
+
+
+def cmd_line(args, paths: Paths) -> int:
+    """The line shell. Every line is a command - in any language in the
+    lexicon - or it is refused. Code is never run here."""
+    from .lang import HELP, run_shell
+    if sys.stdin.isatty():
+        print("KOS - every line is a command, in your own language. Type 'help'.")
+    return run_shell(_execute_line, input, print, explain=args.explain)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kos", description="KOS security layer")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -635,8 +766,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s = sub.add_parser("close", help="stop an app opened with 'kos open'")
     s.add_argument("id")
-    s = sub.add_parser("boot", help="boot desktop: choose among open apps")
+    s = sub.add_parser("boot", help="boot the desktop: the taskbar + App Library, made of apps")
     s.add_argument("what", choices=["desktop"])
+    s.add_argument("--graphical", action="store_true", help="draw the desktop graphically")
+    s = sub.add_parser("desktop", help="set up the desktop apps")
+    s.add_argument("desktop_cmd", choices=["install"])
+    s.add_argument("--from", dest="src", help="directory holding taskbar/ and app-library/")
     s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
     s.add_argument("path")
     s = sub.add_parser("cat", help="view a file, including one inside a zip")
@@ -670,6 +805,22 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="report kernel security features")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
+    s = sub.add_parser("admin", help="the elevated administrator keyboard")
+    s.add_argument("admin_cmd", nargs="?", choices=["status", "boot", "lock"])
+    sub.add_parser("owed", help="what earlier writes still owe (a scan, an optimize)")
+    sub.add_parser("settle", help="do what is owed: security scan + disk optimize")
+    s = sub.add_parser("write", help="write a file (admin keyboard, security scan, disk optimize)")
+    s.add_argument("path")
+    s.add_argument("--text", help="the text to write")
+    s.add_argument("--stdin", action="store_true", help="read the content from standard input")
+    s = sub.add_parser("do", help="run one line of human language as one command")
+    s.add_argument("words", nargs="+")
+    s.add_argument("--explain", action="store_true", help="show how the line was understood")
+    s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
+    s.add_argument("--lang", default="python")
+    s.add_argument("--code", required=True)
+    s = sub.add_parser("line", help="the line shell: every line you type is a command")
+    s.add_argument("--explain", action="store_true", help="show how each line was understood")
     return p
 
 
@@ -679,7 +830,9 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
+            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
+            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
+            "desktop": cmd_desktop}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -687,10 +840,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = Paths.from_env()
     try:
         return COMMANDS[args.cmd](args, paths)
-    except (TamperedError, VirusFoundError) as e:
+    except (TamperedError, VirusFoundError, WriteBlocked) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
-    except (AuthorizationDenied, AuthError, PermitError) as e:
+    except (AuthorizationDenied, AuthError, PermitError, AdminError) as e:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:

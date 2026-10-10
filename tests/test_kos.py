@@ -549,3 +549,755 @@ class TestWatcher(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLang(unittest.TestCase):
+    """Every line is a command - unless it is code."""
+
+    def argv(self, line):
+        r = __import__("kos.lang", fromlist=["interpret"]).interpret(line)
+        self.assertEqual(r.kind, "command", line)
+        return list(r.argv)
+
+    def test_same_command_in_many_languages(self):
+        for line in ["run hello", "ejecuta hello", "lance hello", "starte hello",
+                     "esegui hello", "запусти hello", "运行 hello", "运行hello"]:
+            self.assertEqual(self.argv(line), ["run", "hello"], line)
+
+    def test_politeness_articles_and_case_are_ignored(self):
+        self.assertEqual(self.argv("Please run the app Hello."), ["run", "hello"])
+        self.assertEqual(self.argv("s'il vous plaît lance l'app hello"), ["run", "hello"])
+        self.assertEqual(self.argv("por favor, abre hello"), ["open", "hello"])
+
+    def test_mode_words_and_other_verbs(self):
+        self.assertEqual(self.argv("abre gráfico hello"), ["open", "graphical", "hello"])
+        self.assertEqual(self.argv("escanea notes.kapp"), ["scan", "file", "notes.kapp"])
+        self.assertEqual(self.argv("revoke hello"), ["permit", "--revoke", "hello"])
+        self.assertEqual(self.argv("escritorio"), ["boot", "desktop"])
+        self.assertEqual(self.argv("optimiza"), ["optimize"])
+
+    def test_write_text_is_passed_through_verbatim(self):
+        self.assertEqual(self.argv("write notes.txt Hello World."),
+                         ["write", "notes.txt", "--text", "Hello World."])
+        self.assertEqual(self.argv('write notes.txt "a  b!"'),
+                         ["write", "notes.txt", "--text", "a  b!"])
+
+    def test_code_is_a_command_too_and_runs_sandboxed(self):
+        from kos.lang import interpret
+        for line, lang in [("x = 5", "assignment"), ('print("hi")', "code call"),
+                           ("import os", "python"), ("#include <stdio.h>", "c"),
+                           ("const a = 1", "javascript"), ("SELECT * FROM users", "sql"),
+                           ("run hello; rm -rf /", "shell"), ("list | sh", "shell")]:
+            r = interpret(line)
+            self.assertEqual((r.kind, r.language), ("code", lang), line)
+            self.assertEqual(r.argv[0], "exec")                       # a command, never a shell string
+            self.assertEqual(r.argv[2], "--code=" + line)
+
+    def test_plain_words_that_are_also_code_keywords_still_work(self):
+        self.assertEqual(self.argv("update hello"), ["update", "hello"])
+        self.assertEqual(self.argv("open hello"), ["open", "hello"])
+        self.assertEqual(self.argv("run hello --cell=c1"), ["run", "hello", "--cell=c1"])
+
+    def test_unknown_suggests_but_never_guesses(self):
+        from kos.lang import interpret
+        r = interpret("rn hello")
+        self.assertEqual((r.kind, r.hint), ("unknown", "run"))
+        self.assertEqual(interpret("banana split").kind, "unknown")
+
+    def test_shell_loop_runs_every_line_as_a_command(self):
+        from kos.lang import run_shell
+        lines = iter(["run hello", "x = 1", "bonjour", "", "ayuda", "exit", "list"])
+        ran, said = [], []
+        code = run_shell(lambda argv: ran.append(argv) or 0, lambda _p: next(lines), said.append)
+        self.assertEqual(ran, [["run", "hello"], ["exec", "--lang=assignment", "--code=x = 1"]])
+        self.assertTrue(any("don't know" in m for m in said))
+        self.assertEqual(code, 65)
+
+    def test_cli_do_executes_the_interpreted_command(self):
+        import io as _io
+        from contextlib import redirect_stdout
+        buf = _io.StringIO()
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(buf):
+            old = os.environ.get("KOS_ROOT")
+            os.environ["KOS_ROOT"] = d
+            try:
+                code = kcli.main(["do", "lista"])
+            finally:
+                os.environ.pop("KOS_ROOT", None) if old is None else os.environ.update(KOS_ROOT=old)
+        self.assertEqual(code, 0)
+        self.assertIn("no apps installed", buf.getvalue())
+        # code is a command too; one with no sandboxed runtime says so (66) and runs nothing
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(kcli.main(["do", "const", "a", "=", "1"]), 66)
+
+
+from unittest import mock  # noqa: E402
+from kos.admin import (AdminError, AdminKeyboard, AdminPrompter, WriteBlocked,  # noqa: E402
+                       kernel_gaps, write_file)
+
+GOOD_KERNEL = {"landlock_abi": 3, "user_namespaces": True}
+
+
+class AdminEnv(Env):
+    def kb(self, **kw):
+        args = dict(kernel_report=lambda: dict(GOOD_KERNEL), probe=lambda: ["/dev/input/event0"],
+                    boot_id=lambda: "boot-1")
+        args.update(kw)
+        return AdminKeyboard(self.paths, **args)
+
+    def booted(self, **kw):
+        kb = self.kb(**kw)
+        with self.authority(PW).authorize("session.login") as g:
+            kb.boot(g)
+        return kb
+
+
+class TestAdminKeyboard(AdminEnv):
+    def test_login_password_boots_it_with_no_second_prompt(self):
+        auth = self.authority(PW)                       # exactly ONE password is available
+        kb = self.kb()
+        with auth.authorize("session.login") as grant:
+            lease = kb.boot(grant)
+        self.assertEqual(self.prompter.answers, [])     # nothing left over, nothing asked twice
+        self.assertTrue(lease.exclusive and not lease.weak)
+        self.assertIn("ON", kb.status())
+        self.assertIn(("admin.boot", "booted"),
+                      [(e["action"], e["outcome"]) for e in auth.audit.entries()])
+
+    def test_only_a_login_or_admin_boot_grant_can_boot_it(self):
+        with self.authority(PW).authorize("app.run", "hello") as g:
+            with self.assertRaises(AdminError):
+                self.kb().boot(g)
+        self.assertFalse((self.paths.state / "admin-lease.json").exists())
+
+    def test_requires_the_kernel_to_run(self):
+        for report in ({"landlock_abi": 0, "user_namespaces": True},
+                       {"landlock_abi": 3, "user_namespaces": False}):
+            kb = self.kb(kernel_report=lambda r=report: r)
+            with self.authority(PW).authorize("session.login") as g:
+                with self.assertRaises(AdminError) as ctx:
+                    kb.boot(g)
+            self.assertIn("needs the KOS kernel", str(ctx.exception))
+            self.assertFalse(kb.file.exists())
+        self.assertEqual(kernel_gaps(GOOD_KERNEL), [])
+
+    def test_kernel_is_rechecked_on_every_use(self):
+        state = {"r": dict(GOOD_KERNEL)}
+        kb = self.booted(kernel_report=lambda: state["r"])
+        kb.require_booted()
+        state["r"] = {"landlock_abi": 0, "user_namespaces": True}
+        with self.assertRaises(AdminError):
+            kb.require_booted()
+
+    def test_no_keyboard_means_no_admin_keyboard(self):
+        kb = self.kb(probe=lambda: [])
+        with self.authority(PW).authorize("session.login") as g:
+            with self.assertRaises(AdminError):
+                kb.boot(g)
+
+    def test_weak_dev_mode_is_explicit_and_marked(self):
+        kb = self.kb(kernel_report=lambda: {"landlock_abi": 0}, probe=lambda: [])
+        with mock.patch.dict(os.environ, {"KOS_DEV_ADMIN_WEAK": "1"}):
+            with self.authority(PW).authorize("session.login") as g:
+                lease = kb.boot(g)
+            self.assertTrue(lease.weak and not lease.exclusive)
+            self.assertIn("WEAK", kb.status())
+            kb.require_booted()
+        with self.assertRaises(AdminError):             # the env var is needed on every use
+            kb.require_booted()
+
+    def test_expiry_other_boot_and_lock(self):
+        t = {"now": 1000.0}
+        kb = self.booted(now=lambda: t["now"])
+        kb.require_booted()
+        t["now"] += 9 * 3600
+        with self.assertRaises(AdminError):
+            kb.require_booted()
+        kb2 = self.kb(boot_id=lambda: "boot-2", now=lambda: 1000.0)
+        with self.assertRaises(AdminError):
+            kb2.require_booted()
+        kb3 = self.kb(boot_id=lambda: "boot-1", now=lambda: 1000.0)
+        kb3.require_booted()
+        kb3.shutdown()
+        with self.assertRaises(AdminError):
+            kb3.require_booted()
+
+    def test_forged_lease_fails_the_signature(self):
+        kb = self.booted(now=lambda: 1000.0)
+        doc = json.loads(kb.file.read_text())
+        doc["expires"] += 10 ** 9                       # an attacker extends it
+        kb.file.write_text(json.dumps(doc))
+        with self.authority(PW).authorize("file.write", "x") as g:
+            with self.assertRaises(AdminError) as ctx:
+                kb.verify(g)
+        self.assertIn("signature", str(ctx.exception))
+
+    def test_admin_prompter_reads_the_password_from_devices(self):
+        dev = ScriptedDevices()
+        keys = lambda text: [{"type": "key", "key": c} for c in text]
+        dev.push(*keys("abcX"), {"type": "key", "key": "backspace"}, *keys("d"),
+                 {"type": "key", "key": "enter"})
+        out = io.StringIO()
+        self.assertEqual(AdminPrompter(dev, out).password("pw: "), b"abcd")
+        dev.push({"type": "key", "key": "escape"})
+        self.assertIsNone(AdminPrompter(dev, out).password("pw: "))
+        dev.close()
+
+
+class TestGuardedWrite(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        self.kb_ = self.booted()
+        from kos.requires import Ledger
+        self.ledger = Ledger(self.paths)
+        self.out = Path(self.tmp.name) / "out"
+        self.out.mkdir()
+
+    def write(self, name, data, answers=(PW,), **kw):
+        return write_file(self.paths, self.authority(*answers), self.kb_,
+                          str(self.out / name), data, **kw)
+
+    def test_write_then_scan_then_optimize_are_required_afterwards(self):
+        order, target = [], self.out / "a.txt"
+
+        def scanner(data, label):
+            order.append(("scan", target.exists(), self.ledger.owed("file.write")[0]["pending"][:]))
+            return scan_bytes(data, label)
+
+        def optimizer(paths, authority, grant=None):
+            order.append(("optimize", target.exists(), self.ledger.owed("file.write")[0]["pending"][:]))
+            return optimize(paths, authority, grant=grant)
+
+        r = self.write("a.txt", b"hello", scanner=scanner, optimizer=optimizer)
+        # the file is already there when the scan runs; both are owed until each is done
+        self.assertEqual(order, [("scan", True, ["scan", "optimize"]), ("optimize", True, ["optimize"])])
+        self.assertEqual(self.ledger.owed(), [])               # nothing left owed
+        self.assertEqual(target.read_bytes(), b"hello")
+        self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+        self.assertTrue(r.scan.clean)
+        self.assertIn("reclaimed", r.optimize_summary)
+
+    def test_flagged_content_is_quarantined_afterwards_and_the_optimize_still_runs(self):
+        called = []
+        with self.assertRaises(WriteBlocked):
+            self.write("bad.txt", EICAR, optimizer=lambda *a, **k: called.append(1))
+        self.assertFalse((self.out / "bad.txt").exists())          # taken out of place
+        self.assertEqual(len(list((self.paths.state / "quarantine").glob("write-*bad.txt"))), 1)
+        self.assertEqual(called, [1])                              # optimize was still owed
+        self.assertEqual(self.ledger.owed(), [])
+        outcomes = [e["outcome"] for e in AuditLogFor(self.paths) if e["action"] == "file.write"]
+        self.assertIn("quarantined-by-scan", outcomes)
+
+    def test_failed_optimize_stays_owed_and_blocks_the_next_write_until_settled(self):
+        def boom(paths, authority, grant=None):
+            raise OSError("disk exploded")
+        with self.assertRaises(OSError):
+            self.write("c.txt", b"data", optimizer=boom)
+        self.assertEqual([e["pending"] for e in self.ledger.owed()], [["optimize"]])   # scan done, optimize owed
+        with self.assertRaises(AdminError) as ctx:
+            self.write("d2.txt", b"x", answers=())                 # refused before any password
+        self.assertIn("still owes: optimize", str(ctx.exception))
+        self.assertFalse((self.out / "d2.txt").exists())
+        from kos.admin import settle
+        lines = settle(self.paths, self.authority(PW))
+        self.assertTrue(any("settled" in l for l in lines))
+        self.assertEqual(self.ledger.owed(), [])
+        self.write("d2.txt", b"x")                                 # unblocked
+        self.assertTrue((self.out / "d2.txt").exists())
+
+    def test_a_crash_between_write_and_scan_is_remembered_across_restarts(self):
+        from kos.requires import Ledger
+        self.ledger.owe("file.write", str(self.out / "e.txt"))      # as if we died right after writing
+        self.assertEqual(Ledger(self.paths).owed()[0]["pending"], ["scan", "optimize"])
+        with self.assertRaises(AdminError):
+            self.write("f.txt", b"x", answers=())
+
+    def test_one_password_covers_scan_optimize_and_write(self):
+        """The write's password also pays for the optimize (it re-seals apps),
+        so the whole pipeline asks exactly once."""
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        r = self.write("d.txt", b"hello")                # authority(PW) has a single answer
+        self.assertEqual((self.out / "d.txt").read_bytes(), b"hello")
+        self.assertTrue(r.scan.clean)
+
+    def test_refused_without_a_booted_keyboard_before_any_password(self):
+        self.kb_.shutdown()
+        with self.assertRaises(AdminError):
+            self.write("e.txt", b"x", answers=())        # a prompt here would AssertionError
+        self.assertFalse((self.out / "e.txt").exists())
+
+    def test_wrong_password_writes_nothing(self):
+        with self.assertRaises(AuthorizationDenied):
+            self.write("f.txt", b"x", answers=("no", "no", "no"))
+        self.assertFalse((self.out / "f.txt").exists())
+
+    def test_kos_system_state_symlinks_and_directories_are_refused(self):
+        self.paths.ensure()
+        for target in (self.paths.state / "evil", self.paths.etc / "auth.json"):
+            with self.assertRaises(AdminError):
+                write_file(self.paths, self.authority(PW), self.kb_, str(target), b"x")
+        (self.out / "link").symlink_to(self.out / "real")
+        with self.assertRaises(AdminError):
+            self.write("link", b"x")
+        with self.assertRaises(AdminError):
+            write_file(self.paths, self.authority(PW), self.kb_,
+                       str(self.out / "nodir" / "f"), b"x")
+
+    def test_forged_lease_is_refused_even_with_the_right_password(self):
+        doc = json.loads(self.kb_.file.read_text())
+        doc["keyboards"] = ["/dev/input/event99"]
+        self.kb_.file.write_text(json.dumps(doc))
+        with self.assertRaises(AdminError):
+            self.write("g.txt", b"x")
+        self.assertFalse((self.out / "g.txt").exists())
+
+    def test_cli_write_refuses_with_exit_2_when_keyboard_not_booted(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"KOS_ROOT": d}):
+            code = kcli.main(["write", os.path.join(d, "x.txt"), "--text", "hi"])
+            self.assertEqual(code, 2)
+            self.assertFalse(os.path.exists(os.path.join(d, "x.txt")))
+            self.assertEqual(kcli.main(["admin"]), 0)
+
+
+def AuditLogFor(paths):
+    from kos.auth import AuditLog
+    return AuditLog(paths).entries()
+
+
+# ---------------------------------------------------------------------------
+# The desktop: everything is an app
+# ---------------------------------------------------------------------------
+import signal as _signal  # noqa: E402
+import time as _time  # noqa: E402
+from kos.desktop import Desktop, DesktopError, SYSTEM_APPS  # noqa: E402
+from kos.system import SystemBridge, close_instance, list_apps, open_background  # noqa: E402
+from kos.tui import TUISurface  # noqa: E402
+
+SYSTEM_DIR = Path(__file__).resolve().parent.parent / "examples" / "system"
+
+
+def _keys(text):
+    return [{"type": "key", "key": c} for c in text]
+
+
+ENTER = {"type": "key", "key": "enter"}
+
+
+class TestRequestProtocol(unittest.TestCase):
+    def test_valid_requests_pass_in_every_mode(self):
+        for mode in ("tui", "graphical", "cmd"):
+            self.assertEqual(validate_app_message({"cmd": "request", "action": "apps"}, mode)["action"], "apps")
+            self.assertEqual(validate_app_message(
+                {"cmd": "request", "action": "open", "app": "hello", "mode": "graphical"}, mode)["mode"],
+                "graphical")
+            validate_app_message({"cmd": "request", "action": "focus", "id": "hello-3fa9c1"}, mode)
+
+    def test_hostile_requests_are_rejected(self):
+        for bad in ({"cmd": "request", "action": "open", "app": "../../etc/passwd"},
+                    {"cmd": "request", "action": "open", "app": "hello", "mode": "root"},
+                    {"cmd": "request", "action": "focus", "id": "a/b"},
+                    {"cmd": "request", "action": "close", "id": "hello"},
+                    {"cmd": "request", "action": "format-disk"},
+                    {"cmd": "request"}):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message(bad, "tui")
+
+    def test_old_instance_records_without_the_system_flag_still_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(Paths(Path(d)))
+            reg.dir.mkdir(parents=True)
+            (reg.dir / "old-aaaaaa.json").write_text(json.dumps(
+                {"id": "old-aaaaaa", "name": "old", "mode": "tui", "broker_pid": os.getpid(),
+                 "sock_path": "/x", "log_path": "/y", "started": 0, "app_pid": 1,
+                 "status": "running"}))
+            self.assertFalse(reg.get("old-aaaaaa").system)
+
+
+class TestSystemApps(Env):
+    def test_system_apps_pack_scan_clean_and_ask_for_the_system_permission(self):
+        for name in SYSTEM_APPS:
+            out = Path(self.tmp.name) / f"{name}.kapp"
+            m = pack(SYSTEM_DIR / name, out)
+            self.assertEqual(m.name, name)
+            self.assertIn("system", m.permissions)
+            self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
+
+    def test_an_app_cannot_claim_a_permission_that_does_not_exist(self):
+        with self.assertRaises(KAppError):
+            from kos.kapp import Manifest
+            Manifest.parse(json.dumps({"name": "x", "version": "1", "runtime": "python",
+                                       "entry": "a", "permissions": ["root"]}).encode())
+
+
+class TestSystemBridge(Env):
+    def setUp(self):
+        super().setUp()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        self.sent, self.spawned = [], []
+
+    def spawner(self, inst, app, mode, policy, registry, log_path, cache_dir=None):
+        self.spawned.append((inst.name, mode))
+        inst.status, inst.broker_pid = "running", os.getpid()
+        registry.write(inst)
+
+    def ask(self, req, *answers):
+        bridge = SystemBridge(self.paths, spawner=self.spawner)
+        switch = bridge.handle(req, self.sent.append, self.authority(*answers))
+        return switch, self.sent[-1]
+
+    def test_apps_lists_installed_with_permit_state_and_needs_no_password(self):
+        _, reply = self.ask({"cmd": "request", "action": "apps"})
+        self.assertEqual(reply["cmd"], "apps")
+        self.assertEqual([(a["name"], a["permitted"]) for a in reply["installed"]], [("hello", False)])
+        PermitStore(self.paths).grant("hello")
+        self.assertTrue(list_apps(self.paths)[0]["permitted"])
+
+    def test_open_is_refused_without_permit_and_never_asks_for_a_password(self):
+        _, reply = self.ask({"cmd": "request", "action": "open", "app": "hello", "mode": "tui"})
+        self.assertFalse(reply["ok"])
+        self.assertIn("permission to run", reply["detail"])
+        self.assertEqual(self.spawned, [])
+
+    def test_open_needs_the_password_and_wrong_password_opens_nothing(self):
+        PermitStore(self.paths).grant("hello")
+        req = {"cmd": "request", "action": "open", "app": "hello", "mode": "tui"}
+        _, reply = self.ask(req, "no", "no", "no")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(self.spawned, [])
+        _, reply = self.ask(req, PW)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(self.spawned, [("hello", "tui")])
+        self.assertRegex(reply["id"], r"^hello-[0-9a-f]{6}$")
+        self.assertEqual(Registry(self.paths).get(reply["id"]).status, "running")
+
+    def test_open_cannot_start_a_mode_the_app_does_not_have(self):
+        PermitStore(self.paths).grant("hello")
+        _, reply = self.ask({"cmd": "request", "action": "open", "app": "web", "mode": "tui"}, PW)
+        self.assertFalse(reply["ok"])                       # not installed
+        self.assertEqual(self.spawned, [])
+
+    def test_focus_switches_only_to_a_running_instance(self):
+        Registry(self.paths).write(Instance(id="hello-aaaaaa", name="hello", mode="tui",
+                                            broker_pid=os.getpid(), sock_path="/x", log_path="/y",
+                                            started=0, status="running"))
+        switch, reply = self.ask({"cmd": "request", "action": "focus", "id": "hello-aaaaaa"})
+        self.assertEqual(switch, ("instance", "hello-aaaaaa"))
+        self.assertTrue(reply["ok"])
+        switch, reply = self.ask({"cmd": "request", "action": "focus", "id": "hello-bbbbbb"})
+        self.assertIsNone(switch)
+        self.assertFalse(reply["ok"])
+
+    def test_close_needs_the_password(self):
+        Registry(self.paths).write(Instance(id="hello-cccccc", name="hello", mode="tui",
+                                            broker_pid=999999999, sock_path="/x", log_path="/y",
+                                            started=0, status="exited"))
+        req = {"cmd": "request", "action": "close", "id": "hello-cccccc"}
+        _, reply = self.ask(req, "no", "no", "no")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(len(Registry(self.paths).list()), 1)
+        _, reply = self.ask(req, PW)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(Registry(self.paths).list(), [])
+
+
+class DesktopSessionEnv(Env):
+    """Runs a real sandboxed app in a Session against scripted devices."""
+
+    def start(self, kapp_dir, name, mode="tui", *, bridge=None, authority=None, **kw):
+        kapp = Path(self.tmp.name) / f"{name}.kapp"
+        pack(kapp_dir, kapp)
+        store = AppStore(self.paths)
+        store.install(kapp, self.authority(PW))
+        PermitStore(self.paths).grant(name)
+        with self.authority(PW).authorize("app.run", name) as g:
+            app = store.load_verified(name, g)
+        a, b = socket.socketpair()
+        proc = loader.launch(loader.plan(app, b.fileno(), mode), SandboxPolicy(), None)
+        b.close()
+        self.devices = ScriptedDevices()
+        self.outfile = tempfile.TemporaryFile()
+        self.addCleanup(self.outfile.close)
+        surface = (CmdSurface(self.outfile.fileno(), 100, 30, name) if mode == "cmd"
+                   else TUISurface(self.outfile.fileno(), 100, 30, name))
+        auth = authority or Authority(self.paths, None, Throttle(self.paths, base=0))
+        self.outcome = {}
+        self.session = Session(name=name, mode=mode, channel=Channel(a), proc=proc, surface=surface,
+                               devices=self.devices, authority=auth, bridge=bridge,
+                               outcome=self.outcome, **kw)
+        return self.session
+
+    def output(self):
+        self.outfile.seek(0)
+        return self.outfile.read().decode(errors="replace")
+
+    def when_modal(self, needle, then, timeout=15):
+        """Push `then` once the OS's trusted prompt mentioning `needle` is on screen."""
+        def watch():
+            end = _time.monotonic() + timeout
+            while _time.monotonic() < end:
+                m = self.session.surface.modal
+                if m is not None and needle in m.title:
+                    self.devices.push(*then)
+                    return
+                _time.sleep(0.02)
+        t = threading.Thread(target=watch, daemon=True)
+        t.start()
+        return t
+
+    def boot_both(self):
+        self.devices.push(*_keys("y"), *_keys(PW), ENTER, *_keys("y"), *_keys(PW), ENTER)
+
+
+class TestDesktopSessions(DesktopSessionEnv):
+    def test_app_without_system_permission_is_told_no(self):
+        # run the real taskbar but hand the session NO bridge
+        s = self.start(SYSTEM_DIR / "taskbar", "taskbar")
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("does not have the 'system' permission", self.output())
+
+    def test_taskbar_lists_running_apps_and_asks_the_os_to_switch(self):
+        Registry(self.paths).write(Instance(id="hello-aaaaaa", name="hello", mode="tui",
+                                            broker_pid=os.getpid(), sock_path="/x", log_path="/y",
+                                            started=0, status="running"))
+        s = self.start(SYSTEM_DIR / "taskbar", "taskbar", bridge=SystemBridge(self.paths))
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push(*_keys("1"))).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("hello-aaaaaa", self.output())             # the taskbar drew the open app
+        self.assertEqual(self.outcome["switch"], ("instance", "hello-aaaaaa"))
+
+    def test_right_mouse_opens_the_app_library_and_the_app_never_sees_it(self):
+        s = self.start(EXAMPLE, "hello", "cmd", right_click_to="library-aaaaaa")
+        self.boot_both()
+        left = {"type": "button", "button": "left", "pressed": True, "x": 1, "y": 1}
+        right = {"type": "button", "button": "right", "pressed": True, "x": 1, "y": 1}
+        self.devices.push(left, right)
+        s.run(first_frame_timeout=0.5)
+        self.assertEqual(self.outcome["switch"], ("instance", "library-aaaaaa"))
+        out = self.output()
+        self.assertIn('"button":"left"', out)                    # ordinary clicks still reach the app
+        self.assertNotIn('"button":"right"', out)                # the right button is the OS's
+
+    def test_devices_booted_by_the_desktop_carry_over_with_no_new_prompt(self):
+        s = self.start(EXAMPLE, "hello", "cmd", preboot=("mouse", "keyboard"))
+        self.devices.push(*_keys("x"), {"type": "interrupt"})   # no y/password anywhere
+        s.run(first_frame_timeout=0.5)
+        self.assertEqual(self.devices.booted, ["mouse", "keyboard"])
+        out = self.output()
+        self.assertIn('"state":"attached"', out)
+        self.assertIn('"cmd":"key","key":"x"', out)              # keys flow immediately
+        self.assertEqual(sorted(self.outcome["booted"]), ["keyboard", "mouse"])
+
+    def test_app_library_opens_an_app_with_a_password_typed_in_the_os_prompt(self):
+        """The whole chain, with real processes: the App Library (sandboxed
+        app) asks -> the OS prompts for the password in its own overlay ->
+        the OS verifies the seal and starts hello under a real broker ->
+        the library asks to switch -> the session ends pointing at it."""
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        PermitStore(self.paths).grant("hello")
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        s = self.start(SYSTEM_DIR / "app-library", "app-library",
+                       bridge=SystemBridge(self.paths), authority=auth)
+        self.boot_both()
+        # the library draws "hello" (the only non-system app); Enter asks to open it
+        threading.Timer(3.0, lambda: self.devices.push(ENTER)).start()
+        self.when_modal("Password to open app", [*_keys(PW), ENTER])
+        threading.Timer(25.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("hello", self.output())
+        switch = self.outcome["switch"]
+        self.assertIsNotNone(switch, "library never asked to switch to the app it opened")
+        self.assertRegex(switch[1], r"^hello-[0-9a-f]{6}$")
+        self.assertEqual(Registry(self.paths).get(switch[1]).status, "running")
+        granted = [(e["action"], e["target"]) for e in auth.audit.entries() if e["outcome"] == "granted"]
+        self.assertIn(("app.open", "hello"), granted)
+
+    def tearDown(self):
+        # Must run BEFORE Env.tearDown deletes the registry (addCleanup runs
+        # after tearDown, by which point there is nothing left to find).
+        self._kill_brokers()
+        super().tearDown()
+
+    def _kill_brokers(self):
+        for inst in Registry(self.paths).list():
+            if inst.broker_pid == os.getpid():
+                continue            # a fake record some test wrote pointing at itself
+            try:
+                os.kill(inst.broker_pid, _signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for _ in range(50):
+            if not [i for i in Registry(self.paths).list() if i.broker_pid != os.getpid()]:
+                break
+            _time.sleep(0.1)
+
+
+class TestDesktopNavigation(unittest.TestCase):
+    def run_desktop(self, script, home="taskbar-111111", library="library-222222"):
+        calls = []
+
+        def attach(target, ctx):
+            calls.append((target, dict(ctx)))
+            step = script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+
+        return Desktop(home, library, attach).run(), calls
+
+    def test_starts_on_the_taskbar_and_ctrl_c_there_leaves(self):
+        code, calls = self.run_desktop([{"exit_code": 0}])
+        self.assertEqual(code, 0)
+        self.assertEqual([c[0] for c in calls], ["taskbar-111111"])
+        self.assertEqual(calls[0][1]["right_click_to"], "library-222222")
+
+    def test_ctrl_c_in_an_app_returns_to_the_taskbar_not_out_of_the_desktop(self):
+        code, calls = self.run_desktop([
+            {"switch": ("instance", "hello-333333"), "booted": ["mouse", "keyboard"]},
+            {"switch": None},            # Ctrl-C inside hello -> back home
+            {"exit_code": 0}])           # Ctrl-C on the taskbar -> leave
+        self.assertEqual([c[0] for c in calls], ["taskbar-111111", "hello-333333", "taskbar-111111"])
+        self.assertEqual(calls[1][1]["preboot"], ("mouse", "keyboard"))   # devices carried over
+        self.assertEqual(calls[2][1]["preboot"], ("mouse", "keyboard"))
+
+    def test_right_mouse_target_is_the_library_but_not_while_in_the_library(self):
+        _, calls = self.run_desktop([
+            {"switch": ("instance", "library-222222")}, {"switch": None}, {"exit_code": 0}])
+        self.assertEqual(calls[1][0], "library-222222")
+        self.assertIsNone(calls[1][1]["right_click_to"])
+
+    def test_vanished_app_falls_back_home_but_vanished_taskbar_is_an_error(self):
+        _, calls = self.run_desktop([
+            {"switch": ("instance", "hello-333333")}, KAppError("gone"), {"exit_code": 0}])
+        self.assertEqual([c[0] for c in calls], ["taskbar-111111", "hello-333333", "taskbar-111111"])
+        with self.assertRaises(DesktopError):
+            self.run_desktop([KAppError("gone")])
+
+
+class TestLoginBootsAdminKeyboard(AdminEnv):
+    def test_one_password_unlocks_and_boots_it_and_locking_drops_it(self):
+        import kos.init as kinit
+        prompter = ScriptedPrompter([PW])               # exactly one password for the whole login
+        lease = self.paths.state / "admin-lease.json"
+        seen = {}
+
+        def fake_shell(console):
+            seen["lease_while_shell_runs"] = lease.exists()
+            seen["shell"] = kinit.shell_argv()
+            return 0
+
+        with mock.patch.object(kinit, "TTYPrompter", lambda console: prompter), \
+                mock.patch.object(kinit, "AdminKeyboard", lambda paths: self.kb()), \
+                mock.patch.object(kinit, "start_shell", fake_shell), \
+                mock.patch.object(kinit.time, "sleep", lambda s: None):
+            with self.assertRaises(AssertionError):     # the 2nd login asks again: the script has no answer
+                kinit.login_loop(self.paths, "/dev/null")
+        self.assertTrue(seen["lease_while_shell_runs"])
+        self.assertFalse(lease.exists())                # locked: nothing elevated survives
+        self.assertTrue(any("Administrator keyboard booted" in m for m in prompter.messages))
+        self.assertEqual(seen["shell"], ["/opt/kos/bin/kos", "line"])   # login starts the line shell
+
+    def test_unlock_requires_the_keyboard_which_requires_the_kernel(self):
+        import kos.init as kinit
+        prompter = ScriptedPrompter([PW])
+        shells = []
+        no_kernel = lambda paths: self.kb(kernel_report=lambda: {"landlock_abi": 0})
+
+        with mock.patch.object(kinit, "TTYPrompter", lambda console: prompter), \
+                mock.patch.object(kinit, "AdminKeyboard", no_kernel), \
+                mock.patch.object(kinit, "start_shell", lambda c: shells.append(1) or 0), \
+                mock.patch.object(kinit.time, "sleep", lambda s: None):
+            with self.assertRaises(AssertionError):            # it asks again: still locked
+                kinit.login_loop(self.paths, "/dev/null")
+        self.assertEqual(shells, [])                            # the shell NEVER started
+        self.assertFalse((self.paths.state / "admin-lease.json").exists())
+        self.assertTrue(any("session.unlock requires admin.keyboard requires kernel" in m
+                            for m in prompter.messages), prompter.messages)
+
+
+class TestRequires(Env):
+    def test_chain_is_followed_deepest_first_and_named_when_it_fails(self):
+        from kos.requires import Requirements, Unsatisfied
+        log = []
+        state = {"kernel": False, "kb": False}
+        engine = Requirements(
+            {"kernel": lambda: None if state["kernel"] else "no kernel",
+             "admin.keyboard": lambda: None if state["kb"] else "keyboard off"},
+            {"admin.keyboard": lambda: (log.append("boot kb"), state.update(kb=True))})
+        with self.assertRaises(Unsatisfied) as ctx:
+            engine.ensure("session.unlock")
+        self.assertEqual(ctx.exception.chain, ["session.unlock", "admin.keyboard", "kernel"])
+        self.assertEqual(str(ctx.exception), "session.unlock requires admin.keyboard requires kernel: no kernel")
+        self.assertEqual(log, [])                    # the keyboard was never booted without the kernel
+        state["kernel"] = True
+        self.assertEqual(engine.ensure("session.unlock"), ["admin.keyboard"])
+        self.assertEqual(log, ["boot kb"])
+        self.assertEqual(engine.ensure("session.unlock"), [])      # already up: nothing to boot
+
+    def test_circular_requirements_are_refused(self):
+        from kos.requires import Requirements, Rule, Unsatisfied
+        engine = Requirements({}, rules={"a": Rule(before=("b",)), "b": Rule(before=("a",))})
+        with self.assertRaises(Unsatisfied):
+            engine.ensure("a")
+
+    def test_unreadable_ledger_blocks_instead_of_freeing(self):
+        from kos.requires import Ledger
+        led = Ledger(self.paths)
+        self.paths.ensure()
+        led.file.write_text("{not json")
+        self.assertTrue(led.owed())
+
+
+class TestCodeIsACommand(Env):
+    """A line of code is a command - run as a sandboxed one-shot app."""
+
+    def run_line(self, code, language="python", *answers, **kw):
+        from kos.coderun import run_code
+        out = []
+        status = run_code(self.paths, lambda: self.authority(*answers), code, language,
+                          out=out.append, **kw)
+        return status, "\n".join(out)
+
+    def test_python_line_runs_in_the_sandbox_after_the_password(self):
+        status, out = self.run_line("print(6 * 7)", "code call", PW)
+        self.assertEqual((status, out.strip()), (0, "42"))
+        self.assertIn(("code.run", "granted"),
+                      [(e["action"], e["outcome"]) for e in AuditLogFor(self.paths)])
+
+    def test_wrong_password_runs_nothing(self):
+        with self.assertRaises(AuthorizationDenied):
+            self.run_line("print('x')", "code call", "no", "no", "no")
+
+    def test_the_sandbox_holds_for_code_lines(self):
+        _, out = self.run_line("p = '/etc/' + 'pass' + 'wd'; print(open(p).read())", "python", PW)
+        self.assertIn("PermissionError", out)
+        self.assertNotIn("root:", out)
+        _, out = self.run_line("open('/tmp/kos-codeline-pwned', 'w').write('x')", "code call", PW)
+        self.assertIn("PermissionError", out)
+        self.assertFalse(os.path.exists("/tmp/kos-codeline-pwned"))
+        _, out = self.run_line("import socket; socket.create_connection(('1.1.1.1', 80), 2)", "python", PW)
+        self.assertIn("Error", out)
+
+    def test_runaway_line_is_stopped(self):
+        status, out = self.run_line("while True: pass", "python", PW, timeout=1.5)
+        self.assertEqual(status, 124)
+        self.assertIn("ran longer", out)
+
+    def test_flagged_code_is_blocked_before_the_password(self):
+        status, out = self.run_line("x = '" + EICAR.decode() + "'", "assignment")   # no answers: no prompt
+        self.assertEqual(status, 3)
+        self.assertIn("security scan", out)
+
+    def test_language_without_a_runtime_is_a_command_that_runs_nothing(self):
+        status, out = self.run_line("const a = 1", "javascript")                    # no password asked
+        self.assertEqual(status, 66)
+        self.assertIn("no sandboxed javascript runtime", out)
+        status, out = self.run_line("run hello; rm -rf /", "shell")
+        self.assertEqual(status, 66)
+
+    def test_nothing_persists_between_lines(self):
+        self.run_line("x = 5", "assignment", PW)
+        _, out = self.run_line("print(x)", "code call", PW)
+        self.assertIn("NameError", out)

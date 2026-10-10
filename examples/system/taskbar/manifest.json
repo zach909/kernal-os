@@ -1,0 +1,9 @@
+{
+  "name": "taskbar",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui", "graphical"],
+  "permissions": ["system"],
+  "description": "The desktop's home bar: shows what is open and switches to it. Right mouse = App Library."
+}

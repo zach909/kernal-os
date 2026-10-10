@@ -16,6 +16,9 @@ OS -> app
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
     {"cmd": "scroll", "dy": -1|1, "x": X, "y": Y}
     {"cmd": "device", "device": "mouse"|"keyboard", "state": "attached"}
+    {"cmd": "apps", "installed": [{name, version, description, modes, permitted}],
+                    "open": [{id, name, mode, status}]}                  (answer to request apps)
+    {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "quit"}
 
 app -> OS
@@ -25,7 +28,16 @@ app -> OS
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
+    {"cmd": "request", "action": "apps"}                       list installed + open apps
+    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
+    {"cmd": "request", "action": "close", "id": INSTANCE}
     {"cmd": "exit", "code": int}
+
+``request`` is how an app does anything beyond drawing: it *asks*. The OS only
+listens if the app's manifest has the ``system`` permission, the app was
+permitted to run, and - for anything that starts or stops something - the owner
+types the password in the OS's own prompt.
 """
 
 from __future__ import annotations
@@ -41,6 +53,9 @@ MAX_LINE_CHARS = 1000
 MAX_OPS = 5000
 MAX_COORD = 16384
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_APP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}-[0-9a-f]{6}$")
+REQUEST_MODES = ("tui", "graphical", "cmd")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
 
@@ -82,6 +97,25 @@ def _op(op: Any) -> list:
     raise ProtocolError(f"bad draw op {kind!r}")
 
 
+def _request(msg: dict) -> dict:
+    action = msg.get("action")
+    if action == "apps":
+        return {"cmd": "request", "action": "apps"}
+    if action == "open":
+        app, mode = msg.get("app"), msg.get("mode", "tui")
+        if not isinstance(app, str) or not _APP_NAME_RE.match(app):
+            raise ProtocolError("request.app must be an app name")
+        if mode not in REQUEST_MODES:
+            raise ProtocolError("request.mode must be tui, graphical or cmd")
+        return {"cmd": "request", "action": "open", "app": app, "mode": mode}
+    if action in ("focus", "close"):
+        ident = msg.get("id")
+        if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
+            raise ProtocolError("request.id must be an open instance id")
+        return {"cmd": "request", "action": action, "id": ident}
+    raise ProtocolError(f"unknown request {action!r}")
+
+
 def validate_app_message(msg: Any, mode: str) -> dict:
     if not isinstance(msg, dict) or not isinstance(msg.get("cmd"), str):
         raise ProtocolError("message must be an object with a 'cmd'")
@@ -103,6 +137,8 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return {"cmd": "frame", "ops": [_op(o) for o in ops]}
     if cmd == "log":
         return {"cmd": "log", "msg": clean_text(msg.get("msg", ""), 2000)}
+    if cmd == "request":
+        return _request(msg)
     if cmd == "exit":
         return {"cmd": "exit", "code": _int(msg.get("code", 0), 0, 255)}
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")

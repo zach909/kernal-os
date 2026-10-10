@@ -44,7 +44,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network"}
+PERMISSIONS = {"network", "system"}
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description"}
 
 

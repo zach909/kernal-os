@@ -17,7 +17,9 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .auth import Authority
+from typing import Optional
+
+from .auth import Authority, Grant
 from .kapp import KApp, compute_seal
 from .paths import Paths, atomic_write
 from .registry import Registry
@@ -76,13 +78,19 @@ def _recompress_kapp(kapp_path: Path, seal_path: Path, seal_key: bytes) -> int:
     return original - len(new_data)
 
 
-def optimize(paths: Paths, authority: Authority) -> OptimizeReport:
+def optimize(paths: Paths, authority: Authority, grant: Optional[Grant] = None) -> OptimizeReport:
+    """``grant``: a password grant the caller already obtained for a larger
+    operation that includes this one (the guarded file write). It is only used
+    to derive the re-seal key; the caller still owns closing it."""
     report = OptimizeReport()
 
     # 1. Recompress every installed app's zip to the best compression, and
     #    re-seal it at the new bytes so it still verifies afterward.
-    with authority.authorize("disk.optimize") as grant:
+    if grant is not None:
         seal_key = grant.key(SEAL_KEY_LABEL)
+    else:
+        with authority.authorize("disk.optimize") as own:
+            seal_key = own.key(SEAL_KEY_LABEL)
     for kapp_path in sorted(paths.apps.glob("*.kapp")):
         seal_path = kapp_path.with_suffix(".seal")
         saved = _recompress_kapp(kapp_path, seal_path, seal_key)

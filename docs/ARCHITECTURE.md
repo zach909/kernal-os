@@ -29,6 +29,52 @@ instant the process ends, by whichever of `run`'s `_run_session` or the
 update: same name, strictly newer version, scanned, password, re-seal.
 `kos update all --from DIR` runs that same path against every installed app.
 
+## Line shell (`kos/lang.py`, `kos/coderun.py`)
+Every line is a command. Human language becomes one structured argv for
+`kos.cli.main` - no shell string anywhere, so `;`, `|`, `&&` and `$()` have
+nothing to attach to. Code is a command too (`kos exec`), but is never run on
+the host: it is scanned, needs `code.run` (the password), and runs as an
+in-memory one-shot `.kapp` under the normal sandbox with a timeout and a
+wiped cache dir. Only Python has a runtime in the sandbox; other languages
+report that and run nothing. Everything the shell can start still passes
+through the same `Authority.authorize` gates.
+
+## Requires (`kos/requires.py`)
+One table, `RULES`, is the policy. `before` is resolved by `Requirements.ensure`
+(depth-first, cycle-checked, the failing chain is the error message; a
+provider may *boot* what is missing). `after` is an obligation: `Ledger.owe`
+writes it to `owed.json` the moment the trigger happens, `Ledger.done` strikes
+steps off, and an unreadable ledger blocks rather than frees. Unlock requires
+admin keyboard requires kernel; `file.write` requires the keyboard before and
+scan + optimize after.
+
+## Administrator keyboard (`kos/admin.py`)
+`session.login` (or `admin.boot`) grant -> `AdminKeyboard.boot`: `kernel_gaps()`
+(Landlock + user namespaces) and a keyboard probe, then `admin-lease.json`
+signed with `HMAC(master, "admin-keyboard")`, bound to `boot_id`, 8 h TTL.
+`require_booted()` (no password) refuses early; `verify()` (needs a password
+grant) checks the signature. Locking deletes the lease.
+`write_file`: `ensure("file.write")` -> ledger must be clear -> `authorize` ->
+`verify` -> atomic write -> `owe` -> scan the file on disk (quarantine if
+flagged) -> `optimize(grant=...)` -> strike off. The password is read through
+`AdminPrompter` over `EvdevDevices`, which grabs the keyboards (`EVIOCGRAB`)
+and refuses if another process already holds one.
+Gap: no separate privileged process; the lease is tamper-evident, not
+tamper-proof against code running as the owner. A flagged file exists on disk
+briefly (between write and scan) because the scan is an obligation *after*.
+
+## Everything is an app (`kos/system.py`, `kos/desktop.py`)
+Apps send `{"cmd":"request",...}` (schema-checked in `protocol.py`). The OS
+honours it only if the *instance record* (written by the OS at open time
+from the verified manifest) has `system: true`; `open`/`close` additionally
+need the password via the session overlay; `focus` is an attach. The right
+mouse button is consumed by `Session.route` when `right_click_to` is set -
+it is never forwarded. `Desktop` is a small state machine over instance ids;
+devices booted in the first session are re-enabled (not re-authorized) in the
+following ones via `preboot`.
+Gap: the desktop's first-session password also covers every later app it
+switches to for *devices*; opening an app still always asks.
+
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short
 list of hand-written regex rules (reverse shells, obfuscated

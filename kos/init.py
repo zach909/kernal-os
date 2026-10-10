@@ -20,15 +20,18 @@ import ctypes
 import fcntl
 import grp
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import termios
 import time
 
+from .admin import AdminKeyboard, requirements
 from .auth import AuthError, Authority, AuthorizationDenied, PasswordStore
 from .paths import Paths
 from .prompt import TTYPrompter
+from .requires import Ledger, Unsatisfied
 
 _libc = ctypes.CDLL(None, use_errno=True)
 MS_NOSUID, MS_NODEV, MS_NOEXEC = 2, 4, 8
@@ -99,8 +102,19 @@ def _owner_groups() -> list[int]:
     return out
 
 
+# After login every line is a command (see kos/lang.py), not a program for /bin/sh.
+DEFAULT_SHELL = "/opt/kos/bin/kos line"
+
+
+def shell_argv() -> list[str]:
+    argv = shlex.split(os.environ.get("KOS_SHELL", DEFAULT_SHELL))
+    # only a POSIX shell wants -l; the line shell takes its own flags
+    if os.path.basename(argv[0]) in ("sh", "ash", "bash", "dash"):
+        argv.append("-l")
+    return argv
+
+
 def start_shell(console: str) -> int:
-    shell = os.environ.get("KOS_SHELL", "/bin/sh")
     env = {"HOME": "/home/owner", "USER": "owner", "TERM": os.environ.get("TERM", "linux"),
            "PATH": "/opt/kos/bin:/usr/local/bin:/usr/bin:/bin", "KOS_ROOT": "/",
            "LANG": "C.UTF-8"}
@@ -117,7 +131,7 @@ def start_shell(console: str) -> int:
             os.setresgid(OWNER_UID, OWNER_UID, OWNER_UID)
             os.setresuid(OWNER_UID, OWNER_UID, OWNER_UID)
 
-    proc = subprocess.Popen([shell, "-l"], env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
+    proc = subprocess.Popen(shell_argv(), env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
                             else "/", preexec_fn=child_setup, close_fds=True)
     # PID 1 must reap every orphan, not just the shell.
     while True:
@@ -137,20 +151,39 @@ def login_loop(paths: Paths, console: str) -> None:
         from .cli import _new_password
         store.create(_new_password(prompter)).wipe()
     authority = Authority(paths, prompter)
+    keyboard = AdminKeyboard(paths)
     while True:
+        keyboard.shutdown()  # nothing elevated survives a lock (or a crash and restart)
         prompter.info(BANNER)
         try:
-            authority.authorize("session.login").close()
+            # The one password typed here asks to unlock. Unlocking *requires*
+            # the elevated administrator keyboard, which requires the kernel
+            # (kos/requires.py): the chain is satisfied, deepest first, with
+            # this same password - no second prompt - or the computer stays locked.
+            with authority.authorize("session.login") as grant:
+                brought_up = requirements(keyboard, grant).ensure("session.unlock")
+            if "admin.keyboard" in brought_up:
+                prompter.info("Administrator keyboard booted.")
         except AuthorizationDenied:
             prompter.info("Locked.")
             time.sleep(2)
             continue
-        except AuthError as e:
+        except Unsatisfied as e:
+            keyboard.shutdown()
+            prompter.info(f"Locked - cannot unlock: {e}")
+            time.sleep(5)
+            continue
+        except (AuthError, OSError) as e:
             prompter.info(f"auth error: {e}")
             time.sleep(5)
             continue
-        prompter.info("Unlocked. Type 'run APP' or 'run graphical APP'. Exit the shell to lock.\n")
+        owed = Ledger(paths).owed()
+        if owed:
+            prompter.info(f"{len(owed)} earlier write(s) still owe a scan/optimize: type 'settle'.")
+        prompter.info("Unlocked. Every line you type is a command - say what you want "
+                      "('help' lists them). 'exit' locks.\n")
         start_shell(console)
+        keyboard.shutdown()
         prompter.info("\nSession ended - locked.")
 
 
