@@ -64,6 +64,9 @@ ACTIONS: dict[str, str] = {
     "cell.stop": "stop kernel cell",
     "file.write": "write file",
     "code.run": "run code",
+    "backup.create": "back up files",
+    "backup.remote": "set the off-site backup repository",
+    "backup.push": "push a backup to your private GitHub",
     "admin.boot": "boot the administrator keyboard",
 }
 

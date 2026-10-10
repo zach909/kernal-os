@@ -65,6 +65,10 @@ kos optimize                 recompress apps, prune dead state, reclaim disk spa
 kos admin [status|boot|lock] the elevated administrator keyboard (boots at login)
 kos write PATH --text T      write a file (needs the admin keyboard); owes a scan + optimize afterwards
 kos owed / kos settle        what earlier writes still owe / do it now
+kos backup [PATH]            back a file/folder up (no PATH lists backups); scanned when made
+kos restore BACKUP MEMBER DEST   put one file back (guarded write)
+kos offsite remote [URL]     YOUR private GitHub repository for backups (github.com only)
+kos offsite push BACKUP      push a backup there (refused if the repo is publicly readable)
 kos exec --code LINE         run one line of code as a sandboxed command
 kos do WORDS...              one line of human language, run as one command
 kos line [--explain]         the line shell: every line you type is a command
@@ -158,6 +162,7 @@ session.unlock  requires (before)  admin.keyboard
 admin.keyboard  requires (before)  kernel
 file.write      requires (before)  admin.keyboard
                 requires (after)   scan, optimize
+backup.create   requires (after)   scan
 ```
 
 *Before* is a chain followed deepest-first: login asks for the password once,
@@ -179,6 +184,37 @@ you from calling `open()` itself (that is what the app sandbox is for). Exclusiv
 keyboard capture needs real evdev hardware and has **not been run on hardware
 here**; over a plain terminal set `KOS_DEV_ADMIN_WEAK=1` (the lease is then
 marked WEAK and the keyboard is not exclusive).
+
+## The built-in apps
+
+Everything on the desktop is an app: sandboxed, no screen/file/network access of
+its own, only *requests* to the OS (which needs the `system` permission and, for
+anything that changes something, your password in the OS's own prompt).
+`kos desktop install` installs and permits all of them.
+
+| App | What it does |
+|---|---|
+| `taskbar` | Home screen: what is open, switch to it. |
+| `app-library` | Every installed app; Enter opens one (password). Right mouse = this. |
+| `files` | **File viewer**: browse folders and zips (never extracted); Enter on a file views it (password); `s` scans it. |
+| `editor` | **File editor**: opens a file (password), edit, Ctrl-S saves through the *guarded write* (admin keyboard, password, then a scan + optimize are owed). A file that would not round-trip exactly (tabs, CRLF, very long lines, binary, too big) opens **read-only**. |
+| `backup` | **Backups of your documents**: back up a file/folder into a zip that only KOS writes and scans; browse a backup without extracting; restore one file (guarded write); push to *your own* private GitHub. |
+| `settings` | Kernel protections; which apps are permitted to run (Enter toggles, password). |
+| `security` | Administrator keyboard status, what is owed, scans, recent decisions; settle / optimize. |
+| `terminal` | The line shell as an app: plain language *and* code lines (sandboxed). |
+
+### Backups and your own GitHub
+
+Whoever uses the OS pushes **their own** backups to **their own** GitHub account:
+`kos offsite remote https://github.com/YOU/REPO` (or `g` in the Backup app) stores
+*their* repository on *their* machine; nothing about any particular account is in
+the code. Pushing uses your normal git credentials (credential helper / ssh agent) -
+KOS never sees or stores a token. Guards: only `github.com` repositories are
+accepted (git's exotic transports can't be reached); **before every push** the
+repository is probed anonymously and the push is **refused if it is publicly
+readable**; every push needs your password. Limits: the backup is not
+encrypted - "private" is GitHub's access control, not cryptography - and the probe
+can't tell a private repository from one that doesn't exist (the push then fails).
 
 ## Try it on any Linux machine
 

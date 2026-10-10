@@ -75,6 +75,21 @@ following ones via `preboot`.
 Gap: the desktop's first-session password also covers every later app it
 switches to for *devices*; opening an app still always asks.
 
+## Built-in apps, backups, off-site (`kos/sysinfo.py`, `kos/backup.py`, `kos/offsite.py`)
+More `request`s on the same bridge: `info`, `ls`, `view` (password), `scan`,
+`optimize`/`settle` (password), `permit`/`revoke` (password), `line` (the line
+shell; code lines go to `coderun`), `save`/`restore` (the guarded write),
+`backup`/`backups`/`push`/`remote`. `view` returns `lossy` when what is shown
+would not round-trip (truncated, tabs, CRLF, long lines, non-UTF-8); the editor
+refuses to save those. `backup.create` writes a zip under `<state>/backups`
+(KOS state: not writable through `kos write`), owes a scan (`requires.RULES`),
+quarantines a flagged backup. `Offsite.push` needs a github.com-only remote the
+*user* set, probes it anonymously (`git ls-remote`, credentials/prompts/global
+config disabled) and refuses a publicly readable one, twice (before and after
+the password), then commits the zip to a local mirror and pushes it using the
+user's own git credentials. Gap: not encrypted; the probe cannot distinguish a
+private repo from a missing one.
+
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short
 list of hand-written regex rules (reverse shells, obfuscated

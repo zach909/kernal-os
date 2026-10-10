@@ -28,7 +28,9 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import cache
+from . import backup as backups_mod
+from . import cache, sysinfo
+from .admin import AdminError, AdminKeyboard, write_file
 from .auth import AuthError, Authority, AuthorizationDenied
 from .broker import spawn
 from .kapp import KApp, KAppError
@@ -38,6 +40,7 @@ from .protocol import clean_text
 from .registry import Instance, Registry, RegistryError
 from .sandbox import SandboxError, SandboxPolicy
 from .store import AppStore, TamperedError
+from .vfs import VFSError
 
 MAX_LISTED = 200
 
@@ -171,6 +174,76 @@ class SystemBridge:
                 inst = close_instance(self.paths, authority, req["id"])
                 result(True, f"closed {inst.id}", id=inst.id)
                 return None
+            if action == "info":
+                reply({"cmd": "info", "admin": sysinfo.admin_line(self.paths),
+                       "kernel": sysinfo.doctor_lines(), "owed": sysinfo.owed_lines(self.paths),
+                       "audit": sysinfo.audit_lines(self.paths),
+                       "permits": [p.name for p in PermitStore(self.paths).list()]})
+                return None
+            if action == "ls":
+                reply({"cmd": "listing", "path": clean_text(req["path"], 300),
+                       "entries": sysinfo.list_path(req["path"])})
+                return None
+            if action == "scan":
+                self._text(reply, action, req["path"], sysinfo.scan_lines(req["path"]))
+                return None
+            if action == "view":
+                path = os.path.abspath(req["path"])
+                authority.authorize("file.view", path).close()
+                lines, lossy = sysinfo.view_text(path)
+                self._text(reply, action, path, lines, lossy=lossy)
+                return None
+            if action == "save":
+                rep = write_file(self.paths, authority, AdminKeyboard(self.paths),
+                                 req["path"], req["text"].encode())
+                self._text(reply, action, rep.path, rep.summary().splitlines())
+                return None
+            if action == "backup":
+                info = backups_mod.create(self.paths, authority, req["path"])
+                self._text(reply, action, info["name"],
+                           [f"backed up {info['files']} file(s) -> {info['name']} ({info['size']:,} bytes)",
+                            "security scan: clean"])
+                return None
+            if action == "backups":
+                from .offsite import Offsite
+                reply({"cmd": "backups", "backups": backups_mod.list_backups(self.paths),
+                       "remote": clean_text(Offsite(self.paths).remote() or "", 300)})
+                return None
+            if action == "remote":
+                from .offsite import Offsite
+                url = Offsite(self.paths).set_remote(authority, req["url"])
+                result(True, f"off-site repository: {url}")
+                return None
+            if action == "push":
+                from .offsite import Offsite
+                self._text(reply, action, req["backup"],
+                           [Offsite(self.paths).push(authority, req["backup"])])
+                return None
+            if action == "restore":
+                data = backups_mod.read_member(self.paths, req["backup"], req["member"])
+                rep = write_file(self.paths, authority, AdminKeyboard(self.paths), req["to"], data)
+                self._text(reply, action, rep.path, ["restored " + req["member"]] + rep.summary().splitlines())
+                return None
+            if action == "optimize":
+                from .optimize import optimize
+                self._text(reply, action, "disk optimize", [optimize(self.paths, authority).summary()])
+                return None
+            if action == "settle":
+                from .admin import settle
+                self._text(reply, action, "settle", settle(self.paths, authority))
+                return None
+            if action in ("permit", "revoke"):
+                name = req["app"]
+                if name not in {a.name for a in AppStore(self.paths).installed()}:
+                    result(False, f"{name} is not installed")
+                    return None
+                with authority.authorize("app.revoke" if action == "revoke" else "app.permit", name):
+                    getattr(PermitStore(self.paths), "revoke" if action == "revoke" else "grant")(name)
+                result(True, f"{name} {'may no longer run' if action == 'revoke' else 'may now run'}")
+                return None
+            if action == "line":
+                self._text(reply, action, req["text"], self._line(req["text"], authority))
+                return None
             if action == "focus":
                 inst = Registry(self.paths).get(req["id"])
                 if inst.status != "running":
@@ -179,6 +252,84 @@ class SystemBridge:
                 result(True, f"switching to {inst.id}", id=inst.id)
                 return ("instance", inst.id)
         except (AuthorizationDenied, AuthError, PermitError, KAppError, SandboxError,
-                RegistryError, TamperedError, OSError) as e:
+                RegistryError, TamperedError, VFSError, AdminError, OSError) as e:
             result(False, str(e))
         return None
+
+    @staticmethod
+    def _text(reply, action: str, title: str, lines: list[str], **extra) -> None:
+        reply({"cmd": "text", "action": action, "title": clean_text(title, 120),
+               "lines": [clean_text(l, 300) for l in lines[:sysinfo.MAX_VIEW_LINES]], **extra})
+
+    def _line(self, text: str, authority: Authority) -> list[str]:
+        """The line shell, inside the desktop. Same words, same gates - the
+        commands that need the real terminal say so instead of half-working."""
+        from .lang import HELP, interpret
+        r = interpret(text)
+        if r.kind == "empty":
+            return []
+        if r.kind == "help":
+            return HELP.splitlines()
+        if r.kind == "exit":
+            return ["Ctrl-C leaves this app."]
+        if r.kind == "unknown":
+            return ["I don't know that command." + (f" Did you mean '{r.hint}'?" if r.hint else "")]
+        if r.kind == "code":
+            from .coderun import run_code
+            out: list[str] = []
+            status = run_code(self.paths, lambda: authority, text, r.language, out=out.append)
+            return [l for chunk in out for l in chunk.splitlines()] or [f"(exit {status})"]
+        argv, verb = list(r.argv), r.argv[0]
+        if verb == "list":
+            return [f"{a['name']:<14} {a['version']:<8} {'permitted' if a['permitted'] else 'needs: permit'}"
+                    for a in list_apps(self.paths)] or ["no apps installed"]
+        if verb == "ps":
+            return [f"{i['id']:<24} {i['name']:<14} {i['mode']:<9} {i['status']}"
+                    for i in list_open(self.paths)] or ["no apps open"]
+        if verb == "scan" and len(argv) >= 3:
+            return sysinfo.scan_lines(argv[2])
+        if verb == "ls" and len(argv) >= 2:
+            return [f"{e['name']}{'/' if e['kind'] == 'dir' else ''}" for e in sysinfo.list_path(argv[1])]
+        if verb == "view" and len(argv) >= 2:
+            path = os.path.abspath(argv[1])
+            authority.authorize("file.view", path).close()
+            return sysinfo.view_lines(path)
+        if verb == "optimize":
+            from .optimize import optimize
+            return [optimize(self.paths, authority).summary()]
+        if verb == "settle":
+            from .admin import settle
+            return settle(self.paths, authority)
+        if verb == "owed":
+            return sysinfo.owed_lines(self.paths)
+        if verb == "audit":
+            return sysinfo.audit_lines(self.paths, 30)
+        if verb == "activity":
+            from .activity import build_feed, render_feed
+            return render_feed(build_feed(self.paths, limit=30)).splitlines()
+        if verb == "doctor":
+            return sysinfo.doctor_lines()
+        if verb == "admin" and len(argv) == 1:
+            return [sysinfo.admin_line(self.paths)]
+        if verb == "open" and len(argv) >= 2:
+            mode = argv[1] if len(argv) == 3 else "tui"
+            inst = open_background(self.paths, authority, argv[-1], mode, spawner=self._spawner)
+            return [f"opened {inst.name} as {inst.id}"]
+        if verb == "close" and len(argv) == 2:
+            return [f"closed {close_instance(self.paths, authority, argv[1]).id}"]
+        if verb == "permit" and len(argv) >= 2:
+            revoke = argv[1] == "--revoke"
+            name = argv[-1]
+            with authority.authorize("app.revoke" if revoke else "app.permit", name):
+                getattr(PermitStore(self.paths), "revoke" if revoke else "grant")(name)
+            return [f"{name} {'may no longer run' if revoke else 'may now run'}"]
+        if verb == "backup":
+            if len(argv) < 2:
+                return [f"{b['name']}  {b['files']} file(s)  {b['size']:,} bytes"
+                        for b in backups_mod.list_backups(self.paths)] or ["no backups yet"]
+            info = backups_mod.create(self.paths, authority, argv[1])
+            return [f"backed up {info['files']} file(s) -> {info['name']}"]
+        if verb == "boot":
+            return ["you are already on the desktop"]
+        return [f"'{r.word}' needs the real terminal (it takes over the screen or the "
+                "administrator keyboard) - use it there, or open the app from the App Library."]

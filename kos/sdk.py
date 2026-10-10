@@ -112,6 +112,48 @@ class App:
     def request_close(self, instance_id: str) -> None:
         self.send({"cmd": "request", "action": "close", "id": instance_id})
 
+    def request_info(self) -> None:
+        self.send({"cmd": "request", "action": "info"})
+
+    def request_ls(self, path: str) -> None:
+        self.send({"cmd": "request", "action": "ls", "path": path})
+
+    def request_view(self, path: str) -> None:
+        self.send({"cmd": "request", "action": "view", "path": path})
+
+    def request_scan(self, path: str) -> None:
+        self.send({"cmd": "request", "action": "scan", "path": path})
+
+    def request_optimize(self) -> None:
+        self.send({"cmd": "request", "action": "optimize"})
+
+    def request_settle(self) -> None:
+        self.send({"cmd": "request", "action": "settle"})
+
+    def request_permit(self, app: str, revoke: bool = False) -> None:
+        self.send({"cmd": "request", "action": "revoke" if revoke else "permit", "app": app})
+
+    def request_save(self, path: str, text: str) -> None:
+        self.send({"cmd": "request", "action": "save", "path": path, "text": text})
+
+    def request_backup(self, path: str) -> None:
+        self.send({"cmd": "request", "action": "backup", "path": path})
+
+    def request_backups(self) -> None:
+        self.send({"cmd": "request", "action": "backups"})
+
+    def request_remote(self, url: str) -> None:
+        self.send({"cmd": "request", "action": "remote", "url": url})
+
+    def request_push(self, backup: str) -> None:
+        self.send({"cmd": "request", "action": "push", "backup": backup})
+
+    def request_restore(self, backup: str, member: str, to: str) -> None:
+        self.send({"cmd": "request", "action": "restore", "backup": backup, "member": member, "to": to})
+
+    def request_line(self, text: str) -> None:
+        self.send({"cmd": "request", "action": "line", "text": text})
+
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch
         didn't provide one. It is wiped the moment this app's process ends -

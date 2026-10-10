@@ -277,6 +277,21 @@ _LEXICON: dict[str, dict[str, str]] = {
         "zh": "管理员 管理員",
         "ja": "管理者",
     },
+    "backup": {
+        "en": "backup",
+        "es": "respalda respaldar",
+        "de": "sichere sichern",
+        "zh": "备份 備份",
+        "ja": "バックアップ",
+    },
+    "settle": {
+        "en": "settle",
+        "es": "salda saldar",
+    },
+    "owed": {
+        "en": "owed pending",
+        "es": "pendiente pendientes",
+    },
     "help": {
         "en": "help ?",
         "es": "ayuda",

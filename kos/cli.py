@@ -32,6 +32,7 @@
     kos doctor                      which kernel protections are available
     kos audit                       show the authorization log
     kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
+    kos backup [PATH] / kos restore BACKUP MEMBER DEST   back a file/folder up; restore one file
     kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
     kos do WORDS...                 one line of human language, run as one command
     kos line [--explain]            the line shell: every line you type is a command
@@ -661,25 +662,75 @@ def cmd_settle(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_write(args, paths: Paths) -> int:
-    """Write a file. Needs the booted administrator keyboard, the password
-    typed on it, a clean security scan, and a disk optimize - in that order."""
-    from .admin import (AdminKeyboard, AdminPrompter, open_admin_devices, write_file)
+def _guarded_write(paths: Paths, target: str, data: bytes):
+    """Shared by `write` and `restore`: the administrator keyboard must be
+    booted; the password is typed on it (exclusive on real hardware)."""
+    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
     kb = AdminKeyboard(paths)
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)  # exclusive keyboards, or None on a WEAK lease
+    try:
+        prompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        return write_file(paths, Authority(paths, prompter), kb, target, data)
+    finally:
+        if devices is not None:
+            devices.close()
+
+
+def cmd_write(args, paths: Paths) -> int:
+    """Write a file. Needs the booted administrator keyboard and the password
+    typed on it; the file then owes a security scan and a disk optimize."""
     if args.text is not None and args.stdin:
         raise KAppError("give the text with --text or --stdin, not both")
     if args.text is None and not args.stdin:
         raise KAppError("nothing to write: write FILE TEXT  (or --stdin)")
     data = (sys.stdin.buffer.read() if args.stdin else args.text.encode())
-    lease = kb.require_booted()          # refuse before any password prompt
-    devices = open_admin_devices(lease)  # exclusive keyboards, or None on a WEAK lease
-    try:
-        prompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
-        report = write_file(paths, Authority(paths, prompter), kb, args.path, data)
-    finally:
-        if devices is not None:
-            devices.close()
-    print(report.summary())
+    print(_guarded_write(paths, args.path, data).summary())
+    return 0
+
+
+def cmd_backup(args, paths: Paths) -> int:
+    """`kos backup PATH` backs a file or folder up; no PATH lists the backups."""
+    from . import backup
+    if not args.path:
+        rows = backup.list_backups(paths)
+        for b in rows:
+            print(f"{b['name']:<44} {b['files']:>5} file(s) {b['size']:>10,} bytes")
+        if not rows:
+            print("no backups yet")
+        return 0
+    authority, prompter = _authority(paths)
+    info = backup.create(paths, authority, args.path)
+    prompter.close()
+    print(f"backed up {info['files']} file(s) -> {info['name']} ({info['size']:,} bytes); scanned clean")
+    return 0
+
+
+def cmd_offsite(args, paths: Paths) -> int:
+    """Your private GitHub copy of the backups. Refuses any public repository."""
+    from .offsite import Offsite
+    off = Offsite(paths)
+    if args.offsite_cmd == "remote":
+        if not args.arg:
+            print(off.remote() or "no off-site repository set")
+            return 0
+        authority, prompter = _authority(paths)
+        print("off-site repository:", off.set_remote(authority, args.arg))
+        prompter.close()
+        return 0
+    if not args.arg:
+        raise KAppError("usage: kos offsite push BACKUP")
+    authority, prompter = _authority(paths)
+    print(off.push(authority, args.arg))
+    prompter.close()
+    return 0
+
+
+def cmd_restore(args, paths: Paths) -> int:
+    """Put one file from a backup back, through the guarded write."""
+    from . import backup
+    data = backup.read_member(paths, args.backup, args.member)
+    print(_guarded_write(paths, args.dest, data).summary())
     return 0
 
 
@@ -807,6 +858,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", type=int, default=30)
     s = sub.add_parser("admin", help="the elevated administrator keyboard")
     s.add_argument("admin_cmd", nargs="?", choices=["status", "boot", "lock"])
+    s = sub.add_parser("backup", help="back a file or folder up (no PATH lists backups)")
+    s.add_argument("path", nargs="?")
+    s = sub.add_parser("offsite", help="push backups to your PRIVATE GitHub repository")
+    s.add_argument("offsite_cmd", choices=["remote", "push"])
+    s.add_argument("arg", nargs="?", help="remote: the GitHub URL; push: the backup name")
+    s = sub.add_parser("restore", help="restore one file from a backup (guarded write)")
+    s.add_argument("backup")
+    s.add_argument("member")
+    s.add_argument("dest")
     sub.add_parser("owed", help="what earlier writes still owe (a scan, an optimize)")
     sub.add_parser("settle", help="do what is owed: security scan + disk optimize")
     s = sub.add_parser("write", help="write a file (admin keyboard, security scan, disk optimize)")
@@ -831,7 +891,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
+            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 
 

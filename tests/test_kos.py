@@ -1301,3 +1301,511 @@ class TestCodeIsACommand(Env):
         self.run_line("x = 5", "assignment", PW)
         _, out = self.run_line("print(x)", "code call", PW)
         self.assertIn("NameError", out)
+
+
+class TestSystemRequestsProtocol(unittest.TestCase):
+    def test_new_requests_validate(self):
+        for ok in ({"action": "info"}, {"action": "optimize"}, {"action": "settle"},
+                   {"action": "ls", "path": "/tmp"}, {"action": "view", "path": "/tmp/x"},
+                   {"action": "scan", "path": "a.kapp"}, {"action": "permit", "app": "hello"},
+                   {"action": "revoke", "app": "hello"}, {"action": "line", "text": "lista"}):
+            self.assertEqual(validate_app_message({"cmd": "request", **ok}, "tui")["action"], ok["action"])
+
+    def test_hostile_values_are_rejected_or_cleaned(self):
+        for bad in ({"action": "ls", "path": ""}, {"action": "ls", "path": "a\x00b"},
+                    {"action": "view", "path": "x" * 2000}, {"action": "ls", "path": 5},
+                    {"action": "permit", "app": "../x"}):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message({"cmd": "request", **bad}, "tui")
+        line = validate_app_message({"cmd": "request", "action": "line", "text": "ru\x1b[2Jn"}, "tui")
+        self.assertNotIn("\x1b", line["text"])
+
+
+class TestSystemBridgeActions(Env):
+    def setUp(self):
+        super().setUp()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        self.sent = []
+        self.work = Path(self.tmp.name) / "work"
+        self.work.mkdir()
+
+    def ask(self, req, *answers):
+        bridge = SystemBridge(self.paths)
+        bridge.handle({"cmd": "request", **req}, self.sent.append, self.authority(*answers))
+        return self.sent[-1]
+
+    def test_info_reports_admin_kernel_owed_audit_and_permits(self):
+        PermitStore(self.paths).grant("hello")
+        r = self.ask({"action": "info"})
+        self.assertEqual(r["cmd"], "info")
+        self.assertIn("OFF", r["admin"])
+        self.assertTrue(any("Landlock" in l for l in r["kernel"]))
+        self.assertEqual(r["owed"], ["nothing is owed"])
+        self.assertTrue(any("app.install" in l for l in r["audit"]))
+        self.assertEqual(r["permits"], ["hello"])
+
+    def test_ls_lists_folders_and_inside_zips_without_extracting(self):
+        (self.work / "sub").mkdir()
+        (self.work / "a.txt").write_text("hi")
+        (self.work / "app.kapp").write_bytes(self.kapp.read_bytes())
+        r = self.ask({"action": "ls", "path": str(self.work)})
+        self.assertEqual([(e["name"], e["kind"]) for e in r["entries"]],
+                         [("app.kapp", "zip"), ("sub", "dir"), ("a.txt", "file")])
+        r = self.ask({"action": "ls", "path": str(self.work / "app.kapp")})
+        self.assertIn("manifest.json", [e["name"] for e in r["entries"]])
+        self.assertFalse((self.work / "manifest.json").exists())      # nothing was extracted
+
+    def test_view_needs_the_password_and_strips_terminal_escapes(self):
+        f = self.work / "n.txt"
+        f.write_text("hello\n\x1b[2Jevil\n")
+        r = self.ask({"action": "view", "path": str(f)}, "no", "no", "no")
+        self.assertFalse(r["ok"])                                      # wrong password: no text at all
+        r = self.ask({"action": "view", "path": str(f)}, PW)
+        self.assertEqual(r["cmd"], "text")
+        self.assertEqual(r["lines"][0], "hello")
+        self.assertNotIn("\x1b", "".join(r["lines"]))
+
+    def test_scan_flags_a_file_with_no_password(self):
+        bad, ok = self.work / "bad.txt", self.work / "ok.txt"
+        bad.write_bytes(EICAR)
+        ok.write_text("fine")
+        self.assertIn("FLAGGED", self.ask({"action": "scan", "path": str(bad)})["lines"][0])
+        self.assertIn("clean", self.ask({"action": "scan", "path": str(ok)})["lines"][0])
+
+    def test_optimize_and_settle_each_need_the_password(self):
+        r = self.ask({"action": "optimize"}, "no", "no", "no")
+        self.assertFalse(r["ok"])
+        r = self.ask({"action": "optimize"}, PW)
+        self.assertIn("reclaimed", r["lines"][0])
+        from kos.requires import Ledger
+        Ledger(self.paths).owe("file.write", str(self.work / "x"))
+        r = self.ask({"action": "settle"}, PW)
+        self.assertEqual(Ledger(self.paths).owed(), [])
+        self.assertTrue(any("settled" in l for l in r["lines"]))
+
+    def test_permit_and_revoke_need_the_password_and_an_installed_app(self):
+        self.assertFalse(self.ask({"action": "permit", "app": "ghost"}, PW)["ok"])
+        self.assertFalse(self.ask({"action": "permit", "app": "hello"}, "no", "no", "no")["ok"])
+        self.assertFalse(PermitStore(self.paths).is_permitted("hello"))
+        self.assertTrue(self.ask({"action": "permit", "app": "hello"}, PW)["ok"])
+        self.assertTrue(PermitStore(self.paths).is_permitted("hello"))
+        self.assertTrue(self.ask({"action": "revoke", "app": "hello"}, PW)["ok"])
+        self.assertFalse(PermitStore(self.paths).is_permitted("hello"))
+
+    def test_line_runs_the_line_shell_inside_the_desktop(self):
+        lines = lambda text, *a: self.ask({"action": "line", "text": text}, *a)["lines"]
+        self.assertTrue(any("hello" in l and "needs: permit" in l for l in lines("lista")))
+        self.assertEqual(lines("permite hello", PW), ["hello may now run"])
+        self.assertTrue(any("hello" in l and "permitted" in l for l in lines("list")))
+        self.assertIn("nothing is owed", lines("owed")[0])
+        self.assertTrue(any("Landlock" in l for l in lines("doctor")))
+        self.assertTrue(any("don't know" in l for l in lines("bonjour")))
+        self.assertTrue(any("real terminal" in l for l in lines("write a.txt hi")))
+        self.assertTrue(any("real terminal" in l for l in lines("run hello")))
+
+    def test_line_runs_code_as_a_sandboxed_command_and_shell_glue_runs_nothing(self):
+        out = self.ask({"action": "line", "text": "print(6 * 7)"}, PW)["lines"]
+        self.assertIn("42", out)
+        out = self.ask({"action": "line", "text": "run hello; rm -rf /"})["lines"]
+        self.assertTrue(any("no sandboxed shell runtime" in l for l in out))
+
+
+class TestSystemAppsRunForReal(DesktopSessionEnv):
+    """Each built-in app, as a real sandboxed process, against scripted input."""
+
+    def go(self, name, push_after=2.5, keys=(), wait=6.0):
+        s = self.start(SYSTEM_DIR / name, name, bridge=SystemBridge(self.paths))
+        self.boot_both()
+        if keys:
+            threading.Timer(push_after, lambda: self.devices.push(*keys)).start()
+        threading.Timer(wait, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        return self.output()
+
+    def test_security_center_shows_the_admin_keyboard_kernel_and_owed(self):
+        out = self.go("security")
+        for needle in ("Security Center", "Administrator keyboard", "OFF", "Kernel protections",
+                       "Landlock ABI", "nothing is owed", "Recent decisions"):
+            self.assertIn(needle, out)
+
+    def test_settings_lists_apps_and_toggles_permission_with_a_password(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        s = self.start(SYSTEM_DIR / "settings", "settings", bridge=SystemBridge(self.paths),
+                       authority=Authority(self.paths, None, Throttle(self.paths, base=0)))
+        self.boot_both()
+        threading.Timer(3.0, lambda: self.devices.push(ENTER)).start()      # first app = hello
+        self.when_modal("Password to give app permission", [*_keys(PW), ENTER])
+        threading.Timer(9.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        out = self.output()
+        self.assertIn("Kernel protections", out)
+        self.assertIn("NOT permitted", out)
+        self.assertTrue(PermitStore(self.paths).is_permitted("hello"))
+
+    def test_files_browses_the_filesystem_by_asking_the_os(self):
+        out = self.go("files")
+        self.assertIn("Files", out)
+        self.assertIn("etc/", out)
+
+    def test_terminal_runs_a_plain_language_line(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        out = self.go("terminal", keys=[*_keys("lista"), ENTER])
+        self.assertIn("kos> lista", out)
+        self.assertIn("needs: permit", out)
+
+    def test_terminal_runs_a_code_line_in_the_sandbox_after_the_prompt(self):
+        s = self.start(SYSTEM_DIR / "terminal", "terminal", bridge=SystemBridge(self.paths),
+                       authority=Authority(self.paths, None, Throttle(self.paths, base=0)))
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push(*_keys("print(6*7)"), ENTER)).start()
+        self.when_modal("Password to run code", [*_keys(PW), ENTER])
+        threading.Timer(9.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        out = self.output()
+        self.assertIn("kos> print(6*7)", out)
+        self.assertRegex(out, r"\b42\b")
+
+
+from kos import backup as kbackup  # noqa: E402
+
+
+class TestFileRequestsProtocol(unittest.TestCase):
+    def test_valid_file_requests(self):
+        v = lambda **m: validate_app_message({"cmd": "request", **m}, "tui")
+        self.assertEqual(v(action="save", path="/tmp/a", text="line1\nline2\n\tindented")["action"], "save")
+        self.assertEqual(v(action="backup", path="/tmp/docs")["path"], "/tmp/docs")
+        self.assertEqual(v(action="backups")["action"], "backups")
+        self.assertEqual(v(action="restore", backup="docs-20260101-000000.zip",
+                           member="docs/a.txt", to="/tmp/a.txt")["member"], "docs/a.txt")
+
+    def test_hostile_file_requests_are_rejected(self):
+        v = lambda **m: validate_app_message({"cmd": "request", **m}, "tui")
+        for bad in (dict(action="save", path="/tmp/a", text="x\x1b[2Jy"), dict(action="save", path="/tmp/a", text="x\x00y"),
+                    dict(action="save", path="/tmp/a", text="x" * (300 << 10)), dict(action="save", path="", text="x"),
+                    dict(action="save", path="/tmp/a", text=5),
+                    dict(action="restore", backup="../etc/passwd", member="a", to="/tmp/a"),
+                    dict(action="restore", backup="x.zip", member="", to="/tmp/a"),
+                    dict(action="backup", path="a\x00b")):
+            with self.assertRaises(ProtocolError, msg=bad):
+                v(**bad)
+
+
+class TestBackup(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        self.docs = Path(self.tmp.name) / "docs"
+        (self.docs / "sub").mkdir(parents=True)
+        (self.docs / "a.txt").write_text("alpha")
+        (self.docs / "sub" / "b.txt").write_text("beta")
+        (self.docs / "link").symlink_to("/etc/hostname")
+
+    def test_backup_of_a_folder_is_a_zip_that_is_never_extracted(self):
+        info = kbackup.create(self.paths, self.authority(PW), str(self.docs))
+        self.assertEqual(info["files"], 2)                         # the symlink was skipped
+        self.assertRegex(info["name"], r"^docs-\d{8}-\d{6}\.zip$")
+        z = zipfile.ZipFile(info["path"])
+        self.assertEqual(sorted(z.namelist()), ["docs/a.txt", "docs/sub/b.txt"])
+        self.assertEqual([b["name"] for b in kbackup.list_backups(self.paths)], [info["name"]])
+        self.assertEqual(oct(Path(info["path"]).stat().st_mode & 0o777), "0o600")
+        self.assertEqual(Ledger_owed(self.paths), [])               # the scan it owed was done
+
+    def test_it_needs_the_password(self):
+        with self.assertRaises(AuthorizationDenied):
+            kbackup.create(self.paths, self.authority("no", "no", "no"), str(self.docs))
+        self.assertEqual(kbackup.list_backups(self.paths), [])
+
+    def test_a_flagged_document_is_quarantined_not_kept(self):
+        (self.docs / "virus.txt").write_bytes(EICAR)
+        with self.assertRaises(WriteBlocked):
+            kbackup.create(self.paths, self.authority(PW), str(self.docs))
+        self.assertEqual(kbackup.list_backups(self.paths), [])
+        self.assertEqual(len(list((self.paths.state / "quarantine").glob("write-*.zip"))), 1)
+        self.assertEqual(Ledger_owed(self.paths), [])
+
+    def test_kos_state_and_missing_paths_are_refused(self):
+        self.paths.ensure()
+        for bad in (str(self.paths.state), str(self.paths.etc), str(self.docs / "nope")):
+            with self.assertRaises(AdminError):
+                kbackup.create(self.paths, self.authority(PW), bad)
+
+    def test_restore_reads_only_real_members_of_real_backups(self):
+        info = kbackup.create(self.paths, self.authority(PW), str(self.docs))
+        self.assertEqual(kbackup.read_member(self.paths, info["name"], "docs/a.txt"), b"alpha")
+        for backup, member in ((info["name"], "../../etc/passwd"), (info["name"], "/etc/passwd"),
+                               (info["name"], "docs/missing"), ("../x.zip", "docs/a.txt"),
+                               ("nope.zip", "docs/a.txt")):
+            with self.assertRaises(AdminError, msg=(backup, member)):
+                kbackup.read_member(self.paths, backup, member)
+
+
+def Ledger_owed(paths):
+    from kos.requires import Ledger
+    return Ledger(paths).owed()
+
+
+class TestEditorBackupBridge(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.work = Path(self.tmp.name) / "work"
+        self.work.mkdir()
+        self.kb_ = self.booted()
+
+    def ask(self, req, *answers):
+        with mock.patch("kos.system.AdminKeyboard", lambda paths: self.kb_):
+            SystemBridge(self.paths).handle({"cmd": "request", **req}, self.sent.append,
+                                            self.authority(*answers))
+        return self.sent[-1]
+
+    def test_view_marks_files_that_would_not_round_trip_as_lossy(self):
+        plain, tabbed, crlf, longline = (self.work / n for n in ("p", "t", "c", "l"))
+        plain.write_text("one\ntwo\n")
+        tabbed.write_text("a\tb\n")
+        crlf.write_bytes(b"a\r\nb\r\n")
+        longline.write_text("x" * 500 + "\n")
+        for f, lossy in ((plain, False), (tabbed, True), (crlf, True), (longline, True)):
+            r = self.ask({"action": "view", "path": str(f)}, PW)
+            self.assertEqual(r["lossy"], lossy, f.name)
+
+    def test_save_is_a_guarded_write_and_keeps_the_file_mode(self):
+        f = self.work / "n.txt"
+        f.write_text("old\n")
+        os.chmod(f, 0o640)
+        r = self.ask({"action": "save", "path": str(f), "text": "new\nlines\n"}, PW)
+        self.assertEqual(r["cmd"], "text")
+        self.assertEqual(f.read_text(), "new\nlines\n")
+        self.assertEqual(oct(f.stat().st_mode & 0o777), "0o640")
+        self.assertTrue(any("security scan: clean" in l for l in r["lines"]))
+        self.assertEqual(Ledger_owed(self.paths), [])
+
+    def test_save_needs_the_admin_keyboard_the_password_and_a_clean_scan(self):
+        f = self.work / "n.txt"
+        r = self.ask({"action": "save", "path": str(f), "text": "x\n"}, "no", "no", "no")
+        self.assertFalse(r["ok"])
+        self.assertFalse(f.exists())
+        r = self.ask({"action": "save", "path": str(f), "text": EICAR.decode() + "\n"}, PW)
+        self.assertFalse(r["ok"])
+        self.assertIn("security scan", r["detail"])
+        self.assertFalse(f.exists())                                  # quarantined afterwards
+        self.kb_.shutdown()
+        r = self.ask({"action": "save", "path": str(f), "text": "x\n"})   # refused before any prompt
+        self.assertFalse(r["ok"])
+        self.assertIn("not booted", r["detail"])
+
+    def test_backup_list_and_restore_go_through_the_guarded_write(self):
+        docs = self.work / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha")
+        r = self.ask({"action": "backup", "path": str(docs)}, PW)
+        self.assertIn("backed up 1 file(s)", r["lines"][0])
+        name = self.ask({"action": "backups"})["backups"][0]["name"]
+        dest = self.work / "restored.txt"
+        r = self.ask({"action": "restore", "backup": name, "member": "docs/a.txt", "to": str(dest)}, PW)
+        self.assertEqual(dest.read_text(), "alpha")
+        self.assertEqual(r["lines"][0], "restored docs/a.txt")
+        self.kb_.shutdown()                                           # no admin keyboard -> no restore
+        r = self.ask({"action": "restore", "backup": name, "member": "docs/a.txt",
+                      "to": str(self.work / "again.txt")})
+        self.assertFalse(r["ok"])
+        self.assertFalse((self.work / "again.txt").exists())
+
+    def test_line_shell_backs_up_in_plain_language(self):
+        docs = self.work / "d"
+        docs.mkdir()
+        (docs / "a.txt").write_text("a")
+        out = self.ask({"action": "line", "text": f"respalda {docs}"}, PW)["lines"]
+        self.assertIn("backed up 1 file(s)", out[0])
+
+
+class TestEditorAndBackupAppsRunForReal(DesktopSessionEnv):
+    def admin(self):
+        kb = AdminKeyboard(self.paths, kernel_report=lambda: dict(GOOD_KERNEL),
+                           probe=lambda: ["/dev/input/event0"], boot_id=lambda: "boot-1")
+        with self.authority(PW).authorize("session.login") as g:
+            kb.boot(g)
+        return kb
+
+    def test_editor_opens_edits_and_saves_through_the_guarded_write(self):
+        f = Path(self.tmp.name) / "note.txt"
+        f.write_text("hello\n")
+        kb = self.admin()
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        with mock.patch("kos.system.AdminKeyboard", lambda paths: kb):
+            s = self.start(SYSTEM_DIR / "editor", "editor", bridge=SystemBridge(self.paths), authority=auth)
+            self.boot_both()
+            threading.Timer(2.5, lambda: self.devices.push(*_keys(str(f)), ENTER)).start()
+            self.when_modal("Password to view file", [*_keys(PW), ENTER])
+            threading.Timer(7.0, lambda: self.devices.push(*_keys("X"),
+                                                          {"type": "key", "key": "ctrl-s"})).start()
+            self.when_modal("Password to write file", [*_keys(PW), ENTER])
+            threading.Timer(15.0, lambda: self.devices.push({"type": "interrupt"})).start()
+            s.run(first_frame_timeout=1.0)
+        self.assertEqual(f.read_text(), "Xhello\n")                  # typed X at the start, saved
+        self.assertIn("saved.", self.output())
+        self.assertEqual(Ledger_owed(self.paths), [])               # scan + optimize were done
+
+    def test_editor_opens_a_lossy_file_read_only_and_never_saves_it(self):
+        f = Path(self.tmp.name) / "tabbed.txt"
+        f.write_text("a\tb\n")
+        kb = self.admin()
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        with mock.patch("kos.system.AdminKeyboard", lambda paths: kb):
+            s = self.start(SYSTEM_DIR / "editor", "editor", bridge=SystemBridge(self.paths), authority=auth)
+            self.boot_both()
+            threading.Timer(2.5, lambda: self.devices.push(*_keys(str(f)), ENTER)).start()
+            self.when_modal("Password to view file", [*_keys(PW), ENTER])
+            threading.Timer(7.0, lambda: self.devices.push(*_keys("X"),
+                                                          {"type": "key", "key": "ctrl-s"})).start()
+            threading.Timer(10.0, lambda: self.devices.push({"type": "interrupt"})).start()
+            s.run(first_frame_timeout=1.0)
+        self.assertIn("READ-ONLY", self.output())
+        self.assertEqual(f.read_text(), "a\tb\n")                    # untouched
+
+    def test_backup_app_backs_a_folder_up_after_the_password(self):
+        docs = Path(self.tmp.name) / "mydocs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha")
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        s = self.start(SYSTEM_DIR / "backup", "backup", bridge=SystemBridge(self.paths), authority=auth)
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push(*_keys("n" + str(docs)), ENTER)).start()
+        self.when_modal("Password to back up files", [*_keys(PW), ENTER])
+        threading.Timer(9.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        backups = kbackup.list_backups(self.paths)
+        self.assertEqual(len(backups), 1)
+        self.assertIn("backed up 1 file(s)", self.output())
+        self.assertIn(backups[0]["name"], self.output())
+
+
+import subprocess as _sp  # noqa: E402
+from kos.offsite import GITHUB_RE, Offsite, OffsiteError  # noqa: E402
+
+
+class TestOffsite(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        docs = Path(self.tmp.name) / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha")
+        self.info = kbackup.create(self.paths, self.authority(PW), str(docs))
+        self.bare = Path(self.tmp.name) / "remote.git"
+        _sp.run(["git", "init", "-q", "--bare", "-b", "main", str(self.bare)], check=True)
+        self.public = [False]
+        self.off = Offsite(self.paths, public_check=lambda url: self.public[0], allow_any_remote=True)
+        self.off.set_remote(self.authority(PW), f"file://{self.bare}")
+
+    def remote_has(self, name):
+        r = _sp.run(["git", "--git-dir", str(self.bare), "ls-tree", "-r", "--name-only", "main"],
+                    capture_output=True, text=True)
+        return name in r.stdout.split()
+
+    def test_push_sends_the_backup_to_a_private_repository_after_the_password(self):
+        msg = self.off.push(self.authority(PW), self.info["name"])
+        self.assertIn(self.info["name"], msg)
+        self.assertTrue(self.remote_has(self.info["name"]))
+        blob = _sp.run(["git", "--git-dir", str(self.bare), "show", f"main:{self.info['name']}"],
+                       capture_output=True).stdout
+        self.assertEqual(blob, Path(self.info["path"]).read_bytes())
+        self.off.push(self.authority(PW), self.info["name"])           # pushing again is fine
+
+    def test_a_publicly_readable_repository_is_refused_before_any_password(self):
+        self.public[0] = True
+        with self.assertRaises(OffsiteError) as ctx:
+            self.off.push(self.authority(), self.info["name"])         # no answers: no prompt
+        self.assertIn("publicly readable", str(ctx.exception))
+        self.assertFalse(self.remote_has(self.info["name"]))
+
+    def test_repository_that_turns_public_during_the_prompt_is_still_refused(self):
+        answers = iter([False, True])
+        off = Offsite(self.paths, public_check=lambda url: next(answers), allow_any_remote=True)
+        with self.assertRaises(OffsiteError):
+            off.push(self.authority(PW), self.info["name"])
+        self.assertFalse(self.remote_has(self.info["name"]))
+
+    def test_needs_a_remote_the_password_and_a_real_backup_name(self):
+        none = Offsite(Paths(Path(self.tmp.name) / "empty"), public_check=lambda u: False)
+        with self.assertRaises(OffsiteError):
+            none.push(self.authority(), "x.zip")
+        with self.assertRaises(AuthorizationDenied):
+            self.off.push(self.authority("no", "no", "no"), self.info["name"])
+        for bad in ("../x.zip", "nope.zip", "a/b.zip", "x"):
+            with self.assertRaises(OffsiteError, msg=bad):
+                self.off.push(self.authority(PW), bad)
+        self.assertFalse(self.remote_has(self.info["name"]))
+
+    def test_only_github_repositories_can_be_the_destination(self):
+        strict = Offsite(self.paths)
+        for bad in ("https://evil.com/a/b", "http://github.com/a/b", "ext::sh -c touch /tmp/pwn",
+                    "file:///tmp/x", "https://github.com/a", "https://github.com/a/b/c",
+                    "git@evil.com:a/b.git", "-oProxyCommand=x"):
+            with self.assertRaises(OffsiteError, msg=bad):
+                strict.set_remote(self.authority(PW), bad)
+        for good in ("https://github.com/me/docs-backup", "git@github.com:me/docs.git",
+                     "https://github.com/me/docs.git"):
+            self.assertTrue(GITHUB_RE.match(good), good)
+
+    def test_the_anonymous_probe_cannot_use_any_credentials(self):
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append((cmd, kw))
+            return _sp.CompletedProcess(cmd, kw.pop("_rc", 128), b"", b"")
+
+        strict = Offsite(self.paths, runner=runner)
+        self.assertFalse(strict.is_public("git@github.com:me/docs.git"))   # auth needed -> private
+        cmd, kw = calls[-1]
+        self.assertEqual(cmd[-1], "https://github.com/me/docs.git")        # ssh url probed anonymously
+        self.assertEqual(kw["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(kw["env"]["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(kw["env"]["GIT_ASKPASS"], "/bin/true")
+        self.assertEqual(kw["stdin"], _sp.DEVNULL)
+        ok = Offsite(self.paths, runner=lambda cmd, **kw: _sp.CompletedProcess(cmd, 0, b"", b""))
+        self.assertTrue(ok.is_public("https://github.com/me/docs"))        # readable anonymously -> public
+
+    def test_the_backup_app_can_push_via_the_bridge(self):
+        sent = []
+        with mock.patch("kos.offsite.Offsite", lambda paths: self.off):
+            SystemBridge(self.paths).handle(
+                {"cmd": "request", "action": "push", "backup": self.info["name"]},
+                sent.append, self.authority(PW))
+        self.assertEqual(sent[-1]["cmd"], "text")
+        self.assertTrue(self.remote_has(self.info["name"]))
+        self.public[0] = True
+        with mock.patch("kos.offsite.Offsite", lambda paths: self.off):
+            SystemBridge(self.paths).handle(
+                {"cmd": "request", "action": "push", "backup": self.info["name"]},
+                sent.append, self.authority())
+        self.assertFalse(sent[-1]["ok"])
+        self.assertIn("publicly readable", sent[-1]["detail"])
+
+
+class TestEachUserUsesTheirOwnGitHub(AdminEnv):
+    """The OS is for many people: nobody's backups go to anyone else's GitHub."""
+
+    def ask(self, req, *answers):
+        sent = []
+        SystemBridge(self.paths).handle({"cmd": "request", **req}, sent.append, self.authority(*answers))
+        return sent[-1]
+
+    def test_the_destination_is_whatever_this_user_set_and_defaults_to_nothing(self):
+        self.assertEqual(self.ask({"action": "backups"})["remote"], "")
+        r = self.ask({"action": "remote", "url": "https://github.com/some-user/their-docs"}, PW)
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.ask({"action": "backups"})["remote"], "https://github.com/some-user/their-docs")
+        # another person's machine (a separate KOS root) knows nothing of it
+        with tempfile.TemporaryDirectory() as other:
+            self.assertIsNone(Offsite(Paths(Path(other))).remote())
+
+    def test_setting_it_needs_the_password_and_refuses_anything_but_github(self):
+        r = self.ask({"action": "remote", "url": "https://github.com/me/docs"}, "no", "no", "no")
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.ask({"action": "backups"})["remote"], "")
+        r = self.ask({"action": "remote", "url": "https://evil.com/me/docs"}, PW)
+        self.assertFalse(r["ok"])
+        self.assertIn("GitHub repository", r["detail"])
+
+    def test_no_account_is_baked_into_the_code(self):
+        root = Path(__file__).resolve().parent.parent
+        for f in list((root / "kos").glob("*.py")) + list((root / "examples").rglob("*.py")):
+            self.assertNotIn("zach909", f.read_text(), f.name)

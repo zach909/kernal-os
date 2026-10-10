@@ -1,0 +1,9 @@
+{
+  "name": "files",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["system"],
+  "description": "File manager: browse folders and zips without extracting; viewing asks for your password."
+}

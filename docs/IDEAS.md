@@ -80,6 +80,9 @@ land instead of getting lost in chat.
   list / open / close / focus so a clock app can list without being able to open.
 - **More verbs and languages for the line shell**, and verb-last languages
   (Japanese, Turkish). A user-extensible lexicon file, still data-only.
+- **Encrypt backups before they leave the machine.** Needs a vetted crypto
+  library (stdlib has no AEAD); until then "private" is only GitHub's access control.
+- **Restore a whole folder** in one guarded step (today: one file per password).
 - **More sandboxed runtimes for code lines** (JavaScript, shell), and an
   optional persistent per-session scope so `x = 5` then `print(x)` works.
 - **Fewer desktop passwords.** Five at start is the honest cost of "nothing
@@ -91,7 +94,9 @@ land instead of getting lost in chat.
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
   command in the user's own language, and code is a command too (run sandboxed,
   never on the host); `requires` (unlock requires the keyboard requires the
-  kernel; a write owes a scan and optimize afterwards); the taskbar
+  kernel; a write owes a scan and optimize afterwards); the built-in apps (taskbar,
+  app library, file viewer, file editor, backup + private-GitHub push, settings,
+  security, terminal); the taskbar
   and App Library are ordinary apps that *ask* the OS via `request`, with the
   right mouse as the App Library; the unlock password boots a kernel-gated
   administrator keyboard whose guarded `kos write` needs a clean security

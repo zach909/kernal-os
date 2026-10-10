@@ -1,0 +1,9 @@
+{
+  "name": "terminal",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["system"],
+  "description": "The line shell as an app: every line is a command, in your own language."
+}

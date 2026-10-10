@@ -24,7 +24,9 @@ from typing import Callable
 from .kapp import KAppError
 from .registry import RegistryError
 
-SYSTEM_APPS = ("taskbar", "app-library")
+SYSTEM_APPS = ("taskbar", "app-library", "files", "editor", "backup", "settings", "security",
+               "terminal")
+DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library
 
 
 class DesktopError(Exception):

@@ -52,6 +52,7 @@ import hmac
 import json
 import os
 import select
+import stat
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -411,7 +412,8 @@ def write_file(paths: Paths, authority: Authority, keyboard: AdminKeyboard, targ
     summary = {"opt": "not run"}
     with authority.authorize("file.write", str(final)) as grant:
         keyboard.verify(grant)
-        atomic_write(final, data, mode=0o600)
+        mode = stat.S_IMODE(final.stat().st_mode) if final.exists() else 0o600
+        atomic_write(final, data, mode=mode)
         entry_id = ledger.owe("file.write", str(final))
         audit.record("file.write", str(final), "written")
 
