@@ -30,6 +30,8 @@
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
     kos audit                       show the authorization log
+    kos do WORDS...                 one line of human language, run as one command
+    kos line [--explain]            the line shell: every line you type is a command
 """
 
 from __future__ import annotations
@@ -604,6 +606,44 @@ def cmd_audit(args, paths: Paths) -> int:
     return 0
 
 
+def _execute_line(argv: list[str]) -> int:
+    """Run one interpreted command in-process. argparse exits on bad usage;
+    in the line shell that must not end the shell."""
+    try:
+        return main(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+
+
+def cmd_do(args, paths: Paths) -> int:
+    """Interpret one line of human language and run it as exactly one command."""
+    from .lang import HELP, interpret
+    line = interpret(" ".join(args.words))
+    if args.explain:
+        print(line.explain())
+    if line.kind == "command":
+        return _execute_line(list(line.argv))
+    if line.kind == "help":
+        print(HELP)
+        return 0
+    if line.kind == "code":
+        eprint(f"That looks like code ({line.language}), not a command, so I won't run it.")
+        return 64
+    if line.kind == "unknown":
+        eprint("I don't know that command." + (f" Did you mean '{line.hint}'?" if line.hint else ""))
+        return 65
+    return 0
+
+
+def cmd_line(args, paths: Paths) -> int:
+    """The line shell. Every line is a command - in any language in the
+    lexicon - or it is refused. Code is never run here."""
+    from .lang import HELP, run_shell
+    if sys.stdin.isatty():
+        print("KOS - every line is a command, in your own language. Type 'help'.")
+    return run_shell(_execute_line, input, print, explain=args.explain)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kos", description="KOS security layer")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -670,6 +710,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="report kernel security features")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
+    s = sub.add_parser("do", help="run one line of human language as one command")
+    s.add_argument("words", nargs="+")
+    s.add_argument("--explain", action="store_true", help="show how the line was understood")
+    s = sub.add_parser("line", help="the line shell: every line you type is a command")
+    s.add_argument("--explain", action="store_true", help="show how each line was understood")
     return p
 
 
@@ -679,7 +724,8 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
+            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
+            "do": cmd_do, "line": cmd_line}
 
 
 def main(argv: list[str] | None = None) -> int:

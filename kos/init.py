@@ -20,6 +20,7 @@ import ctypes
 import fcntl
 import grp
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -99,8 +100,19 @@ def _owner_groups() -> list[int]:
     return out
 
 
+# After login every line is a command (see kos/lang.py), not a program for /bin/sh.
+DEFAULT_SHELL = "/opt/kos/bin/kos line"
+
+
+def shell_argv() -> list[str]:
+    argv = shlex.split(os.environ.get("KOS_SHELL", DEFAULT_SHELL))
+    # only a POSIX shell wants -l; the line shell takes its own flags
+    if os.path.basename(argv[0]) in ("sh", "ash", "bash", "dash"):
+        argv.append("-l")
+    return argv
+
+
 def start_shell(console: str) -> int:
-    shell = os.environ.get("KOS_SHELL", "/bin/sh")
     env = {"HOME": "/home/owner", "USER": "owner", "TERM": os.environ.get("TERM", "linux"),
            "PATH": "/opt/kos/bin:/usr/local/bin:/usr/bin:/bin", "KOS_ROOT": "/",
            "LANG": "C.UTF-8"}
@@ -117,7 +129,7 @@ def start_shell(console: str) -> int:
             os.setresgid(OWNER_UID, OWNER_UID, OWNER_UID)
             os.setresuid(OWNER_UID, OWNER_UID, OWNER_UID)
 
-    proc = subprocess.Popen([shell, "-l"], env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
+    proc = subprocess.Popen(shell_argv(), env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
                             else "/", preexec_fn=child_setup, close_fds=True)
     # PID 1 must reap every orphan, not just the shell.
     while True:
@@ -149,7 +161,8 @@ def login_loop(paths: Paths, console: str) -> None:
             prompter.info(f"auth error: {e}")
             time.sleep(5)
             continue
-        prompter.info("Unlocked. Type 'run APP' or 'run graphical APP'. Exit the shell to lock.\n")
+        prompter.info("Unlocked. Every line you type is a command - say what you want "
+                      "('help' lists them). 'exit' locks.\n")
         start_shell(console)
         prompter.info("\nSession ended - locked.")
 

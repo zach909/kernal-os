@@ -549,3 +549,92 @@ class TestWatcher(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLang(unittest.TestCase):
+    """Every line is a command - unless it is code."""
+
+    def argv(self, line):
+        r = __import__("kos.lang", fromlist=["interpret"]).interpret(line)
+        self.assertEqual(r.kind, "command", line)
+        return list(r.argv)
+
+    def test_same_command_in_many_languages(self):
+        for line in ["run hello", "ejecuta hello", "lance hello", "starte hello",
+                     "esegui hello", "запусти hello", "运行 hello", "运行hello"]:
+            self.assertEqual(self.argv(line), ["run", "hello"], line)
+
+    def test_politeness_articles_and_case_are_ignored(self):
+        self.assertEqual(self.argv("Please run the app Hello."), ["run", "hello"])
+        self.assertEqual(self.argv("s'il vous plaît lance l'app hello"), ["run", "hello"])
+        self.assertEqual(self.argv("por favor, abre hello"), ["open", "hello"])
+
+    def test_mode_words_and_other_verbs(self):
+        self.assertEqual(self.argv("abre gráfico hello"), ["open", "graphical", "hello"])
+        self.assertEqual(self.argv("escanea notes.kapp"), ["scan", "file", "notes.kapp"])
+        self.assertEqual(self.argv("revoke hello"), ["permit", "--revoke", "hello"])
+        self.assertEqual(self.argv("escritorio"), ["boot", "desktop"])
+        self.assertEqual(self.argv("optimiza"), ["optimize"])
+
+    def test_write_text_is_passed_through_verbatim(self):
+        self.assertEqual(self.argv("write notes.txt Hello World."),
+                         ["write", "notes.txt", "--text", "Hello World."])
+        self.assertEqual(self.argv('write notes.txt "a  b!"'),
+                         ["write", "notes.txt", "--text", "a  b!"])
+
+    def test_code_is_never_a_command(self):
+        from kos.lang import interpret
+        for line in ["x = 5", 'print("hi")', "import os", "def f(x): return x",
+                     "#include <stdio.h>", "const a = 1", "SELECT * FROM users",
+                     "DROP TABLE users", "<script>alert(1)</script>", "# note",
+                     "#!/bin/sh"]:
+            self.assertEqual(interpret(line).kind, "code", line)
+
+    def test_shell_glue_is_refused_not_executed(self):
+        """A command followed by shell syntax is code, so `run hello; rm -rf /`
+        never becomes anything."""
+        from kos.lang import interpret
+        for line in ["run hello; rm -rf /", "list | sh", "run hello && reboot",
+                     "view /etc/passwd > /tmp/x", "run $(whoami)", "run `id`"]:
+            self.assertEqual(interpret(line).kind, "code", line)
+
+    def test_plain_words_that_are_also_code_keywords_still_work(self):
+        self.assertEqual(self.argv("update hello"), ["update", "hello"])
+        self.assertEqual(self.argv("open hello"), ["open", "hello"])
+        self.assertEqual(self.argv("run hello --cell=c1"), ["run", "hello", "--cell=c1"])
+
+    def test_unknown_suggests_but_never_guesses(self):
+        from kos.lang import interpret
+        r = interpret("rn hello")
+        self.assertEqual((r.kind, r.hint), ("unknown", "run"))
+        self.assertEqual(interpret("banana split").kind, "unknown")
+
+    def test_shell_loop_runs_each_line_once_and_stops_on_exit(self):
+        from kos.lang import run_shell
+        lines = iter(["run hello", "x = 1", "rm hello", "", "ayuda", "exit", "list"])
+        ran, said = [], []
+
+        def read(_prompt):
+            return next(lines)
+
+        code = run_shell(lambda argv: ran.append(argv) or 0, read, said.append)
+        self.assertEqual(ran, [["run", "hello"]])           # code + unknown were not executed
+        self.assertTrue(any("looks like code" in m for m in said))
+        self.assertTrue(any("don't know" in m for m in said))
+        self.assertEqual(code, 65)
+
+    def test_cli_do_executes_the_interpreted_command(self):
+        import io as _io
+        from contextlib import redirect_stdout
+        buf = _io.StringIO()
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(buf):
+            old = os.environ.get("KOS_ROOT")
+            os.environ["KOS_ROOT"] = d
+            try:
+                code = kcli.main(["do", "lista"])
+            finally:
+                os.environ.pop("KOS_ROOT", None) if old is None else os.environ.update(KOS_ROOT=old)
+        self.assertEqual(code, 0)
+        self.assertIn("no apps installed", buf.getvalue())
+        # and code is refused with a distinct exit status
+        self.assertEqual(kcli.main(["do", "x", "=", "1"]), 64)
