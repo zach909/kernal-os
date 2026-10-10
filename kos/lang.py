@@ -68,7 +68,7 @@ _LEXICON: dict[str, dict[str, str]] = {
         "ja": "開く",
     },
     "close": {
-        "en": "close stop kill",
+        "en": "close stop",
         "es": "cierra cerrar detén detener para parar",
         "fr": "ferme fermer arrête arrêter",
         "de": "schließe schliessen schließen beende beenden",
@@ -90,7 +90,7 @@ _LEXICON: dict[str, dict[str, str]] = {
         "ja": "一覧 アプリ",
     },
     "ps": {
-        "en": "ps running processes status",
+        "en": "running processes status",
         "es": "procesos abiertas estado",
         "fr": "processus ouverts état",
         "de": "prozesse laufend status",
@@ -167,7 +167,7 @@ _LEXICON: dict[str, dict[str, str]] = {
         "ja": "書く 保存",
     },
     "view": {
-        "en": "view show read cat display",
+        "en": "view show read display",
         "es": "muestra mostrar ver lee leer",
         "fr": "montre montrer affiche afficher lis lire",
         "de": "zeige zeigen anzeigen lies lesen",
@@ -178,7 +178,7 @@ _LEXICON: dict[str, dict[str, str]] = {
         "ja": "表示 見る",
     },
     "browse": {
-        "en": "ls dir browse files folder",
+        "en": "browse files folder",
         "es": "explora explorar archivos carpeta",
         "fr": "parcours parcourir fichiers dossier",
         "de": "durchsuche durchsuchen dateien ordner",

@@ -1205,3 +1205,10 @@ class TestLoginBootsAdminKeyboard(AdminEnv):
                 kinit.login_loop(self.paths, "/dev/null")
         self.assertEqual(seen, {"lease": False})
         self.assertTrue(any("NOT booted" in m and "needs the KOS kernel" in m for m in prompter.messages))
+
+
+class TestShellWordsAreNotCommands(unittest.TestCase):
+    def test_shell_and_programming_command_names_are_not_commands(self):
+        from kos.lang import interpret
+        for line in ["ls /etc", "dir", "cat /etc/passwd", "kill 1", "ps", "ls -la"]:
+            self.assertNotEqual(interpret(line).kind, "command", line)
