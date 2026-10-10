@@ -65,7 +65,33 @@ land instead of getting lost in chat.
   support. First real target: boot the produced image in QEMU with OVMF
   and confirm the two password gates and `run hello` actually work.
 
+## Backlog - from the line-shell / desktop / admin round
+
+- **Admin keyboard as its own privileged process.** Today the lease is a
+  signed file; a root-owned broker over `SO_PEERCRED` would make it
+  tamper-proof against code running as the owner (same fix as the
+  `auth.json` gap in ARCHITECTURE.md).
+- **Boot-test the exclusive keyboard.** `EVIOCGRAB` capture in
+  `kos write` and the graphical desktop have not run on real hardware.
+- **A real compositor for the desktop.** One app on screen at a time today;
+  tiling several apps' frames (see the older "real windowing desktop" item)
+  would let the taskbar be a bar *over* apps instead of a home screen.
+- **Per-request permissions.** `system` is all-or-nothing; split it into
+  list / open / close / focus so a clock app can list without being able to open.
+- **More verbs and languages for the line shell**, and verb-last languages
+  (Japanese, Turkish). A user-extensible lexicon file, still data-only.
+- **Fewer desktop passwords.** Five at start is the honest cost of "nothing
+  without the password"; a single desktop grant covering the two system apps
+  is possible if that is too noisy.
+
 ## Shipped
+
+- **Line shell, desktop of apps, administrator keyboard.** Every line is a
+  command in the user's own language (code refused, never run); the taskbar
+  and App Library are ordinary apps that *ask* the OS via `request`, with the
+  right mouse as the App Library; the unlock password boots a kernel-gated
+  administrator keyboard whose guarded `kos write` needs a clean security
+  scan and a disk optimize.
 
 - **The security scanner, install/update quarantine, `kos scan watch`,
   `kos permit`, per-run cache wiped on exit, `kos update all`,

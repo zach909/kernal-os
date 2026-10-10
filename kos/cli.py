@@ -16,7 +16,8 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
-    kos boot desktop                choose among open apps (no desktop otherwise)
+    kos desktop install             pack, scan, install + permit the taskbar and App Library
+    kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
     kos activity                    one feed: open apps + recent password decisions
@@ -56,6 +57,8 @@ from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, SandboxPolicy, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
+from .system import (SystemBridge, authorize_app_action, close_instance,
+                     open_background)
 from .vfs import VFSError
 
 
@@ -182,16 +185,7 @@ def _parse_run_target(words: list[str]) -> tuple[str, str]:
 
 def _authorize_app_action(name: str, app, mode: str, authority: Authority, prompter) -> SandboxPolicy:
     """Shared by `run` and `open`: mode check + optional network grant."""
-    m = app.manifest
-    if mode not in m.modes:
-        raise KAppError(f"{name} has no {mode} mode (it has: {', '.join(m.modes)})")
-    allow_net = False
-    if "network" in m.permissions:
-        if prompter.confirm(f"{name} asks for network access. Allow?"):
-            authority.authorize("app.network", name).close()
-            allow_net = True
-    return SandboxPolicy(allow_network=allow_net,
-                         weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+    return authorize_app_action(name, app, mode, authority, prompter)
 
 
 def cmd_run(args, paths: Paths) -> int:
@@ -224,7 +218,9 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"))
+        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
+                            bridge=bridge)
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -235,35 +231,14 @@ def cmd_run(args, paths: Paths) -> int:
 def cmd_open(args, paths: Paths) -> int:
     """Launch an app in the background. Returns your shell immediately;
     `kos ps` lists it, `kos attach ID` connects your terminal to it."""
-    from . import cache
-    from .broker import spawn
     from .permit import PermitStore
-    from .registry import Instance, Registry
-
     mode, name = args.mode or "tui", args.name
     PermitStore(paths).require(name)  # refused before we even ask for the password
     authority, prompter = _authority(paths)
-    store = AppStore(paths)
-    action = "app.graphical" if mode == "graphical" else "app.open"
-    with authority.authorize(action, name) as grant:
-        app = store.load_verified(name, grant)
-    policy = _authorize_app_action(name, app, mode, authority, prompter)
-    prompter.close()
-
-    paths.ensure()
-    cache_dir = cache.alloc(paths, name)
-    policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
-    registry = Registry(paths)
-    registry.prune()
-    inst_id = registry.new_id(name)
-    inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
-                    sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
-                    log_path=str(paths.logs / f"{inst_id}.log"), started=__import__("time").time())
-    spawn(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
-    print(f"opened {name} [{mode}] as {inst_id}")
-    print(f"  kos attach {inst_id}   (or: kos boot desktop)")
+    inst = open_background(paths, authority, name, mode, release=prompter.close)
+    print(f"opened {name} [{mode}] as {inst.id}")
+    print(f"  kos attach {inst.id}   (or: kos boot desktop)")
     return 0
-
 
 def cmd_ps(args, paths: Paths) -> int:
     from .registry import Registry
@@ -275,19 +250,9 @@ def cmd_ps(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_attach(args, paths: Paths) -> int:
-    """Connect your terminal to an app already opened with `kos open`. No
-    new password is needed just to reconnect - it was already authorized
-    when it was opened - but every device still has to be booted again for
-    this terminal, with the password, same as any other session."""
+def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) -> int:
+    """Connect this terminal to an app already running under a broker."""
     from .protocol import Channel
-    from .registry import Registry
-
-    authority, prompter = _authority(paths)
-    inst = Registry(paths).get(args.id)
-    if inst.status != "running":
-        raise KAppError(f"{args.id} is not running (status: {inst.status})")
-    prompter.close()
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -295,67 +260,109 @@ def cmd_attach(args, paths: Paths) -> int:
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    code = _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True)
+    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
+                        detach_on_interrupt=True, bridge=bridge, **session_kwargs)
+
+
+def cmd_attach(args, paths: Paths) -> int:
+    """Connect your terminal to an app already opened with `kos open`. No
+    new password is needed just to reconnect - it was already authorized
+    when it was opened - but every device still has to be booted again for
+    this terminal, with the password, same as any other session."""
+    from .registry import Registry
+
+    authority, prompter = _authority(paths)
+    inst = Registry(paths).get(args.id)
+    if inst.status != "running":
+        raise KAppError(f"{args.id} is not running (status: {inst.status})")
+    prompter.close()
+    code = _attach_session(paths, authority, inst)
     print(f"detached from {inst.id}" if code == 0 else f"{inst.id} exited ({code})")
     return 0
 
 
 def cmd_close(args, paths: Paths) -> int:
-    import signal
-    import time as _time
-    from .registry import Registry
-
     authority, _ = _authority(paths)
-    registry = Registry(paths)
-    inst = registry.get(args.id)
-    with authority.authorize("app.close", inst.id):
-        if inst.status == "running":
-            try:
-                os.kill(inst.broker_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            for _ in range(20):  # give the broker a moment to shut the app down cleanly
-                if not os.path.exists(str(paths.state / "instances" / f"{inst.id}.json")):
-                    break
-                _time.sleep(0.1)
-        registry.remove(inst.id)
+    inst = close_instance(paths, authority, args.id)
     print(f"closed {inst.id}")
     return 0
 
 
+def _ensure_open(paths: Paths, name: str, mode: str) -> str:
+    """The instance id of a running ``name``; opens it (password) if it isn't."""
+    from .registry import Registry
+    for inst in Registry(paths).list():
+        if inst.name == name and inst.mode == mode and inst.status == "running":
+            return inst.id
+    if name not in {a.name for a in AppStore(paths).installed()}:
+        raise KAppError(f"{name} is not installed (run: kos desktop install)")
+    authority, prompter = _authority(paths)
+    return open_background(paths, authority, name, mode, release=prompter.close).id
+
+
 def cmd_boot(args, paths: Paths) -> int:
-    """`kos boot desktop`: the only way a chooser of open apps ever appears.
-    Without it, `kos attach ID` still works - there is no windowing desktop
-    unless you explicitly ask for one."""
+    """`kos boot desktop`: the desktop is just two apps - the taskbar and the
+    App Library - and a way of moving between running apps (kos/desktop.py).
+    There is no windowing system; the taskbar *is* the home screen."""
     if args.what != "desktop":
         raise KAppError("usage: kos boot desktop")
+    from .desktop import Desktop, DesktopError
     from .registry import Registry
-    from .term import RawTerminal
 
+    mode = "graphical" if args.graphical else "tui"
     authority, prompter = _authority(paths)
     authority.authorize("device.desktop").close()
-    registry = Registry(paths)
-    insts = [i for i in registry.list() if i.status == "running"]
     prompter.close()
-    if not insts:
-        print("no apps open (kos open NAME first)")
-        return 0
-    with RawTerminal() as term:
-        term.write("\x1b[?1049l")  # desktop chooser is plain scrollback, not alt-screen
-    print("\r\nKOS desktop - open apps:\r\n")
-    for n, i in enumerate(insts, 1):
-        print(f"  {n}. {i.name} [{i.mode}]  ({i.id})\r")
-    print("\r\nq to cancel\r\n")
-    choice = input("attach to: ").strip()
-    if not choice or choice == "q":
-        return 0
+    home = _ensure_open(paths, "taskbar", mode)
+    library = _ensure_open(paths, "app-library", mode)
+
+    def attach(instance_id: str, ctx: dict) -> dict:
+        authority, prompter = _authority(paths)
+        inst = Registry(paths).get(instance_id)
+        if inst.status != "running":
+            raise KAppError(f"{instance_id} is not running")
+        prompter.close()
+        outcome: dict = {}
+        _attach_session(paths, authority, inst, outcome=outcome,
+                        preboot=tuple(ctx["preboot"]), right_click_to=ctx["right_click_to"])
+        return outcome
+
     try:
-        inst = insts[int(choice) - 1]
-    except (ValueError, IndexError):
-        raise KAppError("no such entry") from None
-    args.id = inst.id
-    return cmd_attach(args, paths)
+        return Desktop(home, library, attach).run()
+    except DesktopError as e:
+        raise KAppError(str(e)) from None
+
+
+def cmd_desktop(args, paths: Paths) -> int:
+    """`kos desktop install`: pack, scan, install and permit the two apps the
+    desktop is made of. Same gates as any other app: each install is scanned
+    first and asks for the password; permitting asks once more."""
+    import tempfile
+    from .desktop import SYSTEM_APPS
+    from .permit import PermitStore
+
+    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "examples" / "system"
+    authority, _ = _authority(paths)
+    store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in SYSTEM_APPS:
+            if name in have:
+                print(f"{name}: already installed")
+                continue
+            kapp = Path(tmp) / f"{name}.kapp"
+            pack(src / name, kapp)
+            m = store.install(kapp, authority)
+            print(f"installed {m.name} {m.version}")
+    permits = PermitStore(paths)
+    need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
+    if need:
+        with authority.authorize("app.permit", " ".join(need)):
+            for n in need:
+                permits.grant(n)
+        print(f"permitted: {', '.join(need)}")
+    print("desktop ready: kos boot desktop   (or just say: desktop)")
+    return 0
 
 
 def _print_text(data: bytes, clean_text) -> None:
@@ -725,8 +732,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s = sub.add_parser("close", help="stop an app opened with 'kos open'")
     s.add_argument("id")
-    s = sub.add_parser("boot", help="boot desktop: choose among open apps")
+    s = sub.add_parser("boot", help="boot the desktop: the taskbar + App Library, made of apps")
     s.add_argument("what", choices=["desktop"])
+    s.add_argument("--graphical", action="store_true", help="draw the desktop graphically")
+    s = sub.add_parser("desktop", help="set up the desktop apps")
+    s.add_argument("desktop_cmd", choices=["install"])
+    s.add_argument("--from", dest="src", help="directory holding taskbar/ and app-library/")
     s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
     s.add_argument("path")
     s = sub.add_parser("cat", help="view a file, including one inside a zip")
@@ -781,7 +792,8 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line, "admin": cmd_admin, "write": cmd_write}
+            "do": cmd_do, "line": cmd_line, "admin": cmd_admin, "write": cmd_write,
+            "desktop": cmd_desktop}
 
 
 def main(argv: list[str] | None = None) -> int:

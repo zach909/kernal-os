@@ -29,6 +29,38 @@ instant the process ends, by whichever of `run`'s `_run_session` or the
 update: same name, strictly newer version, scanned, password, re-seal.
 `kos update all --from DIR` runs that same path against every installed app.
 
+## Line shell (`kos/lang.py`)
+Input is data, never a program. A line becomes one structured argv for
+`kos.cli.main`; there is no shell string anywhere, so `;`, `|`, `&&`, `$()`
+and redirects have nothing to attach to - a line carrying them is classified
+as code and refused. Code detection errs toward refusing. Everything the
+shell can start still passes through the same `Authority.authorize` gates.
+
+## Administrator keyboard (`kos/admin.py`)
+`session.login` (or `admin.boot`) grant -> `AdminKeyboard.boot`: checks
+`kernel_gaps()` (Landlock + user namespaces) and probes keyboards, then writes
+`admin-lease.json` signed with `HMAC(master, "admin-keyboard")`, bound to
+`boot_id`, 8 h TTL. `require_booted()` (no password) refuses early; `verify()`
+(needs a password grant) checks the signature. Locking deletes the lease.
+`write_file`: `require_booted` -> `authorize("file.write")` -> `verify` ->
+scan -> `optimize(grant=...)` (same password re-seals apps) -> atomic write.
+The password is read through `AdminPrompter` over `EvdevDevices`, which grabs
+the keyboards (`EVIOCGRAB`) and refuses if another process already holds one.
+Gap: no separate privileged process; the lease is tamper-evident, not
+tamper-proof against code running as the owner.
+
+## Everything is an app (`kos/system.py`, `kos/desktop.py`)
+Apps send `{"cmd":"request",...}` (schema-checked in `protocol.py`). The OS
+honours it only if the *instance record* (written by the OS at open time
+from the verified manifest) has `system: true`; `open`/`close` additionally
+need the password via the session overlay; `focus` is an attach. The right
+mouse button is consumed by `Session.route` when `right_click_to` is set -
+it is never forwarded. `Desktop` is a small state machine over instance ids;
+devices booted in the first session are re-enabled (not re-authorized) in the
+following ones via `preboot`.
+Gap: the desktop's first-session password also covers every later app it
+switches to for *devices*; opening an app still always asks.
+
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short
 list of hand-written regex rules (reverse shells, obfuscated

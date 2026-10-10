@@ -161,7 +161,7 @@ def login_loop(paths: Paths, console: str) -> None:
                 try:
                     keyboard.boot(grant)
                     prompter.info("Administrator keyboard booted.")
-                except AdminError as e:
+                except (AdminError, OSError) as e:
                     prompter.info(f"Administrator keyboard NOT booted: {e}")
         except AuthorizationDenied:
             prompter.info("Locked.")

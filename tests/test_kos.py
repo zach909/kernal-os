@@ -849,3 +849,359 @@ class TestGuardedWrite(AdminEnv):
 def AuditLogFor(paths):
     from kos.auth import AuditLog
     return AuditLog(paths).entries()
+
+
+# ---------------------------------------------------------------------------
+# The desktop: everything is an app
+# ---------------------------------------------------------------------------
+import signal as _signal  # noqa: E402
+import time as _time  # noqa: E402
+from kos.desktop import Desktop, DesktopError, SYSTEM_APPS  # noqa: E402
+from kos.system import SystemBridge, close_instance, list_apps, open_background  # noqa: E402
+from kos.tui import TUISurface  # noqa: E402
+
+SYSTEM_DIR = Path(__file__).resolve().parent.parent / "examples" / "system"
+
+
+def _keys(text):
+    return [{"type": "key", "key": c} for c in text]
+
+
+ENTER = {"type": "key", "key": "enter"}
+
+
+class TestRequestProtocol(unittest.TestCase):
+    def test_valid_requests_pass_in_every_mode(self):
+        for mode in ("tui", "graphical", "cmd"):
+            self.assertEqual(validate_app_message({"cmd": "request", "action": "apps"}, mode)["action"], "apps")
+            self.assertEqual(validate_app_message(
+                {"cmd": "request", "action": "open", "app": "hello", "mode": "graphical"}, mode)["mode"],
+                "graphical")
+            validate_app_message({"cmd": "request", "action": "focus", "id": "hello-3fa9c1"}, mode)
+
+    def test_hostile_requests_are_rejected(self):
+        for bad in ({"cmd": "request", "action": "open", "app": "../../etc/passwd"},
+                    {"cmd": "request", "action": "open", "app": "hello", "mode": "root"},
+                    {"cmd": "request", "action": "focus", "id": "a/b"},
+                    {"cmd": "request", "action": "close", "id": "hello"},
+                    {"cmd": "request", "action": "format-disk"},
+                    {"cmd": "request"}):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message(bad, "tui")
+
+    def test_old_instance_records_without_the_system_flag_still_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            reg = Registry(Paths(Path(d)))
+            reg.dir.mkdir(parents=True)
+            (reg.dir / "old-aaaaaa.json").write_text(json.dumps(
+                {"id": "old-aaaaaa", "name": "old", "mode": "tui", "broker_pid": os.getpid(),
+                 "sock_path": "/x", "log_path": "/y", "started": 0, "app_pid": 1,
+                 "status": "running"}))
+            self.assertFalse(reg.get("old-aaaaaa").system)
+
+
+class TestSystemApps(Env):
+    def test_system_apps_pack_scan_clean_and_ask_for_the_system_permission(self):
+        for name in SYSTEM_APPS:
+            out = Path(self.tmp.name) / f"{name}.kapp"
+            m = pack(SYSTEM_DIR / name, out)
+            self.assertEqual(m.name, name)
+            self.assertIn("system", m.permissions)
+            self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
+
+    def test_an_app_cannot_claim_a_permission_that_does_not_exist(self):
+        with self.assertRaises(KAppError):
+            from kos.kapp import Manifest
+            Manifest.parse(json.dumps({"name": "x", "version": "1", "runtime": "python",
+                                       "entry": "a", "permissions": ["root"]}).encode())
+
+
+class TestSystemBridge(Env):
+    def setUp(self):
+        super().setUp()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        self.sent, self.spawned = [], []
+
+    def spawner(self, inst, app, mode, policy, registry, log_path, cache_dir=None):
+        self.spawned.append((inst.name, mode))
+        inst.status, inst.broker_pid = "running", os.getpid()
+        registry.write(inst)
+
+    def ask(self, req, *answers):
+        bridge = SystemBridge(self.paths, spawner=self.spawner)
+        switch = bridge.handle(req, self.sent.append, self.authority(*answers))
+        return switch, self.sent[-1]
+
+    def test_apps_lists_installed_with_permit_state_and_needs_no_password(self):
+        _, reply = self.ask({"cmd": "request", "action": "apps"})
+        self.assertEqual(reply["cmd"], "apps")
+        self.assertEqual([(a["name"], a["permitted"]) for a in reply["installed"]], [("hello", False)])
+        PermitStore(self.paths).grant("hello")
+        self.assertTrue(list_apps(self.paths)[0]["permitted"])
+
+    def test_open_is_refused_without_permit_and_never_asks_for_a_password(self):
+        _, reply = self.ask({"cmd": "request", "action": "open", "app": "hello", "mode": "tui"})
+        self.assertFalse(reply["ok"])
+        self.assertIn("permission to run", reply["detail"])
+        self.assertEqual(self.spawned, [])
+
+    def test_open_needs_the_password_and_wrong_password_opens_nothing(self):
+        PermitStore(self.paths).grant("hello")
+        req = {"cmd": "request", "action": "open", "app": "hello", "mode": "tui"}
+        _, reply = self.ask(req, "no", "no", "no")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(self.spawned, [])
+        _, reply = self.ask(req, PW)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(self.spawned, [("hello", "tui")])
+        self.assertRegex(reply["id"], r"^hello-[0-9a-f]{6}$")
+        self.assertEqual(Registry(self.paths).get(reply["id"]).status, "running")
+
+    def test_open_cannot_start_a_mode_the_app_does_not_have(self):
+        PermitStore(self.paths).grant("hello")
+        _, reply = self.ask({"cmd": "request", "action": "open", "app": "web", "mode": "tui"}, PW)
+        self.assertFalse(reply["ok"])                       # not installed
+        self.assertEqual(self.spawned, [])
+
+    def test_focus_switches_only_to_a_running_instance(self):
+        Registry(self.paths).write(Instance(id="hello-aaaaaa", name="hello", mode="tui",
+                                            broker_pid=os.getpid(), sock_path="/x", log_path="/y",
+                                            started=0, status="running"))
+        switch, reply = self.ask({"cmd": "request", "action": "focus", "id": "hello-aaaaaa"})
+        self.assertEqual(switch, ("instance", "hello-aaaaaa"))
+        self.assertTrue(reply["ok"])
+        switch, reply = self.ask({"cmd": "request", "action": "focus", "id": "hello-bbbbbb"})
+        self.assertIsNone(switch)
+        self.assertFalse(reply["ok"])
+
+    def test_close_needs_the_password(self):
+        Registry(self.paths).write(Instance(id="hello-cccccc", name="hello", mode="tui",
+                                            broker_pid=999999999, sock_path="/x", log_path="/y",
+                                            started=0, status="exited"))
+        req = {"cmd": "request", "action": "close", "id": "hello-cccccc"}
+        _, reply = self.ask(req, "no", "no", "no")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(len(Registry(self.paths).list()), 1)
+        _, reply = self.ask(req, PW)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(Registry(self.paths).list(), [])
+
+
+class DesktopSessionEnv(Env):
+    """Runs a real sandboxed app in a Session against scripted devices."""
+
+    def start(self, kapp_dir, name, mode="tui", *, bridge=None, authority=None, **kw):
+        kapp = Path(self.tmp.name) / f"{name}.kapp"
+        pack(kapp_dir, kapp)
+        store = AppStore(self.paths)
+        store.install(kapp, self.authority(PW))
+        PermitStore(self.paths).grant(name)
+        with self.authority(PW).authorize("app.run", name) as g:
+            app = store.load_verified(name, g)
+        a, b = socket.socketpair()
+        proc = loader.launch(loader.plan(app, b.fileno(), mode), SandboxPolicy(), None)
+        b.close()
+        self.devices = ScriptedDevices()
+        self.outfile = tempfile.TemporaryFile()
+        self.addCleanup(self.outfile.close)
+        surface = (CmdSurface(self.outfile.fileno(), 100, 30, name) if mode == "cmd"
+                   else TUISurface(self.outfile.fileno(), 100, 30, name))
+        auth = authority or Authority(self.paths, None, Throttle(self.paths, base=0))
+        self.outcome = {}
+        self.session = Session(name=name, mode=mode, channel=Channel(a), proc=proc, surface=surface,
+                               devices=self.devices, authority=auth, bridge=bridge,
+                               outcome=self.outcome, **kw)
+        return self.session
+
+    def output(self):
+        self.outfile.seek(0)
+        return self.outfile.read().decode(errors="replace")
+
+    def when_modal(self, needle, then, timeout=15):
+        """Push `then` once the OS's trusted prompt mentioning `needle` is on screen."""
+        def watch():
+            end = _time.monotonic() + timeout
+            while _time.monotonic() < end:
+                m = self.session.surface.modal
+                if m is not None and needle in m.title:
+                    self.devices.push(*then)
+                    return
+                _time.sleep(0.02)
+        t = threading.Thread(target=watch, daemon=True)
+        t.start()
+        return t
+
+    def boot_both(self):
+        self.devices.push(*_keys("y"), *_keys(PW), ENTER, *_keys("y"), *_keys(PW), ENTER)
+
+
+class TestDesktopSessions(DesktopSessionEnv):
+    def test_app_without_system_permission_is_told_no(self):
+        # run the real taskbar but hand the session NO bridge
+        s = self.start(SYSTEM_DIR / "taskbar", "taskbar")
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("does not have the 'system' permission", self.output())
+
+    def test_taskbar_lists_running_apps_and_asks_the_os_to_switch(self):
+        Registry(self.paths).write(Instance(id="hello-aaaaaa", name="hello", mode="tui",
+                                            broker_pid=os.getpid(), sock_path="/x", log_path="/y",
+                                            started=0, status="running"))
+        s = self.start(SYSTEM_DIR / "taskbar", "taskbar", bridge=SystemBridge(self.paths))
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push(*_keys("1"))).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("hello-aaaaaa", self.output())             # the taskbar drew the open app
+        self.assertEqual(self.outcome["switch"], ("instance", "hello-aaaaaa"))
+
+    def test_right_mouse_opens_the_app_library_and_the_app_never_sees_it(self):
+        s = self.start(EXAMPLE, "hello", "cmd", right_click_to="library-aaaaaa")
+        self.boot_both()
+        left = {"type": "button", "button": "left", "pressed": True, "x": 1, "y": 1}
+        right = {"type": "button", "button": "right", "pressed": True, "x": 1, "y": 1}
+        self.devices.push(left, right)
+        s.run(first_frame_timeout=0.5)
+        self.assertEqual(self.outcome["switch"], ("instance", "library-aaaaaa"))
+        out = self.output()
+        self.assertIn('"button":"left"', out)                    # ordinary clicks still reach the app
+        self.assertNotIn('"button":"right"', out)                # the right button is the OS's
+
+    def test_devices_booted_by_the_desktop_carry_over_with_no_new_prompt(self):
+        s = self.start(EXAMPLE, "hello", "cmd", preboot=("mouse", "keyboard"))
+        self.devices.push(*_keys("x"), {"type": "interrupt"})   # no y/password anywhere
+        s.run(first_frame_timeout=0.5)
+        self.assertEqual(self.devices.booted, ["mouse", "keyboard"])
+        out = self.output()
+        self.assertIn('"state":"attached"', out)
+        self.assertIn('"cmd":"key","key":"x"', out)              # keys flow immediately
+        self.assertEqual(sorted(self.outcome["booted"]), ["keyboard", "mouse"])
+
+    def test_app_library_opens_an_app_with_a_password_typed_in_the_os_prompt(self):
+        """The whole chain, with real processes: the App Library (sandboxed
+        app) asks -> the OS prompts for the password in its own overlay ->
+        the OS verifies the seal and starts hello under a real broker ->
+        the library asks to switch -> the session ends pointing at it."""
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        PermitStore(self.paths).grant("hello")
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        s = self.start(SYSTEM_DIR / "app-library", "app-library",
+                       bridge=SystemBridge(self.paths), authority=auth)
+        self.boot_both()
+        # the library draws "hello" (the only non-system app); Enter asks to open it
+        threading.Timer(3.0, lambda: self.devices.push(ENTER)).start()
+        self.when_modal("Password to open app", [*_keys(PW), ENTER])
+        threading.Timer(25.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("hello", self.output())
+        switch = self.outcome["switch"]
+        self.assertIsNotNone(switch, "library never asked to switch to the app it opened")
+        self.assertRegex(switch[1], r"^hello-[0-9a-f]{6}$")
+        self.assertEqual(Registry(self.paths).get(switch[1]).status, "running")
+        granted = [(e["action"], e["target"]) for e in auth.audit.entries() if e["outcome"] == "granted"]
+        self.assertIn(("app.open", "hello"), granted)
+
+    def tearDown(self):
+        # Must run BEFORE Env.tearDown deletes the registry (addCleanup runs
+        # after tearDown, by which point there is nothing left to find).
+        self._kill_brokers()
+        super().tearDown()
+
+    def _kill_brokers(self):
+        for inst in Registry(self.paths).list():
+            if inst.broker_pid == os.getpid():
+                continue            # a fake record some test wrote pointing at itself
+            try:
+                os.kill(inst.broker_pid, _signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for _ in range(50):
+            if not [i for i in Registry(self.paths).list() if i.broker_pid != os.getpid()]:
+                break
+            _time.sleep(0.1)
+
+
+class TestDesktopNavigation(unittest.TestCase):
+    def run_desktop(self, script, home="taskbar-111111", library="library-222222"):
+        calls = []
+
+        def attach(target, ctx):
+            calls.append((target, dict(ctx)))
+            step = script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+
+        return Desktop(home, library, attach).run(), calls
+
+    def test_starts_on_the_taskbar_and_ctrl_c_there_leaves(self):
+        code, calls = self.run_desktop([{"exit_code": 0}])
+        self.assertEqual(code, 0)
+        self.assertEqual([c[0] for c in calls], ["taskbar-111111"])
+        self.assertEqual(calls[0][1]["right_click_to"], "library-222222")
+
+    def test_ctrl_c_in_an_app_returns_to_the_taskbar_not_out_of_the_desktop(self):
+        code, calls = self.run_desktop([
+            {"switch": ("instance", "hello-333333"), "booted": ["mouse", "keyboard"]},
+            {"switch": None},            # Ctrl-C inside hello -> back home
+            {"exit_code": 0}])           # Ctrl-C on the taskbar -> leave
+        self.assertEqual([c[0] for c in calls], ["taskbar-111111", "hello-333333", "taskbar-111111"])
+        self.assertEqual(calls[1][1]["preboot"], ("mouse", "keyboard"))   # devices carried over
+        self.assertEqual(calls[2][1]["preboot"], ("mouse", "keyboard"))
+
+    def test_right_mouse_target_is_the_library_but_not_while_in_the_library(self):
+        _, calls = self.run_desktop([
+            {"switch": ("instance", "library-222222")}, {"switch": None}, {"exit_code": 0}])
+        self.assertEqual(calls[1][0], "library-222222")
+        self.assertIsNone(calls[1][1]["right_click_to"])
+
+    def test_vanished_app_falls_back_home_but_vanished_taskbar_is_an_error(self):
+        _, calls = self.run_desktop([
+            {"switch": ("instance", "hello-333333")}, KAppError("gone"), {"exit_code": 0}])
+        self.assertEqual([c[0] for c in calls], ["taskbar-111111", "hello-333333", "taskbar-111111"])
+        with self.assertRaises(DesktopError):
+            self.run_desktop([KAppError("gone")])
+
+
+class TestLoginBootsAdminKeyboard(AdminEnv):
+    def test_one_password_unlocks_and_boots_it_and_locking_drops_it(self):
+        import kos.init as kinit
+        prompter = ScriptedPrompter([PW])               # exactly one password for the whole login
+        lease = self.paths.state / "admin-lease.json"
+        seen = {}
+
+        def fake_shell(console):
+            seen["lease_while_shell_runs"] = lease.exists()
+            seen["shell"] = kinit.shell_argv()
+            return 0
+
+        with mock.patch.object(kinit, "TTYPrompter", lambda console: prompter), \
+                mock.patch.object(kinit, "AdminKeyboard", lambda paths: self.kb()), \
+                mock.patch.object(kinit, "start_shell", fake_shell), \
+                mock.patch.object(kinit.time, "sleep", lambda s: None):
+            with self.assertRaises(AssertionError):     # the 2nd login asks again: the script has no answer
+                kinit.login_loop(self.paths, "/dev/null")
+        self.assertTrue(seen["lease_while_shell_runs"])
+        self.assertFalse(lease.exists())                # locked: nothing elevated survives
+        self.assertTrue(any("Administrator keyboard booted" in m for m in prompter.messages))
+        self.assertEqual(seen["shell"], ["/opt/kos/bin/kos", "line"])   # login starts the line shell
+
+    def test_a_kernel_that_cannot_run_it_still_unlocks_but_without_the_keyboard(self):
+        import kos.init as kinit
+        prompter = ScriptedPrompter([PW])
+        lease = self.paths.state / "admin-lease.json"
+        seen = {}
+        no_kernel = lambda paths: self.kb(kernel_report=lambda: {"landlock_abi": 0})
+
+        def fake_shell(console):
+            seen["lease"] = lease.exists()
+            return 0
+
+        with mock.patch.object(kinit, "TTYPrompter", lambda console: prompter), \
+                mock.patch.object(kinit, "AdminKeyboard", no_kernel), \
+                mock.patch.object(kinit, "start_shell", fake_shell), \
+                mock.patch.object(kinit.time, "sleep", lambda s: None):
+            with self.assertRaises(AssertionError):
+                kinit.login_loop(self.paths, "/dev/null")
+        self.assertEqual(seen, {"lease": False})
+        self.assertTrue(any("NOT booted" in m and "needs the KOS kernel" in m for m in prompter.messages))

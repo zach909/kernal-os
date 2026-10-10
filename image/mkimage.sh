@@ -64,6 +64,7 @@ tar -xpf "$rootfs" -C "$work/root"
 # KOS userland
 install -d "$work/root/opt/kos" "$work/root/opt/kos/bin"
 cp -r "$repo/kos" "$work/root/opt/kos/"
+cp -r "$repo/examples" "$work/root/opt/kos/"   # includes examples/system: the taskbar + App Library
 cp "$repo/bin/kos" "$repo/bin/run" "$work/root/opt/kos/bin/"
 cat > "$work/root/sbin/kos-init" <<'INIT'
 #!/usr/bin/python3 -I

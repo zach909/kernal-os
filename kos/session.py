@@ -10,6 +10,13 @@ Flow for ``run graphical <app>`` (``run <app>`` is the same with a TUI page):
   5. Loop: device events become commands to the app; the app's commands
      become pixels / text on screen. Ctrl-C always ends the session.
 
+Desktop sessions add three things, all driven by the OS and never by the app:
+``preboot`` (devices already booted by the desktop's own password carry over
+from one app to the next), ``right_click_to`` (the right mouse button is the
+OS's: it switches to the App Library and is never forwarded), and ``bridge``
+(an app with the ``system`` permission may *ask* the OS to open, close or
+switch apps - see ``system.py``). ``outcome`` reports where to go next.
+
 While a trusted prompt is on screen the app receives no input at all and
 cannot draw over the prompt.
 """
@@ -105,15 +112,22 @@ class Session:
     def __init__(self, *, name: str, mode: str, channel: Channel,
                  proc: Optional[subprocess.Popen], surface, devices, authority: Authority,
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
-                 detach_on_interrupt: bool = False):
+                 detach_on_interrupt: bool = False, bridge=None,
+                 preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
+                 outcome: Optional[dict] = None):
         self.name, self.mode = name, mode
         self.channel = channel
         self.proc = proc
         self.surface = surface
         self.devices = devices
         self.authority = authority
-        self.boot_queue = list(boot_devices)
+        self.preboot = tuple(d for d in preboot if d in BOOT_ORDER)
+        self.boot_queue = [d for d in boot_devices if d not in self.preboot]
         self.booted: set[str] = set()
+        self.bridge = bridge
+        self.right_click_to = right_click_to
+        self.outcome = outcome
+        self.switch: Optional[tuple[str, str]] = None
         self.log = log
         self.stop_requested = False
         self.surface_dirty = True
@@ -192,6 +206,10 @@ class Session:
             return
         if "mouse" not in self.booted:
             return
+        if t == "button" and ev["button"] == "right" and self.right_click_to:
+            if ev["pressed"]:
+                self._switch(("instance", self.right_click_to))
+            return  # the right button is the OS's here; the app never sees it
         x, y = ev.get("x", 0), ev.get("y", 0)
         if hasattr(self.surface, "to_app_coords"):
             x, y = self.surface.to_app_coords(x, y)
@@ -218,9 +236,42 @@ class Session:
                 self.surface_dirty = True
             elif msg["cmd"] == "log":
                 self._log("app: " + msg["msg"])
+            elif msg["cmd"] == "request":
+                self._on_request(msg)
             elif msg["cmd"] == "exit":
                 self.exit_code = msg["code"]
                 self.stop_requested = True
+
+    def _switch(self, target: tuple[str, str]) -> None:
+        """Leave this app for another one. An attached app keeps running
+        (we only detach); a foreground app we own is told to quit."""
+        self.switch = target
+        if self.detach_on_interrupt:
+            self.detached = True
+        self.stop_requested = True
+
+    def _on_request(self, msg: dict) -> None:
+        if self.bridge is None:
+            self._send({"cmd": "result", "action": msg["action"], "ok": False,
+                        "detail": "this app does not have the 'system' permission"})
+            return
+        target = self.bridge.handle(msg, self._send, self.authority)
+        self.surface_dirty = True
+        if target:
+            self._switch(target)
+
+    def _preboot_devices(self) -> None:
+        """Devices the desktop already booted with the password stay booted
+        as the desktop moves between apps: re-enable them, no new prompt."""
+        for dev in self.preboot:
+            try:
+                how = getattr(self.devices, f"boot_{dev}")()
+            except DeviceError as e:
+                self.flash(f"{dev}: {e}")
+                continue
+            self.booted.add(dev)
+            self._send({"cmd": "device", "device": dev, "state": "attached"})
+            self._log(f"{dev} carried over from the desktop ({how})")
 
     def _log(self, text: str) -> None:
         if self.log:
@@ -242,6 +293,7 @@ class Session:
     def run(self, first_frame_timeout: float = 1.5) -> int:
         w, h = self.surface.hello_size()
         self._send({"cmd": "hello", "mode": self.mode, "width": w, "height": h})
+        self._preboot_devices()
         started = time.monotonic()
         try:
             while not self.stop_requested and self._app_alive():
@@ -274,6 +326,9 @@ class Session:
             self.exit_code = 125
         finally:
             self.shutdown()
+            if self.outcome is not None:
+                self.outcome.update(booted=sorted(self.booted), switch=self.switch,
+                                    detached=self.detached, exit_code=self.exit_code or 0)
         if self.exit_code is None and self.proc is not None:
             self.exit_code = self.proc.returncode or 0
         return self.exit_code or 0

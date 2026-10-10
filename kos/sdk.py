@@ -97,6 +97,21 @@ class App:
         except OSError:
             pass
 
+    # --- asking the OS for things (needs the 'system' permission) --------
+    # Each of these only *asks*. The answer arrives later as an event:
+    # {"cmd": "apps", ...} or {"cmd": "result", "ok": bool, "detail": str}.
+    def request_apps(self) -> None:
+        self.send({"cmd": "request", "action": "apps"})
+
+    def request_open(self, app: str, mode: str = "tui") -> None:
+        self.send({"cmd": "request", "action": "open", "app": app, "mode": mode})
+
+    def request_focus(self, instance_id: str) -> None:
+        self.send({"cmd": "request", "action": "focus", "id": instance_id})
+
+    def request_close(self, instance_id: str) -> None:
+        self.send({"cmd": "request", "action": "close", "id": instance_id})
+
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch
         didn't provide one. It is wiped the moment this app's process ends -
