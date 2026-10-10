@@ -27,12 +27,11 @@ Writing a file is an administrator action. ``kos write`` needs:
   its password the keyboards are taken exclusively (``EVIOCGRAB``), so no
   other program can read the keystrokes, and if somebody else already holds a
   keyboard the write is refused;
-* the data passes the **security scan** (``kos/scan.py``);
-* the disk is **optimized** first (``kos/optimize.py``), under the same
-  password - a write is only allowed once there is room made and the store is
-  verified;
-
-in that order. If any step fails, nothing is written.
+* afterwards - ``file.write`` *requires* it, see ``requires.py`` - the file
+  is **security scanned** (``kos/scan.py``; flagged means quarantined) and the
+  disk is **optimized** (``kos/optimize.py``), in that order, under the same
+  password. Whatever is not done stays owed on a ledger and blocks the next
+  write until ``kos settle``.
 
 Honest limits
 -------------
@@ -61,6 +60,7 @@ from typing import Callable, Optional
 
 from .auth import AuditLog, Authority, Grant
 from .paths import Paths, atomic_write
+from .requires import Ledger, Requirements, Unsatisfied
 from .scan import ScanResult, scan_bytes
 
 LEASE_LABEL = "admin-keyboard"
@@ -298,6 +298,56 @@ def open_admin_devices(lease: Lease):
         raise AdminError(f"cannot take the keyboard exclusively: {e}") from None
 
 
+# --- what the policy table means here ----------------------------------------------
+
+def requirements(keyboard: AdminKeyboard, grant: Optional[Grant] = None) -> Requirements:
+    """The ``before`` side of ``requires.RULES`` for this machine. With a login
+    ``grant`` the administrator keyboard can be *booted* to satisfy it."""
+    def kernel() -> Optional[str]:
+        gaps = kernel_gaps(keyboard.kernel_report())
+        return None if (not gaps or weak_allowed()) else "; ".join(gaps)
+
+    def booted() -> Optional[str]:
+        try:
+            keyboard.require_booted()
+            return None
+        except AdminError as e:
+            return str(e)
+
+    boots = {"admin.keyboard": lambda: keyboard.boot(grant)} if grant is not None else {}
+    return Requirements({"kernel": kernel, "admin.keyboard": booted}, boots)
+
+
+def _quarantine(paths: Paths, file: Path) -> Path:
+    import shutil
+    qdir = paths.state / "quarantine"
+    qdir.mkdir(parents=True, exist_ok=True)
+    os.chmod(qdir, 0o700)
+    dest = qdir / f"write-{int(time.time())}-{file.name}"
+    shutil.move(str(file), dest)
+    return dest
+
+
+def _discharge(paths: Paths, ledger: Ledger, entry: dict, *, scanner, optimize_once,
+               audit: AuditLog) -> Optional[ScanResult]:
+    """Strike off what one ledger entry still owes. Returns a failed scan, if any.
+    A step that raises stays owed (and keeps blocking) until it succeeds."""
+    flagged = None
+    for step in list(entry["pending"]):
+        if step == "scan":
+            target = Path(entry["target"])
+            if target.exists():
+                result = scanner(target.read_bytes(), str(target))
+                if not result.clean:
+                    flagged = result
+                    audit.record("file.write", str(target), "quarantined-by-scan")
+                    _quarantine(paths, target)
+        elif step == "optimize":
+            optimize_once()
+        ledger.done(entry["id"], step)
+    return flagged
+
+
 # --- the guarded write -----------------------------------------------------------
 
 @dataclass
@@ -323,11 +373,15 @@ def _protected(paths: Paths, target: Path) -> Optional[Path]:
 
 def write_file(paths: Paths, authority: Authority, keyboard: AdminKeyboard, target: str,
                data: bytes, *, scanner: Callable[[bytes, str], ScanResult] = scan_bytes,
-               optimizer: Optional[Callable[..., object]] = None) -> WriteReport:
-    """Scan -> optimize -> write, under a booted administrator keyboard and a
-    password. Any failure stops the pipeline before anything is written."""
+               optimizer: Optional[Callable[..., object]] = None,
+               ledger: Optional[Ledger] = None) -> WriteReport:
+    """Write a file. ``file.write`` *requires* the administrator keyboard
+    (before) and leaves a security scan and a disk optimize owed (after) - both
+    discharged right here, in that order, under the same password. Anything not
+    discharged stays on the ledger and blocks the next write until settled."""
     from .optimize import optimize as default_optimize
     optimizer = optimizer or default_optimize
+    ledger = ledger or Ledger(paths)
 
     if len(data) > MAX_WRITE:
         raise AdminError(f"refusing to write more than {MAX_WRITE >> 20} MiB at once")
@@ -344,16 +398,53 @@ def write_file(paths: Paths, authority: Authority, keyboard: AdminKeyboard, targ
     if final.is_symlink() or final.is_dir():
         raise AdminError(f"{final} is a symlink or directory; refusing to write through it")
 
-    keyboard.require_booted()                        # refuse before asking for a password
+    try:                                              # refuse before asking for a password
+        requirements(keyboard).ensure("file.write")
+    except Unsatisfied as e:
+        raise AdminError(str(e)) from None
+    owed = ledger.owed("file.write")
+    if owed:
+        steps = sorted({s for e in owed for s in e["pending"]})
+        raise AdminError(f"an earlier write still owes: {', '.join(steps)} - run 'settle' first")
+
     audit = AuditLog(paths)
+    summary = {"opt": "not run"}
     with authority.authorize("file.write", str(final)) as grant:
         keyboard.verify(grant)
-        result = scanner(data, str(final))
-        if not result.clean:
-            audit.record("file.write", str(final), "blocked-by-scan")
-            raise WriteBlocked(result)
-        opt = optimizer(paths, authority, grant=grant)
-        summary = opt.summary() if hasattr(opt, "summary") else str(opt)
         atomic_write(final, data, mode=0o600)
+        entry_id = ledger.owe("file.write", str(final))
         audit.record("file.write", str(final), "written")
-    return WriteReport(str(final), len(data), result, summary)
+
+        def optimize_once() -> None:
+            opt = optimizer(paths, authority, grant=grant)
+            summary["opt"] = opt.summary() if hasattr(opt, "summary") else str(opt)
+
+        entry = ledger.owed("file.write")[-1]
+        assert entry["id"] == entry_id
+        flagged = _discharge(paths, ledger, entry, scanner=scanner,
+                             optimize_once=optimize_once, audit=audit)
+    if flagged is not None:
+        raise WriteBlocked(flagged)
+    return WriteReport(str(final), len(data), scan_bytes(data), summary["opt"])
+
+
+def settle(paths: Paths, authority: Authority, *, scanner=scan_bytes,
+           ledger: Optional[Ledger] = None) -> list[str]:
+    """Discharge everything still owed (a crash, a failed step). Needs the
+    password once, for the optimize."""
+    from .optimize import optimize as default_optimize
+    ledger = ledger or Ledger(paths)
+    audit, lines = AuditLog(paths), []
+    entries = ledger.owed()
+    if not entries:
+        return ["nothing is owed"]
+    with authority.authorize("disk.optimize") as grant:
+        def optimize_once() -> None:
+            lines.append("disk optimize: " + default_optimize(paths, authority, grant=grant).summary())
+        for entry in entries:
+            if entry["trigger"] == "ledger":
+                raise AdminError("the ledger is unreadable - refusing to guess what is owed")
+            flagged = _discharge(paths, ledger, entry, scanner=scanner,
+                                 optimize_once=optimize_once, audit=audit)
+            lines.append(f"{entry['target']}: " + ("FLAGGED and quarantined" if flagged else "settled"))
+    return lines

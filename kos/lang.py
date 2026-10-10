@@ -1,35 +1,36 @@
 """Every line is a command.
 
-The KOS line shell (``kos line``, and what you get when you log in) does not
-hand your input to a programming language. It reads a line of *human*
-language, in any of the languages in the lexicon below, and turns it into
-exactly one KOS command::
+The KOS line shell (``kos line``, and what you get when you log in) takes one
+line at a time, in any language, and every line is a command:
 
-    run hello                 abre hello              启动 hello
-    please scan notes.kapp    escanea notes.kapp      lance l'app hello
+* **Human language** (any of the languages in the lexicon below) becomes
+  exactly one KOS command::
 
-The result is always a structured ``argv`` for ``kos.cli.main`` - never a
-string handed to a shell - so there is nothing to inject into: no pipes, no
-``;``, no ``$(...)``, no redirects. The words are only ever *names for
-existing commands*; every command still asks for the password exactly as it
-does when typed as ``kos ...``.
+      run hello                 abre hello              启动 hello
+      please scan notes.kapp    escanea notes.kapp      lance l'app hello
 
-Code is the one exception. A line that is written in a programming language
-(Python, C, JavaScript, SQL, shell, HTML...) is not a command and is never
-run by this layer; it is reported as code and ignored. Code belongs inside an
-app (``kos pack`` / ``kos install``), where it runs sandboxed and can only
-talk to the OS through the command protocol.
+  The result is a structured ``argv`` for ``kos.cli.main`` - never a string
+  handed to a shell. The words are only *names for existing commands*; every
+  command still asks for the password exactly as it does when typed as
+  ``kos ...``.
+
+* **Code** (Python, C, JavaScript, SQL, shell...) is a command too: the
+  command is *run this line*. It is never run on the host. ``kos exec``
+  (``coderun.py``) scans it, asks for the password, and runs it as a one-shot
+  sandboxed app with a time limit. A language with no sandboxed runtime is
+  still understood and logged, and reports that nothing was run.
 
 Resolution order for one line:
 
 1. empty line                       -> ``empty``
-2. looks like code                  -> ``code``   (never executed)
+2. looks like code                  -> ``code``   (``kos exec``, sandboxed)
 3. first meaningful word is a verb  -> ``command``/``help``/``exit``
 4. anything else                    -> ``unknown`` (with a "did you mean")
 
 Politeness words ("please", "por favor", "bitte"...) and articles are skipped.
 Verbs are matched ignoring case and accents. Languages without spaces
-(Chinese, Japanese) are matched by prefix.
+(Chinese, Japanese) are matched by prefix. Shell command names (``ls``,
+``cat``, ``kill``...) are not in the lexicon: they are code, not words.
 """
 
 from __future__ import annotations
@@ -410,7 +411,7 @@ class Line:
         if self.kind == "command":
             return f"[{self.language}] {self.word} -> kos {' '.join(self.argv)}"
         if self.kind == "code":
-            return f"[{self.language}] code - not a command"
+            return f"[{self.language}] code -> run in a sandbox (kos exec)"
         return self.kind
 
 
@@ -504,7 +505,8 @@ def interpret(line: str) -> Line:
         return Line("empty")
     lang = detect_code(text)
     if lang:
-        return Line("code", language=lang)
+        return Line("code", argv=("exec", f"--lang={lang}", f"--code={text}"),
+                    verb="exec", language=lang)
     tokens = _tokens(text)
     found = _split_verb(tokens)
     if found is None:
@@ -577,8 +579,8 @@ Every line you type is a command. Say what you want, in your own language:
   admin                the elevated administrator keyboard
   help / exit
 
-Lines written in a programming language are not commands and are never run
-here - put code inside an app (kos pack, kos install) where it runs sandboxed.
+Code is a command too: a line of code is run as a sandboxed one-shot app
+(scanned, password, time limit, no files, no network) - never on the host.
 """
 
 
@@ -601,16 +603,11 @@ def run_shell(execute, read, say, prompt: str = "kos> ", explain: bool = False) 
         if result.kind == "help":
             say(HELP)
             continue
-        if result.kind == "code":
-            say(f"That looks like code ({result.language}), not a command, so I won't run it. "
-                "Put code in an app (kos pack / kos install).")
-            last = 64
-            continue
         if result.kind == "unknown":
             tip = f" Did you mean '{result.hint}'?" if result.hint else ""
             say(f"I don't know that command.{tip} Type 'help'.")
             last = 65
             continue
-        if explain:
+        if explain or result.kind == "code":
             say(result.explain())
         last = execute(list(result.argv))

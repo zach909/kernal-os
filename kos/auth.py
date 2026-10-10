@@ -63,6 +63,7 @@ ACTIONS: dict[str, str] = {
     "cell.start": "start kernel cell",
     "cell.stop": "stop kernel cell",
     "file.write": "write file",
+    "code.run": "run code",
     "admin.boot": "boot the administrator keyboard",
 }
 

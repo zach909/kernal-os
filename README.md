@@ -17,7 +17,7 @@ power on
        line shell. Starts nothing else. Ever.
   └─ you type, in any language:  run hello   /   abre hello   /   运行 hello
                                    write notes.txt hi   /   desktop
-     (every line is a command; lines of code are refused, never run)
+     (every line is a command - human language runs a KOS command, code runs sandboxed)
   └─ run hello                       → password → app opens as a text page
                 run graphical hello  → password → app opens graphically
                    "Boot mouse?"     → y → password → mouse now sends commands to the app
@@ -34,9 +34,9 @@ power on
 | Virus scanning | `kos/scan.py`: a static/heuristic scanner (EICAR + hand-written rules for reverse shells, obfuscated `eval`, credential-file reads, fork bombs, curl-pipe-shell, ...) that recurses into zips without extracting them. Every `install` and `update` is scanned *before* the password prompt; a flagged file is quarantined, never installed. `kos scan watch DIR` scans every file written under a directory - started with your password, like a cell, so it's bounded and visible, not a silent background daemon. |
 | Apps need permission to run | `kos/permit.py`: a persistent grant, separate from the password - `kos permit NAME` decides an app is allowed to run *at all*, once. It never replaces the password: `run`/`open` still ask for it on every single launch regardless. |
 | Per-app cache, wiped on exit | `kos/cache.py`: each run gets one private, writable scratch directory inside its sandbox (the sandbox previously allowed *no* writable directory at all). The moment that app's process ends - clean exit, `kos close`, anything - the directory is overwritten and deleted. |
-| Every line is a command | `kos/lang.py`: a line of human language (en/es/fr/de/pt/it/ru/zh/ja) becomes exactly one structured `kos` command - never a shell string. A line written in a programming language, or carrying shell glue (`;` `\|` `&&` `$(...)` redirects), is refused as code and never run. `kos do WORDS...` runs one line; `kos line` is the shell; login starts it instead of `/bin/sh`. |
+| Every line is a command | `kos/lang.py`, `kos/coderun.py`: a line of human language (en/es/fr/de/pt/it/ru/zh/ja) becomes exactly one structured `kos` command - never a shell string. A line of **code is a command too**: *run this line* - but never on the host. It is scanned, needs your password, and runs as a one-shot app in the usual sandbox (no files, no network, time limit, nothing carries over to the next line). `kos do WORDS...` runs one line; `kos line` is the shell; login starts it instead of `/bin/sh`. |
 | The OS is made of apps | `kos/desktop.py`, `kos/system.py`, `examples/system/`: the **taskbar** and the **App Library** are ordinary sandboxed apps. They never touch the screen or other apps - they *ask* the OS with a `request` command (needs the `system` permission in the manifest + a permit; opening/closing needs your password in the OS's own prompt). The **right mouse button is the App Library**, handled by the OS from any app. |
-| Elevated administrator keyboard | `kos/admin.py`: the password you type to unlock boots it - a lease signed with a password-derived key, bound to this boot, **refused unless the KOS kernel protections are present** (re-checked on every use). `kos write` needs it: the password is typed *on that keyboard* (exclusive `EVIOCGRAB`), the data must pass the **security scan**, and the disk is **optimized** first - in that order, or nothing is written. |
+| Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
 ## Commands
@@ -63,7 +63,9 @@ kos scan watch DIR...       scan every file written here until Ctrl-C (password 
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
 kos optimize                 recompress apps, prune dead state, reclaim disk space
 kos admin [status|boot|lock] the elevated administrator keyboard (boots at login)
-kos write PATH --text T      write a file: admin keyboard + password on it + scan + optimize
+kos write PATH --text T      write a file (needs the admin keyboard); owes a scan + optimize afterwards
+kos owed / kos settle        what earlier writes still owe / do it now
+kos exec --code LINE         run one line of code as a sandboxed command
 kos do WORDS...              one line of human language, run as one command
 kos line [--explain]         the line shell: every line you type is a command
 kos cell start NAME --kernel K --initrd I --cpus 2,3
@@ -109,18 +111,24 @@ log.
 ```
 kos> run hello                  kos> abre hello                kos> 运行 hello
 kos> please scan notes.kapp     kos> lance l'app hello         kos> write notes.txt "hi there."
-kos> x = 5                      -> refused: that looks like code (assignment)
-kos> run hello; rm -rf /        -> refused: that looks like code (shell) - nothing runs
+kos> print(6 * 7)               -> asks your password, runs in a sandbox, prints 42
+kos> run hello; rm -rf /        -> a command too: shell code, but there is no sandboxed
+                                   shell runtime, so nothing runs (and it never touches the host)
 ```
 
-The words are only *names for existing commands*; each one still asks for the
-password exactly as `kos ...` does. Resolution: empty → code? (refused) →
-first meaningful word is a verb in the lexicon (politeness words and
-articles skipped, case/accents ignored, CJK matched by prefix) → otherwise
-"I don't know that command" with a did-you-mean. `kos line --explain` shows how
-each line was understood. Limits, honestly: this is a verb lexicon, not
-language understanding; the verb comes first; code detection is heuristic
-(it errs toward refusing); and an unknown language is simply "unknown".
+Human language: the words are only *names for existing commands*; each one
+still asks for the password exactly as `kos ...` does. The first meaningful
+word is looked up in the lexicon (politeness words and articles skipped,
+case/accents ignored, CJK matched by prefix); otherwise "I don't know that
+command" with a did-you-mean. Shell command names (`ls`, `cat`, `kill`) are
+not words in the lexicon - they are code.
+
+Code: detected by syntax, scanned, then run as a one-shot sandboxed app with a
+password and a 10 s limit. Only Python has a sandboxed runtime here; any
+other language is still a command - understood, scanned, logged - and says
+it has no runtime. `kos line --explain` shows how each line was understood.
+Honest limits: it is a verb lexicon, not language understanding; the verb comes
+first; each code line is its own app, so variables do not persist.
 
 ## The desktop is made of apps
 
@@ -141,17 +149,28 @@ switch apps - but only by asking, and only with your password for anything that
 starts or stops something. Starting the desktop asks for the password five
 times (desktop, taskbar, library, mouse, keyboard); after that, switching is free.
 
-## The administrator keyboard and guarded writes
+## "Requires"
+
+`kos/requires.py` is one small table, and it is the whole policy:
 
 ```
-login password ──► session.login ──► boots the administrator keyboard (no 2nd prompt)
-kos write notes.txt --text hi
-   1. lease booted this boot, unexpired, correctly signed, kernel protections present
-   2. password typed ON the exclusively-grabbed keyboard
-   3. security scan of the data           (flagged → nothing written, exit 3)
-   4. disk optimize                       (under the same password)
-   5. atomic write, mode 0600             (KOS's own state is never writable this way)
+session.unlock  requires (before)  admin.keyboard
+admin.keyboard  requires (before)  kernel
+file.write      requires (before)  admin.keyboard
+                requires (after)   scan, optimize
 ```
+
+*Before* is a chain followed deepest-first: login asks for the password once,
+checks the kernel, boots the administrator keyboard with that same password,
+and only then unlocks. If a link fails, nothing above it happens and the
+refusal names the chain: `session.unlock requires admin.keyboard requires
+kernel: Landlock (kernel sandbox) is not available`.
+
+*After* is an obligation. `kos write notes.txt --text hi`:
+1. needs the keyboard booted this boot, the kernel present, and the password typed on it;
+2. writes the file and records on the ledger that it owes `scan` and `optimize`;
+3. scans what is on disk (flagged → moved to quarantine, exit 3), then optimizes the disk, under the same password;
+4. strikes each off as it is done. Whatever is still owed survives a crash and blocks the next write: `kos owed`, then `kos settle`.
 
 Honest limits: the lease is a signed record, not a separate privileged
 process - a program running as you can read it but not forge it, and it still

@@ -641,6 +641,26 @@ def cmd_admin(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_owed(args, paths: Paths) -> int:
+    from .requires import Ledger
+    owed = Ledger(paths).owed()
+    if not owed:
+        print("nothing is owed")
+    for e in owed:
+        print(f"{e['target']}  ({e['trigger']}) still owes: {', '.join(e['pending'])}")
+    return 0
+
+
+def cmd_settle(args, paths: Paths) -> int:
+    """Do what earlier writes still owe: the security scan and the disk optimize."""
+    from .admin import settle
+    authority, prompter = _authority(paths)
+    for line in settle(paths, authority):
+        print(line)
+    prompter.close()
+    return 0
+
+
 def cmd_write(args, paths: Paths) -> int:
     """Write a file. Needs the booted administrator keyboard, the password
     typed on it, a clean security scan, and a disk optimize - in that order."""
@@ -678,18 +698,32 @@ def cmd_do(args, paths: Paths) -> int:
     line = interpret(" ".join(args.words))
     if args.explain:
         print(line.explain())
-    if line.kind == "command":
+    if line.kind in ("command", "code"):
         return _execute_line(list(line.argv))
     if line.kind == "help":
         print(HELP)
         return 0
-    if line.kind == "code":
-        eprint(f"That looks like code ({line.language}), not a command, so I won't run it.")
-        return 64
     if line.kind == "unknown":
         eprint("I don't know that command." + (f" Did you mean '{line.hint}'?" if line.hint else ""))
         return 65
     return 0
+
+
+def cmd_exec(args, paths: Paths) -> int:
+    """A line of code is a command: run it as a sandboxed one-shot app."""
+    from .coderun import run_code
+    opened = []
+
+    def get_authority() -> Authority:        # only asked for when there is something to run
+        authority, prompter = _authority(paths)
+        opened.append(prompter)
+        return authority
+
+    try:
+        return run_code(paths, get_authority, args.code, args.lang)
+    finally:
+        for prompter in opened:
+            prompter.close()
 
 
 def cmd_line(args, paths: Paths) -> int:
@@ -773,6 +807,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", type=int, default=30)
     s = sub.add_parser("admin", help="the elevated administrator keyboard")
     s.add_argument("admin_cmd", nargs="?", choices=["status", "boot", "lock"])
+    sub.add_parser("owed", help="what earlier writes still owe (a scan, an optimize)")
+    sub.add_parser("settle", help="do what is owed: security scan + disk optimize")
     s = sub.add_parser("write", help="write a file (admin keyboard, security scan, disk optimize)")
     s.add_argument("path")
     s.add_argument("--text", help="the text to write")
@@ -780,6 +816,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("do", help="run one line of human language as one command")
     s.add_argument("words", nargs="+")
     s.add_argument("--explain", action="store_true", help="show how the line was understood")
+    s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
+    s.add_argument("--lang", default="python")
+    s.add_argument("--code", required=True)
     s = sub.add_parser("line", help="the line shell: every line you type is a command")
     s.add_argument("--explain", action="store_true", help="show how each line was understood")
     return p
@@ -792,7 +831,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line, "admin": cmd_admin, "write": cmd_write,
+            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 
 

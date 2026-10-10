@@ -80,6 +80,8 @@ land instead of getting lost in chat.
   list / open / close / focus so a clock app can list without being able to open.
 - **More verbs and languages for the line shell**, and verb-last languages
   (Japanese, Turkish). A user-extensible lexicon file, still data-only.
+- **More sandboxed runtimes for code lines** (JavaScript, shell), and an
+  optional persistent per-session scope so `x = 5` then `print(x)` works.
 - **Fewer desktop passwords.** Five at start is the honest cost of "nothing
   without the password"; a single desktop grant covering the two system apps
   is possible if that is too noisy.
@@ -87,7 +89,9 @@ land instead of getting lost in chat.
 ## Shipped
 
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
-  command in the user's own language (code refused, never run); the taskbar
+  command in the user's own language, and code is a command too (run sandboxed,
+  never on the host); `requires` (unlock requires the keyboard requires the
+  kernel; a write owes a scan and optimize afterwards); the taskbar
   and App Library are ordinary apps that *ask* the OS via `request`, with the
   right mouse as the App Library; the unlock password boots a kernel-gated
   administrator keyboard whose guarded `kos write` needs a clean security

@@ -27,10 +27,11 @@ import sys
 import termios
 import time
 
-from .admin import AdminError, AdminKeyboard
+from .admin import AdminKeyboard, requirements
 from .auth import AuthError, Authority, AuthorizationDenied, PasswordStore
 from .paths import Paths
 from .prompt import TTYPrompter
+from .requires import Ledger, Unsatisfied
 
 _libc = ctypes.CDLL(None, use_errno=True)
 MS_NOSUID, MS_NODEV, MS_NOEXEC = 2, 4, 8
@@ -155,22 +156,30 @@ def login_loop(paths: Paths, console: str) -> None:
         keyboard.shutdown()  # nothing elevated survives a lock (or a crash and restart)
         prompter.info(BANNER)
         try:
-            # The one password typed here unlocks the session AND boots the
-            # elevated administrator keyboard - no second prompt.
+            # The one password typed here asks to unlock. Unlocking *requires*
+            # the elevated administrator keyboard, which requires the kernel
+            # (kos/requires.py): the chain is satisfied, deepest first, with
+            # this same password - no second prompt - or the computer stays locked.
             with authority.authorize("session.login") as grant:
-                try:
-                    keyboard.boot(grant)
-                    prompter.info("Administrator keyboard booted.")
-                except (AdminError, OSError) as e:
-                    prompter.info(f"Administrator keyboard NOT booted: {e}")
+                brought_up = requirements(keyboard, grant).ensure("session.unlock")
+            if "admin.keyboard" in brought_up:
+                prompter.info("Administrator keyboard booted.")
         except AuthorizationDenied:
             prompter.info("Locked.")
             time.sleep(2)
             continue
-        except AuthError as e:
+        except Unsatisfied as e:
+            keyboard.shutdown()
+            prompter.info(f"Locked - cannot unlock: {e}")
+            time.sleep(5)
+            continue
+        except (AuthError, OSError) as e:
             prompter.info(f"auth error: {e}")
             time.sleep(5)
             continue
+        owed = Ledger(paths).owed()
+        if owed:
+            prompter.info(f"{len(owed)} earlier write(s) still owe a scan/optimize: type 'settle'.")
         prompter.info("Unlocked. Every line you type is a command - say what you want "
                       "('help' lists them). 'exit' locks.\n")
         start_shell(console)

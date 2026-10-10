@@ -582,21 +582,16 @@ class TestLang(unittest.TestCase):
         self.assertEqual(self.argv('write notes.txt "a  b!"'),
                          ["write", "notes.txt", "--text", "a  b!"])
 
-    def test_code_is_never_a_command(self):
+    def test_code_is_a_command_too_and_runs_sandboxed(self):
         from kos.lang import interpret
-        for line in ["x = 5", 'print("hi")', "import os", "def f(x): return x",
-                     "#include <stdio.h>", "const a = 1", "SELECT * FROM users",
-                     "DROP TABLE users", "<script>alert(1)</script>", "# note",
-                     "#!/bin/sh"]:
-            self.assertEqual(interpret(line).kind, "code", line)
-
-    def test_shell_glue_is_refused_not_executed(self):
-        """A command followed by shell syntax is code, so `run hello; rm -rf /`
-        never becomes anything."""
-        from kos.lang import interpret
-        for line in ["run hello; rm -rf /", "list | sh", "run hello && reboot",
-                     "view /etc/passwd > /tmp/x", "run $(whoami)", "run `id`"]:
-            self.assertEqual(interpret(line).kind, "code", line)
+        for line, lang in [("x = 5", "assignment"), ('print("hi")', "code call"),
+                           ("import os", "python"), ("#include <stdio.h>", "c"),
+                           ("const a = 1", "javascript"), ("SELECT * FROM users", "sql"),
+                           ("run hello; rm -rf /", "shell"), ("list | sh", "shell")]:
+            r = interpret(line)
+            self.assertEqual((r.kind, r.language), ("code", lang), line)
+            self.assertEqual(r.argv[0], "exec")                       # a command, never a shell string
+            self.assertEqual(r.argv[2], "--code=" + line)
 
     def test_plain_words_that_are_also_code_keywords_still_work(self):
         self.assertEqual(self.argv("update hello"), ["update", "hello"])
@@ -609,17 +604,12 @@ class TestLang(unittest.TestCase):
         self.assertEqual((r.kind, r.hint), ("unknown", "run"))
         self.assertEqual(interpret("banana split").kind, "unknown")
 
-    def test_shell_loop_runs_each_line_once_and_stops_on_exit(self):
+    def test_shell_loop_runs_every_line_as_a_command(self):
         from kos.lang import run_shell
-        lines = iter(["run hello", "x = 1", "rm hello", "", "ayuda", "exit", "list"])
+        lines = iter(["run hello", "x = 1", "bonjour", "", "ayuda", "exit", "list"])
         ran, said = [], []
-
-        def read(_prompt):
-            return next(lines)
-
-        code = run_shell(lambda argv: ran.append(argv) or 0, read, said.append)
-        self.assertEqual(ran, [["run", "hello"]])           # code + unknown were not executed
-        self.assertTrue(any("looks like code" in m for m in said))
+        code = run_shell(lambda argv: ran.append(argv) or 0, lambda _p: next(lines), said.append)
+        self.assertEqual(ran, [["run", "hello"], ["exec", "--lang=assignment", "--code=x = 1"]])
         self.assertTrue(any("don't know" in m for m in said))
         self.assertEqual(code, 65)
 
@@ -636,8 +626,9 @@ class TestLang(unittest.TestCase):
                 os.environ.pop("KOS_ROOT", None) if old is None else os.environ.update(KOS_ROOT=old)
         self.assertEqual(code, 0)
         self.assertIn("no apps installed", buf.getvalue())
-        # and code is refused with a distinct exit status
-        self.assertEqual(kcli.main(["do", "x", "=", "1"]), 64)
+        # code is a command too; one with no sandboxed runtime says so (66) and runs nothing
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(kcli.main(["do", "const", "a", "=", "1"]), 66)
 
 
 from unittest import mock  # noqa: E402
@@ -757,6 +748,8 @@ class TestGuardedWrite(AdminEnv):
     def setUp(self):
         super().setUp()
         self.kb_ = self.booted()
+        from kos.requires import Ledger
+        self.ledger = Ledger(self.paths)
         self.out = Path(self.tmp.name) / "out"
         self.out.mkdir()
 
@@ -764,40 +757,60 @@ class TestGuardedWrite(AdminEnv):
         return write_file(self.paths, self.authority(*answers), self.kb_,
                           str(self.out / name), data, **kw)
 
-    def test_scan_then_optimize_then_write_in_that_order(self):
-        order = []
-        target = self.out / "a.txt"
+    def test_write_then_scan_then_optimize_are_required_afterwards(self):
+        order, target = [], self.out / "a.txt"
 
         def scanner(data, label):
-            order.append(("scan", target.exists()))
+            order.append(("scan", target.exists(), self.ledger.owed("file.write")[0]["pending"][:]))
             return scan_bytes(data, label)
 
         def optimizer(paths, authority, grant=None):
-            order.append(("optimize", target.exists()))
+            order.append(("optimize", target.exists(), self.ledger.owed("file.write")[0]["pending"][:]))
             return optimize(paths, authority, grant=grant)
 
         r = self.write("a.txt", b"hello", scanner=scanner, optimizer=optimizer)
-        self.assertEqual(order, [("scan", False), ("optimize", False)])  # not written yet
+        # the file is already there when the scan runs; both are owed until each is done
+        self.assertEqual(order, [("scan", True, ["scan", "optimize"]), ("optimize", True, ["optimize"])])
+        self.assertEqual(self.ledger.owed(), [])               # nothing left owed
         self.assertEqual(target.read_bytes(), b"hello")
         self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
         self.assertTrue(r.scan.clean)
         self.assertIn("reclaimed", r.optimize_summary)
 
-    def test_flagged_content_is_never_written_and_never_optimizes(self):
+    def test_flagged_content_is_quarantined_afterwards_and_the_optimize_still_runs(self):
         called = []
         with self.assertRaises(WriteBlocked):
             self.write("bad.txt", EICAR, optimizer=lambda *a, **k: called.append(1))
-        self.assertFalse((self.out / "bad.txt").exists())
-        self.assertEqual(called, [])
+        self.assertFalse((self.out / "bad.txt").exists())          # taken out of place
+        self.assertEqual(len(list((self.paths.state / "quarantine").glob("write-*bad.txt"))), 1)
+        self.assertEqual(called, [1])                              # optimize was still owed
+        self.assertEqual(self.ledger.owed(), [])
         outcomes = [e["outcome"] for e in AuditLogFor(self.paths) if e["action"] == "file.write"]
-        self.assertIn("blocked-by-scan", outcomes)
+        self.assertIn("quarantined-by-scan", outcomes)
 
-    def test_failed_optimize_blocks_the_write(self):
+    def test_failed_optimize_stays_owed_and_blocks_the_next_write_until_settled(self):
         def boom(paths, authority, grant=None):
             raise OSError("disk exploded")
         with self.assertRaises(OSError):
             self.write("c.txt", b"data", optimizer=boom)
-        self.assertFalse((self.out / "c.txt").exists())
+        self.assertEqual([e["pending"] for e in self.ledger.owed()], [["optimize"]])   # scan done, optimize owed
+        with self.assertRaises(AdminError) as ctx:
+            self.write("d2.txt", b"x", answers=())                 # refused before any password
+        self.assertIn("still owes: optimize", str(ctx.exception))
+        self.assertFalse((self.out / "d2.txt").exists())
+        from kos.admin import settle
+        lines = settle(self.paths, self.authority(PW))
+        self.assertTrue(any("settled" in l for l in lines))
+        self.assertEqual(self.ledger.owed(), [])
+        self.write("d2.txt", b"x")                                 # unblocked
+        self.assertTrue((self.out / "d2.txt").exists())
+
+    def test_a_crash_between_write_and_scan_is_remembered_across_restarts(self):
+        from kos.requires import Ledger
+        self.ledger.owe("file.write", str(self.out / "e.txt"))      # as if we died right after writing
+        self.assertEqual(Ledger(self.paths).owed()[0]["pending"], ["scan", "optimize"])
+        with self.assertRaises(AdminError):
+            self.write("f.txt", b"x", answers=())
 
     def test_one_password_covers_scan_optimize_and_write(self):
         """The write's password also pays for the optimize (it re-seals apps),
@@ -1186,29 +1199,105 @@ class TestLoginBootsAdminKeyboard(AdminEnv):
         self.assertTrue(any("Administrator keyboard booted" in m for m in prompter.messages))
         self.assertEqual(seen["shell"], ["/opt/kos/bin/kos", "line"])   # login starts the line shell
 
-    def test_a_kernel_that_cannot_run_it_still_unlocks_but_without_the_keyboard(self):
+    def test_unlock_requires_the_keyboard_which_requires_the_kernel(self):
         import kos.init as kinit
         prompter = ScriptedPrompter([PW])
-        lease = self.paths.state / "admin-lease.json"
-        seen = {}
+        shells = []
         no_kernel = lambda paths: self.kb(kernel_report=lambda: {"landlock_abi": 0})
-
-        def fake_shell(console):
-            seen["lease"] = lease.exists()
-            return 0
 
         with mock.patch.object(kinit, "TTYPrompter", lambda console: prompter), \
                 mock.patch.object(kinit, "AdminKeyboard", no_kernel), \
-                mock.patch.object(kinit, "start_shell", fake_shell), \
+                mock.patch.object(kinit, "start_shell", lambda c: shells.append(1) or 0), \
                 mock.patch.object(kinit.time, "sleep", lambda s: None):
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(AssertionError):            # it asks again: still locked
                 kinit.login_loop(self.paths, "/dev/null")
-        self.assertEqual(seen, {"lease": False})
-        self.assertTrue(any("NOT booted" in m and "needs the KOS kernel" in m for m in prompter.messages))
+        self.assertEqual(shells, [])                            # the shell NEVER started
+        self.assertFalse((self.paths.state / "admin-lease.json").exists())
+        self.assertTrue(any("session.unlock requires admin.keyboard requires kernel" in m
+                            for m in prompter.messages), prompter.messages)
 
 
-class TestShellWordsAreNotCommands(unittest.TestCase):
-    def test_shell_and_programming_command_names_are_not_commands(self):
-        from kos.lang import interpret
-        for line in ["ls /etc", "dir", "cat /etc/passwd", "kill 1", "ps", "ls -la"]:
-            self.assertNotEqual(interpret(line).kind, "command", line)
+class TestRequires(Env):
+    def test_chain_is_followed_deepest_first_and_named_when_it_fails(self):
+        from kos.requires import Requirements, Unsatisfied
+        log = []
+        state = {"kernel": False, "kb": False}
+        engine = Requirements(
+            {"kernel": lambda: None if state["kernel"] else "no kernel",
+             "admin.keyboard": lambda: None if state["kb"] else "keyboard off"},
+            {"admin.keyboard": lambda: (log.append("boot kb"), state.update(kb=True))})
+        with self.assertRaises(Unsatisfied) as ctx:
+            engine.ensure("session.unlock")
+        self.assertEqual(ctx.exception.chain, ["session.unlock", "admin.keyboard", "kernel"])
+        self.assertEqual(str(ctx.exception), "session.unlock requires admin.keyboard requires kernel: no kernel")
+        self.assertEqual(log, [])                    # the keyboard was never booted without the kernel
+        state["kernel"] = True
+        self.assertEqual(engine.ensure("session.unlock"), ["admin.keyboard"])
+        self.assertEqual(log, ["boot kb"])
+        self.assertEqual(engine.ensure("session.unlock"), [])      # already up: nothing to boot
+
+    def test_circular_requirements_are_refused(self):
+        from kos.requires import Requirements, Rule, Unsatisfied
+        engine = Requirements({}, rules={"a": Rule(before=("b",)), "b": Rule(before=("a",))})
+        with self.assertRaises(Unsatisfied):
+            engine.ensure("a")
+
+    def test_unreadable_ledger_blocks_instead_of_freeing(self):
+        from kos.requires import Ledger
+        led = Ledger(self.paths)
+        self.paths.ensure()
+        led.file.write_text("{not json")
+        self.assertTrue(led.owed())
+
+
+class TestCodeIsACommand(Env):
+    """A line of code is a command - run as a sandboxed one-shot app."""
+
+    def run_line(self, code, language="python", *answers, **kw):
+        from kos.coderun import run_code
+        out = []
+        status = run_code(self.paths, lambda: self.authority(*answers), code, language,
+                          out=out.append, **kw)
+        return status, "\n".join(out)
+
+    def test_python_line_runs_in_the_sandbox_after_the_password(self):
+        status, out = self.run_line("print(6 * 7)", "code call", PW)
+        self.assertEqual((status, out.strip()), (0, "42"))
+        self.assertIn(("code.run", "granted"),
+                      [(e["action"], e["outcome"]) for e in AuditLogFor(self.paths)])
+
+    def test_wrong_password_runs_nothing(self):
+        with self.assertRaises(AuthorizationDenied):
+            self.run_line("print('x')", "code call", "no", "no", "no")
+
+    def test_the_sandbox_holds_for_code_lines(self):
+        _, out = self.run_line("p = '/etc/' + 'pass' + 'wd'; print(open(p).read())", "python", PW)
+        self.assertIn("PermissionError", out)
+        self.assertNotIn("root:", out)
+        _, out = self.run_line("open('/tmp/kos-codeline-pwned', 'w').write('x')", "code call", PW)
+        self.assertIn("PermissionError", out)
+        self.assertFalse(os.path.exists("/tmp/kos-codeline-pwned"))
+        _, out = self.run_line("import socket; socket.create_connection(('1.1.1.1', 80), 2)", "python", PW)
+        self.assertIn("Error", out)
+
+    def test_runaway_line_is_stopped(self):
+        status, out = self.run_line("while True: pass", "python", PW, timeout=1.5)
+        self.assertEqual(status, 124)
+        self.assertIn("ran longer", out)
+
+    def test_flagged_code_is_blocked_before_the_password(self):
+        status, out = self.run_line("x = '" + EICAR.decode() + "'", "assignment")   # no answers: no prompt
+        self.assertEqual(status, 3)
+        self.assertIn("security scan", out)
+
+    def test_language_without_a_runtime_is_a_command_that_runs_nothing(self):
+        status, out = self.run_line("const a = 1", "javascript")                    # no password asked
+        self.assertEqual(status, 66)
+        self.assertIn("no sandboxed javascript runtime", out)
+        status, out = self.run_line("run hello; rm -rf /", "shell")
+        self.assertEqual(status, 66)
+
+    def test_nothing_persists_between_lines(self):
+        self.run_line("x = 5", "assignment", PW)
+        _, out = self.run_line("print(x)", "code call", PW)
+        self.assertIn("NameError", out)
