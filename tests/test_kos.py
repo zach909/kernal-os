@@ -638,3 +638,214 @@ class TestLang(unittest.TestCase):
         self.assertIn("no apps installed", buf.getvalue())
         # and code is refused with a distinct exit status
         self.assertEqual(kcli.main(["do", "x", "=", "1"]), 64)
+
+
+from unittest import mock  # noqa: E402
+from kos.admin import (AdminError, AdminKeyboard, AdminPrompter, WriteBlocked,  # noqa: E402
+                       kernel_gaps, write_file)
+
+GOOD_KERNEL = {"landlock_abi": 3, "user_namespaces": True}
+
+
+class AdminEnv(Env):
+    def kb(self, **kw):
+        args = dict(kernel_report=lambda: dict(GOOD_KERNEL), probe=lambda: ["/dev/input/event0"],
+                    boot_id=lambda: "boot-1")
+        args.update(kw)
+        return AdminKeyboard(self.paths, **args)
+
+    def booted(self, **kw):
+        kb = self.kb(**kw)
+        with self.authority(PW).authorize("session.login") as g:
+            kb.boot(g)
+        return kb
+
+
+class TestAdminKeyboard(AdminEnv):
+    def test_login_password_boots_it_with_no_second_prompt(self):
+        auth = self.authority(PW)                       # exactly ONE password is available
+        kb = self.kb()
+        with auth.authorize("session.login") as grant:
+            lease = kb.boot(grant)
+        self.assertEqual(self.prompter.answers, [])     # nothing left over, nothing asked twice
+        self.assertTrue(lease.exclusive and not lease.weak)
+        self.assertIn("ON", kb.status())
+        self.assertIn(("admin.boot", "booted"),
+                      [(e["action"], e["outcome"]) for e in auth.audit.entries()])
+
+    def test_only_a_login_or_admin_boot_grant_can_boot_it(self):
+        with self.authority(PW).authorize("app.run", "hello") as g:
+            with self.assertRaises(AdminError):
+                self.kb().boot(g)
+        self.assertFalse((self.paths.state / "admin-lease.json").exists())
+
+    def test_requires_the_kernel_to_run(self):
+        for report in ({"landlock_abi": 0, "user_namespaces": True},
+                       {"landlock_abi": 3, "user_namespaces": False}):
+            kb = self.kb(kernel_report=lambda r=report: r)
+            with self.authority(PW).authorize("session.login") as g:
+                with self.assertRaises(AdminError) as ctx:
+                    kb.boot(g)
+            self.assertIn("needs the KOS kernel", str(ctx.exception))
+            self.assertFalse(kb.file.exists())
+        self.assertEqual(kernel_gaps(GOOD_KERNEL), [])
+
+    def test_kernel_is_rechecked_on_every_use(self):
+        state = {"r": dict(GOOD_KERNEL)}
+        kb = self.booted(kernel_report=lambda: state["r"])
+        kb.require_booted()
+        state["r"] = {"landlock_abi": 0, "user_namespaces": True}
+        with self.assertRaises(AdminError):
+            kb.require_booted()
+
+    def test_no_keyboard_means_no_admin_keyboard(self):
+        kb = self.kb(probe=lambda: [])
+        with self.authority(PW).authorize("session.login") as g:
+            with self.assertRaises(AdminError):
+                kb.boot(g)
+
+    def test_weak_dev_mode_is_explicit_and_marked(self):
+        kb = self.kb(kernel_report=lambda: {"landlock_abi": 0}, probe=lambda: [])
+        with mock.patch.dict(os.environ, {"KOS_DEV_ADMIN_WEAK": "1"}):
+            with self.authority(PW).authorize("session.login") as g:
+                lease = kb.boot(g)
+            self.assertTrue(lease.weak and not lease.exclusive)
+            self.assertIn("WEAK", kb.status())
+            kb.require_booted()
+        with self.assertRaises(AdminError):             # the env var is needed on every use
+            kb.require_booted()
+
+    def test_expiry_other_boot_and_lock(self):
+        t = {"now": 1000.0}
+        kb = self.booted(now=lambda: t["now"])
+        kb.require_booted()
+        t["now"] += 9 * 3600
+        with self.assertRaises(AdminError):
+            kb.require_booted()
+        kb2 = self.kb(boot_id=lambda: "boot-2", now=lambda: 1000.0)
+        with self.assertRaises(AdminError):
+            kb2.require_booted()
+        kb3 = self.kb(boot_id=lambda: "boot-1", now=lambda: 1000.0)
+        kb3.require_booted()
+        kb3.shutdown()
+        with self.assertRaises(AdminError):
+            kb3.require_booted()
+
+    def test_forged_lease_fails_the_signature(self):
+        kb = self.booted(now=lambda: 1000.0)
+        doc = json.loads(kb.file.read_text())
+        doc["expires"] += 10 ** 9                       # an attacker extends it
+        kb.file.write_text(json.dumps(doc))
+        with self.authority(PW).authorize("file.write", "x") as g:
+            with self.assertRaises(AdminError) as ctx:
+                kb.verify(g)
+        self.assertIn("signature", str(ctx.exception))
+
+    def test_admin_prompter_reads_the_password_from_devices(self):
+        dev = ScriptedDevices()
+        keys = lambda text: [{"type": "key", "key": c} for c in text]
+        dev.push(*keys("abcX"), {"type": "key", "key": "backspace"}, *keys("d"),
+                 {"type": "key", "key": "enter"})
+        out = io.StringIO()
+        self.assertEqual(AdminPrompter(dev, out).password("pw: "), b"abcd")
+        dev.push({"type": "key", "key": "escape"})
+        self.assertIsNone(AdminPrompter(dev, out).password("pw: "))
+        dev.close()
+
+
+class TestGuardedWrite(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        self.kb_ = self.booted()
+        self.out = Path(self.tmp.name) / "out"
+        self.out.mkdir()
+
+    def write(self, name, data, answers=(PW,), **kw):
+        return write_file(self.paths, self.authority(*answers), self.kb_,
+                          str(self.out / name), data, **kw)
+
+    def test_scan_then_optimize_then_write_in_that_order(self):
+        order = []
+        target = self.out / "a.txt"
+
+        def scanner(data, label):
+            order.append(("scan", target.exists()))
+            return scan_bytes(data, label)
+
+        def optimizer(paths, authority, grant=None):
+            order.append(("optimize", target.exists()))
+            return optimize(paths, authority, grant=grant)
+
+        r = self.write("a.txt", b"hello", scanner=scanner, optimizer=optimizer)
+        self.assertEqual(order, [("scan", False), ("optimize", False)])  # not written yet
+        self.assertEqual(target.read_bytes(), b"hello")
+        self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+        self.assertTrue(r.scan.clean)
+        self.assertIn("reclaimed", r.optimize_summary)
+
+    def test_flagged_content_is_never_written_and_never_optimizes(self):
+        called = []
+        with self.assertRaises(WriteBlocked):
+            self.write("bad.txt", EICAR, optimizer=lambda *a, **k: called.append(1))
+        self.assertFalse((self.out / "bad.txt").exists())
+        self.assertEqual(called, [])
+        outcomes = [e["outcome"] for e in AuditLogFor(self.paths) if e["action"] == "file.write"]
+        self.assertIn("blocked-by-scan", outcomes)
+
+    def test_failed_optimize_blocks_the_write(self):
+        def boom(paths, authority, grant=None):
+            raise OSError("disk exploded")
+        with self.assertRaises(OSError):
+            self.write("c.txt", b"data", optimizer=boom)
+        self.assertFalse((self.out / "c.txt").exists())
+
+    def test_one_password_covers_scan_optimize_and_write(self):
+        """The write's password also pays for the optimize (it re-seals apps),
+        so the whole pipeline asks exactly once."""
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        r = self.write("d.txt", b"hello")                # authority(PW) has a single answer
+        self.assertEqual((self.out / "d.txt").read_bytes(), b"hello")
+        self.assertTrue(r.scan.clean)
+
+    def test_refused_without_a_booted_keyboard_before_any_password(self):
+        self.kb_.shutdown()
+        with self.assertRaises(AdminError):
+            self.write("e.txt", b"x", answers=())        # a prompt here would AssertionError
+        self.assertFalse((self.out / "e.txt").exists())
+
+    def test_wrong_password_writes_nothing(self):
+        with self.assertRaises(AuthorizationDenied):
+            self.write("f.txt", b"x", answers=("no", "no", "no"))
+        self.assertFalse((self.out / "f.txt").exists())
+
+    def test_kos_system_state_symlinks_and_directories_are_refused(self):
+        self.paths.ensure()
+        for target in (self.paths.state / "evil", self.paths.etc / "auth.json"):
+            with self.assertRaises(AdminError):
+                write_file(self.paths, self.authority(PW), self.kb_, str(target), b"x")
+        (self.out / "link").symlink_to(self.out / "real")
+        with self.assertRaises(AdminError):
+            self.write("link", b"x")
+        with self.assertRaises(AdminError):
+            write_file(self.paths, self.authority(PW), self.kb_,
+                       str(self.out / "nodir" / "f"), b"x")
+
+    def test_forged_lease_is_refused_even_with_the_right_password(self):
+        doc = json.loads(self.kb_.file.read_text())
+        doc["keyboards"] = ["/dev/input/event99"]
+        self.kb_.file.write_text(json.dumps(doc))
+        with self.assertRaises(AdminError):
+            self.write("g.txt", b"x")
+        self.assertFalse((self.out / "g.txt").exists())
+
+    def test_cli_write_refuses_with_exit_2_when_keyboard_not_booted(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"KOS_ROOT": d}):
+            code = kcli.main(["write", os.path.join(d, "x.txt"), "--text", "hi"])
+            self.assertEqual(code, 2)
+            self.assertFalse(os.path.exists(os.path.join(d, "x.txt")))
+            self.assertEqual(kcli.main(["admin"]), 0)
+
+
+def AuditLogFor(paths):
+    from kos.auth import AuditLog
+    return AuditLog(paths).entries()

@@ -30,6 +30,8 @@
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
     kos audit                       show the authorization log
+    kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
+    kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
     kos do WORDS...                 one line of human language, run as one command
     kos line [--explain]            the line shell: every line you type is a command
 """
@@ -43,6 +45,7 @@ import sys
 from pathlib import Path
 
 from . import loader
+from .admin import AdminError, WriteBlocked
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
@@ -606,6 +609,53 @@ def cmd_audit(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_admin(args, paths: Paths) -> int:
+    """The elevated administrator keyboard. It is booted by the password you
+    type to unlock (see kos/init.py); `admin boot` boots it again with the
+    password if the lease ran out. `admin lock` drops it - taking privilege
+    away never needs a password."""
+    from .admin import AdminKeyboard
+    kb = AdminKeyboard(paths)
+    action = args.admin_cmd or "status"
+    if action == "status":
+        print(kb.status())
+        return 0
+    if action == "lock":
+        kb.shutdown()
+        print("administrator keyboard locked")
+        return 0
+    authority, prompter = _authority(paths)
+    with authority.authorize("admin.boot") as grant:
+        lease = kb.boot(grant)
+    prompter.close()
+    print(kb.status())
+    if lease.weak:
+        eprint("WARNING: KOS_DEV_ADMIN_WEAK=1 - not on the KOS kernel; keyboard is not exclusive.")
+    return 0
+
+
+def cmd_write(args, paths: Paths) -> int:
+    """Write a file. Needs the booted administrator keyboard, the password
+    typed on it, a clean security scan, and a disk optimize - in that order."""
+    from .admin import (AdminKeyboard, AdminPrompter, open_admin_devices, write_file)
+    kb = AdminKeyboard(paths)
+    if args.text is not None and args.stdin:
+        raise KAppError("give the text with --text or --stdin, not both")
+    if args.text is None and not args.stdin:
+        raise KAppError("nothing to write: write FILE TEXT  (or --stdin)")
+    data = (sys.stdin.buffer.read() if args.stdin else args.text.encode())
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)  # exclusive keyboards, or None on a WEAK lease
+    try:
+        prompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        report = write_file(paths, Authority(paths, prompter), kb, args.path, data)
+    finally:
+        if devices is not None:
+            devices.close()
+    print(report.summary())
+    return 0
+
+
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -710,6 +760,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="report kernel security features")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
+    s = sub.add_parser("admin", help="the elevated administrator keyboard")
+    s.add_argument("admin_cmd", nargs="?", choices=["status", "boot", "lock"])
+    s = sub.add_parser("write", help="write a file (admin keyboard, security scan, disk optimize)")
+    s.add_argument("path")
+    s.add_argument("--text", help="the text to write")
+    s.add_argument("--stdin", action="store_true", help="read the content from standard input")
     s = sub.add_parser("do", help="run one line of human language as one command")
     s.add_argument("words", nargs="+")
     s.add_argument("--explain", action="store_true", help="show how the line was understood")
@@ -725,7 +781,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line}
+            "do": cmd_do, "line": cmd_line, "admin": cmd_admin, "write": cmd_write}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -733,10 +789,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = Paths.from_env()
     try:
         return COMMANDS[args.cmd](args, paths)
-    except (TamperedError, VirusFoundError) as e:
+    except (TamperedError, VirusFoundError, WriteBlocked) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
-    except (AuthorizationDenied, AuthError, PermitError) as e:
+    except (AuthorizationDenied, AuthError, PermitError, AdminError) as e:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:

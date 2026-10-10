@@ -27,6 +27,7 @@ import sys
 import termios
 import time
 
+from .admin import AdminError, AdminKeyboard
 from .auth import AuthError, Authority, AuthorizationDenied, PasswordStore
 from .paths import Paths
 from .prompt import TTYPrompter
@@ -149,10 +150,19 @@ def login_loop(paths: Paths, console: str) -> None:
         from .cli import _new_password
         store.create(_new_password(prompter)).wipe()
     authority = Authority(paths, prompter)
+    keyboard = AdminKeyboard(paths)
     while True:
+        keyboard.shutdown()  # nothing elevated survives a lock (or a crash and restart)
         prompter.info(BANNER)
         try:
-            authority.authorize("session.login").close()
+            # The one password typed here unlocks the session AND boots the
+            # elevated administrator keyboard - no second prompt.
+            with authority.authorize("session.login") as grant:
+                try:
+                    keyboard.boot(grant)
+                    prompter.info("Administrator keyboard booted.")
+                except AdminError as e:
+                    prompter.info(f"Administrator keyboard NOT booted: {e}")
         except AuthorizationDenied:
             prompter.info("Locked.")
             time.sleep(2)
@@ -164,6 +174,7 @@ def login_loop(paths: Paths, console: str) -> None:
         prompter.info("Unlocked. Every line you type is a command - say what you want "
                       "('help' lists them). 'exit' locks.\n")
         start_shell(console)
+        keyboard.shutdown()
         prompter.info("\nSession ended - locked.")
 
 
