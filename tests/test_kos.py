@@ -1835,3 +1835,314 @@ class TestCellsRefuseNpmApps(Env):
         self.assertIn("no Node.js inside a cell", str(ctx.exception))
         a.close()
         b.close()
+
+
+# ---------------------------------------------------------------------------
+# The core OS services: facts (osinfo), control (proctl, fschange), and the apps
+# ---------------------------------------------------------------------------
+import subprocess as _subp  # noqa: E402
+from kos import osinfo  # noqa: E402
+from kos.fschange import FsChangeError, change as fs_change, empty_old_trash  # noqa: E402
+from kos.proctl import ProcessError, renice, signal_process  # noqa: E402
+
+
+class TestServiceRequestsProtocol(unittest.TestCase):
+    def v(self, **m):
+        return validate_app_message({"cmd": "request", **m}, "tui")
+
+    def test_valid_requests(self):
+        for kind in osinfo.KINDS:
+            self.assertEqual(self.v(action="sys", kind=kind)["kind"], kind)
+        self.assertEqual(self.v(action="sys", kind="stat", arg="/etc")["arg"], "/etc")
+        self.assertEqual(self.v(action="signal", pid=1234, sig="TERM")["sig"], "TERM")
+        self.assertEqual(self.v(action="renice", pid=1234, nice=5)["nice"], 5)
+        self.assertEqual(self.v(action="fschange", op="chmod", path="/tmp/x", mode="644")["mode"], "644")
+        self.assertEqual(self.v(action="fschange", op="rename", path="/tmp/a", to="/tmp/b")["to"], "/tmp/b")
+        self.assertEqual(self.v(action="netcheck")["action"], "netcheck")
+
+    def test_hostile_requests_are_rejected(self):
+        for bad in (dict(action="sys", kind="shadow"), dict(action="sys", kind="stat", arg="a\x00"),
+                    dict(action="signal", pid=1, sig="TERM"), dict(action="signal", pid=True, sig="TERM"),
+                    dict(action="signal", pid=99, sig="SEGV"), dict(action="signal", pid="99", sig="TERM"),
+                    dict(action="renice", pid=99, nice=-5), dict(action="renice", pid=99, nice=20),
+                    dict(action="fschange", op="rm", path="/tmp/x"),
+                    dict(action="fschange", op="chmod", path="/tmp/x", mode="4755x"),
+                    dict(action="fschange", op="chmod", path="/tmp/x", mode="rwx"),
+                    dict(action="fschange", op="rename", path="/tmp/x")):
+            with self.assertRaises(ProtocolError, msg=bad):
+                self.v(**bad)
+
+
+class TestOsInfoParsers(unittest.TestCase):
+    """The parsers, against a fake /proc (so they are exact on any machine)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def put(self, rel, text):
+        f = self.proc / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+
+    def test_memory(self):
+        self.put("meminfo", "MemTotal: 1000 kB\nMemFree: 100 kB\nMemAvailable: 600 kB\nCached: 300 kB\n"
+                            "SwapTotal: 200 kB\nSwapFree: 150 kB\nDirty: 4 kB\n")
+        self.put("vmstat", "pgfault 77\npswpout 5\nunrelated 1\noom_kill 2\n")
+        self.put("swaps", "Filename Type Size Used Priority\n/swapfile file 200 50 -2\n")
+        self.put("pressure/memory", "some avg10=1.50 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00\n")
+        self.put("sys/vm/swappiness", "60\n")
+        m = osinfo.memory(str(self.proc))
+        self.assertEqual((m["kb"]["MemTotal"], m["kb"]["MemAvailable"], m["kb"]["SwapFree"]), (1000, 600, 150))
+        self.assertEqual(m["vm"], {"pgfault": 77, "pswpout": 5, "oom_kill": 2})
+        self.assertEqual(m["swaps"], [{"file": "/swapfile", "type": "file", "size_kb": 200, "used_kb": 50}])
+        self.assertEqual(m["pressure"]["memory"]["avg10"], "1.50")
+        self.assertEqual(m["swappiness"], 60)
+
+    def test_processes_even_with_awkward_names(self):
+        self.put("loadavg", "0.50 0.25 0.10 2/100 999\n")
+        self.put("uptime", "1234.5 99.0\n")
+        self.put("42/stat", "42 (my (weird) app) S 1 42 42 0 -1 0 0 0 0 0 150 50 0 0 20 5 3 0 777 "
+                            "1000000 25 0 0\n")
+        self.put("42/status", "Name:\tmy\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t2048 kB\n"
+                              "voluntary_ctxt_switches:\t10\nnonvoluntary_ctxt_switches:\t3\n")
+        self.put("42/cmdline", "/usr/bin/my\x00--flag\x00")
+        p = osinfo.processes(str(self.proc))
+        self.assertEqual(p["load"], [0.5, 0.25, 0.1])
+        r = p["processes"][0]
+        self.assertEqual((r["pid"], r["name"], r["state"], r["ppid"]), (42, "my (weird) app", "S", 1))
+        self.assertEqual((r["cpu_ticks"], r["nice"], r["priority"], r["threads"]), (200, 5, 20, 3))
+        self.assertEqual((r["rss_kb"], r["vol_switches"], r["invol_switches"]), (2048, 10, 3))
+        self.assertEqual(r["cmd"], "/usr/bin/my --flag")
+
+    def test_network_and_connection_decoding(self):
+        self.put("net/dev", "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast"
+                            "|bytes packets errs drop fifo colls carrier compressed\n"
+                            "  eth0: 1000 10 1 2 0 0 0 0 2000 20 3 4 0 0 0 0\n")
+        self.put("net/route", "Iface Destination Gateway Flags\neth0 00000000 0100A8C0 0003\n")
+        self.put("net/tcp", "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+                            "   0: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345 1\n")
+        self.put("net/unix", "Num RefCount Protocol Flags Type St Inode Path\n"
+                             "0000: 00000002 00000000 00010000 0001 01 111 /run/x.sock\n")
+        self.put("net/snmp", "Ip: InReceives OutRequests\nIp: 5 6\nTcp: CurrEstab ActiveOpens\nTcp: 2 3\n")
+        n = osinfo.network(str(self.proc), str(self.proc / "sys"))
+        eth = n["interfaces"][0]
+        self.assertEqual((eth["name"], eth["rx_bytes"], eth["rx_errors"], eth["tx_drop"]), ("eth0", 1000, 1, 4))
+        self.assertEqual(n["gateway"], "192.168.0.1 via eth0")
+        c = n["connections"][0]
+        self.assertEqual((c["local"], c["state"], c["uid"], c["inode"]), ("127.0.0.1:80", "LISTEN", 1000, 12345))
+        self.assertEqual(n["unix"][0]["path"], "/run/x.sock")
+        self.assertEqual(n["protocols"]["Tcp"]["CurrEstab"], 2)
+        self.assertEqual(osinfo._addr("00000000000000000000000001000000:0050"), "::1:80")
+
+    def test_permissions_are_described_exactly(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "prog"
+            f.write_text("x")
+            os.chmod(f, 0o4755)
+            s = osinfo.stat_path(str(f))
+            self.assertEqual((s["mode"], s["octal"], s["setuid"]), ("-rwsr-xr-x", "4755", True))
+            os.chmod(f, 0o640)
+            s = osinfo.stat_path(str(f))
+            self.assertEqual((s["mode"], s["setuid"]), ("-rw-r-----", False))
+            self.assertEqual(osinfo._mode_string(0o41777), "drwxrwxrwt")
+
+    def test_real_system_smoke(self):
+        for kind in ("processes", "memory", "mounts", "devices", "network", "health", "resources", "isolation"):
+            with tempfile.TemporaryDirectory() as d:
+                data = osinfo.KINDS[kind](Paths(Path(d)), "")
+                json.dumps(data)                                   # everything is plain JSON
+        p = osinfo.processes()
+        self.assertTrue(any(r["pid"] == os.getpid() for r in p["processes"]))
+        self.assertGreater(osinfo.memory()["kb"]["MemTotal"], 0)
+
+
+class TestProcessControl(Env):
+    def spawn(self):
+        proc = _subp.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        return proc
+
+    def test_terminate_needs_the_password_and_works(self):
+        proc = self.spawn()
+        with self.assertRaises(AuthorizationDenied):
+            signal_process(self.authority("no", "no", "no"), proc.pid, "TERM")
+        self.assertIsNone(proc.poll())
+        self.assertIn("sent TERM", signal_process(self.authority(PW), proc.pid, "TERM"))
+        self.assertEqual(proc.wait(5), -15)
+
+    def test_pause_and_resume(self):
+        proc = self.spawn()
+        signal_process(self.authority(PW), proc.pid, "STOP")
+        _time.sleep(0.2)
+        self.assertIn("T", osinfo._read(f"/proc/{proc.pid}/stat").rpartition(")")[2].split()[0])
+        signal_process(self.authority(PW), proc.pid, "CONT")
+
+    def test_the_guards_hold(self):
+        auth = lambda: self.authority()                           # no answers: must refuse before asking
+        for pid in (1, os.getpid(), os.getppid(), 4194300):
+            with self.assertRaises(ProcessError, msg=pid):
+                signal_process(auth(), pid, "KILL")
+        with self.assertRaises(ProcessError):
+            signal_process(auth(), self.spawn().pid, "SEGV")
+        with self.assertRaises(ProcessError):
+            renice(auth(), self.spawn().pid, 40)
+
+    def test_renice_raises_the_nice_value(self):
+        proc = self.spawn()
+        renice(self.authority(PW), proc.pid, 7)
+        self.assertEqual(os.getpriority(os.PRIO_PROCESS, proc.pid), 7)
+
+
+class TestFsChange(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        self.kb_ = self.booted()
+        self.work = Path(self.tmp.name) / "w"
+        self.work.mkdir()
+
+    def go(self, op, path, *answers, **kw):
+        return fs_change(self.paths, self.authority(*answers), self.kb_, op, str(path), **kw)
+
+    def test_mkdir_rename_chmod_and_trash(self):
+        self.assertIn("made folder", self.go("mkdir", self.work / "d", PW))
+        (self.work / "f.txt").write_text("x")
+        self.go("rename", self.work / "f.txt", PW, to=str(self.work / "g.txt"))
+        self.assertTrue((self.work / "g.txt").exists() and not (self.work / "f.txt").exists())
+        self.go("chmod", self.work / "g.txt", PW, mode="600")
+        self.assertEqual(oct((self.work / "g.txt").stat().st_mode & 0o777), "0o600")
+        self.go("trash", self.work / "g.txt", PW)
+        self.assertFalse((self.work / "g.txt").exists())
+        trashed = list((self.paths.state / "trash").glob("*-g.txt"))
+        self.assertEqual([t.read_text() for t in trashed], ["x"])           # recoverable, not destroyed
+
+    def test_it_needs_the_password_and_the_admin_keyboard(self):
+        with self.assertRaises(AuthorizationDenied):
+            self.go("mkdir", self.work / "d", "no", "no", "no")
+        self.assertFalse((self.work / "d").exists())
+        self.kb_.shutdown()
+        with self.assertRaises(FsChangeError) as ctx:
+            self.go("mkdir", self.work / "d")                              # refused before any prompt
+        self.assertIn("admin.keyboard", str(ctx.exception))
+
+    def test_the_guards_hold(self):
+        (self.work / "f").write_text("x")
+        (self.work / "g").write_text("y")
+        self.paths.ensure()
+        for op, path, kw in (("trash", self.paths.state, {}), ("chmod", self.paths.etc, {"mode": "777"}),
+                             ("mkdir", self.paths.state / "evil", {}), ("trash", "/", {}),
+                             ("rename", self.work / "f", {"to": str(self.work / "g")}),   # no overwrite
+                             ("chmod", self.work / "f", {"mode": "4755"}),                 # no setuid
+                             ("chmod", self.work / "f", {"mode": "2755"}),
+                             ("chmod", self.work / "f", {"mode": "rwx"}),
+                             ("trash", self.work / "nope", {}), ("mkdir", self.work / "f", {}),
+                             ("format", self.work / "f", {})):
+            with self.assertRaises(FsChangeError, msg=(op, path)):
+                self.go(op, path, **kw)
+        self.assertEqual((self.work / "g").read_text(), "y")
+
+    def test_old_trash_is_forgotten_by_optimize(self):
+        (self.work / "f.txt").write_text("x")
+        self.go("trash", self.work / "f.txt", PW)
+        self.assertEqual(empty_old_trash(self.paths), 0)                   # fresh: kept
+        self.assertEqual(empty_old_trash(self.paths, now=_time.time() + 40 * 86400), 1)
+        self.assertEqual(list((self.paths.state / "trash").iterdir()), [])
+
+
+class TestServiceBridge(Env):
+    def ask(self, req, *answers):
+        sent = []
+        SystemBridge(self.paths).handle({"cmd": "request", **req}, sent.append, self.authority(*answers))
+        return sent[-1]
+
+    def test_sys_returns_every_kind_as_json(self):
+        for kind in osinfo.KINDS:
+            r = self.ask({"action": "sys", "kind": kind, "arg": "/etc"})
+            self.assertEqual((r["cmd"], r["kind"]), ("sys", kind))
+            json.dumps(r)
+
+    def test_signal_through_the_bridge_needs_the_password(self):
+        proc = _subp.Popen(["sleep", "60"])
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        r = self.ask({"action": "signal", "pid": proc.pid, "sig": "TERM"}, "no", "no", "no")
+        self.assertFalse(r["ok"])
+        self.assertIsNone(proc.poll())
+        r = self.ask({"action": "signal", "pid": proc.pid, "sig": "TERM"}, PW)
+        self.assertTrue(r["ok"])
+        self.assertEqual(proc.wait(5), -15)
+        self.assertFalse(self.ask({"action": "signal", "pid": 1, "sig": "KILL"})["ok"])
+
+    def test_the_internet_check_contacts_the_outside_only_after_the_password(self):
+        calls = []
+        with mock.patch("kos.osinfo.net_check", lambda *a, **k: (calls.append(1), (True, "internet reachable (9 ms)"))[1]):
+            r = self.ask({"action": "netcheck"}, "no", "no", "no")
+            self.assertFalse(r["ok"])
+            self.assertEqual(calls, [])
+            r = self.ask({"action": "netcheck"}, PW)
+        self.assertEqual((r["ok"], calls), (True, [1]))
+
+    def test_ticks_flag_is_recorded_from_the_manifest(self):
+        out = Path(self.tmp.name) / "p.kapp"
+        pack(SYSTEM_DIR / "processes", out)
+        self.assertIn("ticks", KApp.from_file(out).manifest.permissions)
+
+
+class TestServiceAppsRunForReal(DesktopSessionEnv):
+    """Each OS-service app, started by `npm run start` inside the sandbox, drawing real data."""
+
+    def go(self, name, keys=(), wait=5.0, needles=()):
+        s = self.start(SYSTEM_DIR / name, name, bridge=SystemBridge(self.paths), ticks=True)
+        self.boot_both()
+        if keys:
+            threading.Timer(3.0, lambda: self.devices.push(*keys)).start()
+        threading.Timer(wait, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        out = self.output()
+        for needle in needles:
+            self.assertIn(needle, out, f"{name}: {needle!r} not on screen")
+        return out
+
+    def test_processes(self):
+        self.go("processes", needles=("Tasks", "PID", "USER", "sorted by cpu"))
+
+    def test_memory(self):
+        self.go("memory", needles=("Physical memory", "RAM", "Swap", "Biggest users"))
+
+    def test_filesystem(self):
+        self.go("filesystem", needles=("Mounts", "TYPE", "nosuid"))
+
+    def test_devices(self):
+        self.go("devices", needles=("Disks", "Input", "Drivers"))
+
+    def test_network(self):
+        self.go("network", needles=("Interfaces", "gateway", "internet:"))
+
+    def test_isolation(self):
+        self.go("isolation", needles=("Apps", "Kernel hardening", "Access"))
+
+    def test_health(self):
+        self.go("health", needles=("Overall", "Hardware", "Connectivity"))
+
+    def test_resources(self):
+        self.go("resources", needles=("CPU", "Memory", "Disk", "KOS apps"))
+
+    def test_filesystem_makes_a_folder_with_the_admin_keyboard_and_a_password(self):
+        work = Path(self.tmp.name) / "w"
+        work.mkdir()
+        kb = AdminKeyboard(self.paths, kernel_report=lambda: dict(GOOD_KERNEL),
+                           probe=lambda: ["/dev/input/event0"], boot_id=lambda: "boot-1")
+        with self.authority(PW).authorize("session.login") as g:
+            kb.boot(g)
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        with mock.patch("kos.system.AdminKeyboard", lambda paths: kb):
+            s = self.start(SYSTEM_DIR / "filesystem", "filesystem", bridge=SystemBridge(self.paths),
+                           authority=auth, ticks=True)
+            self.boot_both()
+            threading.Timer(3.0, lambda: self.devices.push(*_keys("2/" + str(work)), ENTER)).start()
+            threading.Timer(6.0, lambda: self.devices.push(*_keys("m"), *_keys("newdir"), ENTER)).start()
+            self.when_modal("Password to change files", [*_keys(PW), ENTER])
+            threading.Timer(12.0, lambda: self.devices.push({"type": "interrupt"})).start()
+            s.run(first_frame_timeout=1.0)
+        self.assertTrue((work / "newdir").is_dir())
+        self.assertEqual(oct((work / "newdir").stat().st_mode & 0o777), "0o700")

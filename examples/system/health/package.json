@@ -1,0 +1,7 @@
+{
+  "name": "health",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Error handling: hardware health, connectivity, faulty apps, and security events.",
+  "scripts": { "start": "node app.js" }
+}

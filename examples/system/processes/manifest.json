@@ -1,0 +1,9 @@
+{
+  "name": "processes",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["system", "ticks"],
+  "description": "Process manager: every task, its state and scheduling, signals, priority, and IPC channels."
+}

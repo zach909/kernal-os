@@ -1,0 +1,7 @@
+{
+  "name": "devices",
+  "version": "1.0.0",
+  "private": true,
+  "description": "I/O devices: disks and their throughput, input devices, drivers, display, buffers and cache.",
+  "scripts": { "start": "node app.js" }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "resources",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Resource accounting: CPU, memory and storage use, per-app consumption, priorities.",
+  "scripts": { "start": "node app.js" }
+}

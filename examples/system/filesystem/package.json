@@ -1,0 +1,7 @@
+{
+  "name": "filesystem",
+  "version": "1.0.0",
+  "private": true,
+  "description": "File systems and permissions: mounts, capacity, who may read/write/run what, safe changes.",
+  "scripts": { "start": "node app.js" }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "isolation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Protection: how each app is confined, kernel hardening, authentication and access levels.",
+  "scripts": { "start": "node app.js" }
+}

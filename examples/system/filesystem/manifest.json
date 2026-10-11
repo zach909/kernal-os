@@ -1,0 +1,9 @@
+{
+  "name": "filesystem",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["system"],
+  "description": "File systems and permissions: mounts, capacity, who may read/write/run what, safe changes."
+}

@@ -1,0 +1,9 @@
+{
+  "name": "memory",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["system", "ticks"],
+  "description": "Memory manager: RAM, cache, swap, paging, pressure, and who is using it."
+}

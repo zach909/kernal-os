@@ -1,0 +1,9 @@
+{
+  "name": "network",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["system", "ticks"],
+  "description": "Networking: interfaces, protocols, connections, local IPC sockets, and an internet check."
+}

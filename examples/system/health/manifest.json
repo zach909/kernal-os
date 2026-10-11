@@ -1,0 +1,9 @@
+{
+  "name": "health",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["system", "ticks"],
+  "description": "Error handling: hardware health, connectivity, faulty apps, and security events."
+}
