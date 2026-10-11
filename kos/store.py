@@ -20,6 +20,7 @@ import hmac
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from .auth import Authority, Grant
 from .kapp import MAX_ARCHIVE, NAME_RE, KApp, KAppError, Manifest, compute_seal
@@ -62,10 +63,11 @@ class AppStore:
             raise KAppError(f"invalid app name {name!r}")
         return self.paths.apps / f"{name}.kapp", self.paths.apps / f"{name}.seal"
 
-    def install(self, src: Path, authority: Authority) -> Manifest:
-        return self._install(src, authority, update=False)
+    def install(self, src: Path, authority: Authority, origin: Optional[dict] = None) -> Manifest:
+        return self._install(src, authority, update=False, origin=origin)
 
-    def update(self, src: Path, authority: Authority) -> tuple[str, Manifest]:
+    def update(self, src: Path, authority: Authority,
+               origin: Optional[dict] = None) -> tuple[str, Manifest]:
         """Replace an installed app with a newer version of the same app.
 
         Downgrades are refused: an attacker can't hand you an old, vulnerable
@@ -76,7 +78,7 @@ class AppStore:
             raise KAppError(f"{new.name} is not installed (use: kos install)")
         if version_key(new.version) <= version_key(old.version):
             raise KAppError(f"refusing update {old.version} -> {new.version}: not newer")
-        return old.version, self._install(src, authority, update=True)
+        return old.version, self._install(src, authority, update=True, origin=origin)
 
     def update_all(self, src_dir: Path, authority: Authority) -> list[tuple[str, str, object]]:
         """`kos update all --from DIR`: check every .kapp in DIR against
@@ -99,13 +101,15 @@ class AppStore:
                 results.append((m.name, "already-current", old.version))
                 continue
             try:
-                self._install(candidate, authority, update=True)
+                self._install(candidate, authority, update=True,
+                              origin={"source": "folder", "location": str(src_dir)})
                 results.append((m.name, "updated", f"{old.version} -> {m.version}"))
             except VirusFoundError as e:
                 results.append((m.name, "flagged", e.result.summary()))
         return results
 
-    def _install(self, src: Path, authority: Authority, update: bool) -> Manifest:
+    def _install(self, src: Path, authority: Authority, update: bool,
+                 origin: Optional[dict] = None) -> Manifest:
         # Validate first so we never ask for a password for garbage.
         app = KApp.from_file(src)
         m = app.manifest
@@ -129,6 +133,10 @@ class AppStore:
         atomic_write(seal_path, json.dumps({
             "format": 1, "name": m.name, "version": m.version,
             "sha256": app.sha256, "seal": seal}, indent=2).encode())
+        from . import provenance
+        o = origin or {"source": "local file", "location": str(src)}
+        provenance.record(self.paths, m.name, m.version, app.sha256, source=o["source"],
+                          location=o["location"], via="update" if update else "install")
         return m
 
     def remove(self, name: str, authority: Authority) -> None:

@@ -284,6 +284,16 @@ _LEXICON: dict[str, dict[str, str]] = {
         "zh": "备份 備份",
         "ja": "バックアップ",
     },
+    "updates": {
+        "en": "updates upgrades",
+        "es": "actualizaciones",
+        "de": "aktualisierungen",
+    },
+    "provenance": {
+        "en": "provenance origins",
+        "es": "origen origenes",
+        "de": "herkunft",
+    },
     "settle": {
         "en": "settle",
         "es": "salda saldar",

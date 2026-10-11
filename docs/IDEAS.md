@@ -89,7 +89,19 @@ land instead of getting lost in chat.
   without the password"; a single desktop grant covering the two system apps
   is possible if that is too noisy.
 
+- **Publisher signatures for sources.** `kapps.json` is trusted as far as TLS and your choice of
+  source go; signed indexes (a key you pin per source) would let `updates` prove who built a version.
+- **Run npm apps from a sealed in-RAM filesystem** instead of an unpacked tmpfs copy, and give
+  cells a Node.js so they can run them.
+- **Automatic update checks on your schedule**, still ending in a password prompt before anything installs.
+
 ## Shipped
+
+- **npm runtime, eight OS-service apps, provenance + updates.** Every app starts with
+  `npm run start` (unpacked into RAM, read-only, same sandbox); processes, memory, filesystem,
+  devices, network, isolation, health and resources are separate apps over real `/proc` and `/sys`
+  data; the Updates app shows where everything came from and installs newer versions from your
+  sources (hash-checked, scanned, permission-diff held back).
 
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
   command in the user's own language, and code is a command too (run sandboxed,

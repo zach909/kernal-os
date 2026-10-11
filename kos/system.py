@@ -230,6 +230,8 @@ class SystemBridge:
                 result(True, fschange.change(self.paths, authority, AdminKeyboard(self.paths), req["op"],
                                              req["path"], to=req.get("to"), mode=req.get("mode")))
                 return None
+            if action == "updates":
+                return self._updates(req, reply, result, authority)
             if action == "netcheck":
                 authority.authorize("net.check", "1.1.1.1:443").close()
                 ok, detail = osinfo.net_check()
@@ -276,6 +278,28 @@ class SystemBridge:
                 RegistryError, TamperedError, VFSError, AdminError, OSError, FileNotFoundError) as e:
             result(False, str(e))
         return None
+
+    def _updates(self, req, reply, result, authority) -> None:
+        from . import provenance
+        from .sources import Sources
+        src, op = Sources(self.paths), req["op"]
+        if op == "provenance":
+            reply({"cmd": "updates", "op": op, "data": {**provenance.components(self.paths),
+                                                        "sources": src.list(), "last": src.last_report()}})
+        elif op == "check":
+            reply({"cmd": "updates", "op": op, "data": src.check(authority)})
+        elif op == "install":
+            result(True, src.install(authority, req["name"], allow_new_permissions=req.get("permissions", False)))
+        elif op == "install_all":
+            self._text(reply, "updates", "install all", src.install_all(authority))
+        elif op == "core":
+            result(True, src.core_update(authority))
+        elif op == "source_add":
+            src.add(authority, req["name"], req["kind"], req["location"])
+            result(True, f"added source {req['name']}")
+        elif op == "source_remove":
+            src.remove(authority, req["name"])
+            result(True, f"removed source {req['name']}")
 
     @staticmethod
     def _text(reply, action: str, title: str, lines: list[str], **extra) -> None:

@@ -26,7 +26,7 @@ from .registry import RegistryError
 
 SYSTEM_APPS = ("taskbar", "app-library", "files", "editor", "backup", "settings", "security",
                "terminal", "processes", "memory", "filesystem", "devices", "network", "isolation",
-               "health", "resources")
+               "health", "resources", "updates")
 DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library
 
 

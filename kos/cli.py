@@ -31,6 +31,9 @@
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
     kos audit                       show the authorization log
+    kos provenance                  where every app, KOS itself, Python, Node, the kernel came from
+    kos sources [add NAME KIND LOC | remove NAME]   where you get software (folder | https | github)
+    kos updates [check | install NAME|all | core]   find and install newer versions from those sources
     kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
     kos backup [PATH] / kos restore BACKUP MEMBER DEST   back a file/folder up; restore one file
     kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
@@ -642,6 +645,90 @@ def cmd_admin(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_provenance(args, paths: Paths) -> int:
+    import time as _t
+    from . import provenance
+    c = provenance.components(paths)
+    print("Apps")
+    for a in c["apps"]:
+        when = _t.strftime("%Y-%m-%d", _t.localtime(a["updated"])) if a["updated"] else "-"
+        print(f"  {a['name']:<16} {a['version']:<8} {a['source']:<18} {a['location'] or '-'}  ({a['via'] or '?'} {when}, sha256 {a['sha256']})")
+    k = c["core"]
+    print("KOS itself")
+    print(f"  {k['kind']}: {k['origin']}" + (f"  {k['branch']}@{k['commit']}  {k.get('subject', '')}" if k["kind"] == "git" else ""))
+    print(f"  updates: {k['update']}")
+    print("Underneath")
+    for r in c["runtimes"]:
+        print(f"  {r['name']:<18} {r['version']:<22} {r['origin']}  -> updated by: {r['update']}")
+    return 0
+
+
+def cmd_sources(args, paths: Paths) -> int:
+    from .sources import Sources
+    src = Sources(paths)
+    if args.sources_cmd == "add":
+        if len(args.rest) != 3:
+            raise KAppError("usage: kos sources add NAME KIND LOCATION   (KIND: folder | https | github)")
+        authority, prompter = _authority(paths)
+        src.add(authority, *args.rest)
+        prompter.close()
+        print(f"added source {args.rest[0]}")
+        return 0
+    if args.sources_cmd == "remove":
+        if len(args.rest) != 1:
+            raise KAppError("usage: kos sources remove NAME")
+        authority, prompter = _authority(paths)
+        src.remove(authority, args.rest[0])
+        prompter.close()
+        print(f"removed source {args.rest[0]}")
+        return 0
+    rows = src.list()
+    for s in rows:
+        print(f"{s['name']:<16} {s['kind']:<7} {s['location']}")
+    if not rows:
+        print("no sources yet: kos sources add NAME folder|https|github LOCATION")
+    return 0
+
+
+def cmd_updates(args, paths: Paths) -> int:
+    from .sources import Sources
+    src = Sources(paths)
+    authority, prompter = _authority(paths)
+    try:
+        if args.updates_cmd == "install":
+            if not args.name:
+                raise KAppError("usage: kos updates install NAME|all")
+            if args.name == "all":
+                if src.last_report() is None:
+                    src.check(authority, include_core=False)
+                for line in src.install_all(authority):
+                    print(line)
+            else:
+                if src.last_report() is None:
+                    src.check(authority, include_core=False)
+                print(src.install(authority, args.name, allow_new_permissions=args.allow_new_permissions))
+            return 0
+        if args.updates_cmd == "core":
+            print(src.core_update(authority))
+            return 0
+        report = src.check(authority)
+        for u in report["updates"]:
+            held = f"   HOLD: asks for new permissions {u['adds_permissions']}" if u["adds_permissions"] else ""
+            print(f"update  {u['name']:<16} {u['installed']} -> {u['version']}   from {u['source']}{held}")
+        for n in report["new"]:
+            print(f"new     {n['name']:<16} {n['version']}   from {n['source']}")
+        for e in report["errors"]:
+            print(f"error   {e}")
+        c = report["core"]
+        if c:
+            print(f"KOS     {c['kind']}: " + (f"{c['behind']} new commit(s) available" if c.get("behind") else c.get("error") or "up to date"))
+        if not (report["updates"] or report["new"]):
+            print("everything from your sources is up to date")
+        return 0
+    finally:
+        prompter.close()
+
+
 def cmd_owed(args, paths: Paths) -> int:
     from .requires import Ledger
     owed = Ledger(paths).owed()
@@ -867,6 +954,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("backup")
     s.add_argument("member")
     s.add_argument("dest")
+    sub.add_parser("provenance", help="where every app and component came from")
+    s = sub.add_parser("sources", help="where you get software: list | add NAME KIND LOCATION | remove NAME")
+    s.add_argument("sources_cmd", nargs="?", choices=["list", "add", "remove"], default="list")
+    s.add_argument("rest", nargs="*")
+    s = sub.add_parser("updates", help="check your sources for updates and install them")
+    s.add_argument("updates_cmd", nargs="?", choices=["check", "install", "core"], default="check")
+    s.add_argument("name", nargs="?", help="install: an app name, or 'all'")
+    s.add_argument("--allow-new-permissions", action="store_true",
+                   help="install an update that asks for permissions the old version did not have")
     sub.add_parser("owed", help="what earlier writes still owe (a scan, an optimize)")
     sub.add_parser("settle", help="do what is owed: security scan + disk optimize")
     s = sub.add_parser("write", help="write a file (admin keyboard, security scan, disk optimize)")
@@ -891,7 +987,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
+            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "provenance": cmd_provenance, "sources": cmd_sources, "updates": cmd_updates, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 
 

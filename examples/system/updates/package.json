@@ -1,0 +1,7 @@
+{
+  "name": "updates",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Software sources and updates",
+  "scripts": { "start": "node app.js" }
+}

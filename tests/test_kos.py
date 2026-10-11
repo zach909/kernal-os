@@ -2127,6 +2127,17 @@ class TestServiceAppsRunForReal(DesktopSessionEnv):
     def test_resources(self):
         self.go("resources", needles=("CPU", "Memory", "Disk", "KOS apps"))
 
+    def test_updates(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        self.go("updates", needles=("Where things come from", "hello", "local file", "KOS itself", "Underneath", "python"))
+
+    def test_apps_with_the_ticks_permission_get_a_tick_every_second_and_others_do_not(self):
+        s = self.start(EXAMPLE, "hello", "cmd", ticks=True)
+        self.boot_both()
+        threading.Timer(3.2, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=0.3)
+        self.assertGreaterEqual(self.output().count('"cmd":"tick"'), 2)
+
     def test_filesystem_makes_a_folder_with_the_admin_keyboard_and_a_password(self):
         work = Path(self.tmp.name) / "w"
         work.mkdir()
@@ -2146,3 +2157,351 @@ class TestServiceAppsRunForReal(DesktopSessionEnv):
             s.run(first_frame_timeout=1.0)
         self.assertTrue((work / "newdir").is_dir())
         self.assertEqual(oct((work / "newdir").stat().st_mode & 0o777), "0o700")
+
+
+# ---------------------------------------------------------------------------
+# Where everything comes from, and updating it
+# ---------------------------------------------------------------------------
+import functools as _ft  # noqa: E402
+import hashlib as _hl  # noqa: E402
+import http.server as _http  # noqa: E402
+import shutil as _shutil  # noqa: E402
+from kos import provenance  # noqa: E402
+from kos.sources import SourceError, Sources  # noqa: E402
+
+
+def make_kapp(tmp: Path, version: str, *, permissions=(), extra: bytes = b"", name="hello") -> Path:
+    """A real, valid npm app (a copy of hello) at the given version, packed into tmp."""
+    src = Path(tempfile.mkdtemp(dir=tmp))
+    _shutil.copytree(EXAMPLE, src / name)
+    m = json.loads((src / name / "manifest.json").read_text())
+    m.update(version=version, name=name, permissions=list(permissions))
+    (src / name / "manifest.json").write_text(json.dumps(m))
+    pkg = json.loads((src / name / "package.json").read_text())
+    pkg.update(version=version, name=name)
+    (src / name / "package.json").write_text(json.dumps(pkg))
+    if extra:
+        (src / name / "extra.bin").write_bytes(extra)
+    out = tmp / f"{name}-{version}-{len(permissions)}{'x' if extra else ''}.kapp"
+    pack(src / name, out)
+    return out
+
+
+class TestProvenance(Env):
+    def test_an_installed_app_remembers_where_it_came_from(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        a = provenance.apps(self.paths)[0]
+        self.assertEqual((a["name"], a["source"], a["via"], a["known"]), ("hello", "local file", "install", True))
+        self.assertEqual(a["location"], str(self.kapp))
+
+    def test_apps_from_before_the_ledger_say_unknown_and_a_swapped_app_says_changed(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        provenance.ledger_path(self.paths).unlink()
+        self.assertEqual(provenance.apps(self.paths)[0]["source"], "unknown")
+        provenance.record(self.paths, "hello", "1.0", "0" * 64, source="elsewhere", location="x", via="install")
+        self.assertEqual(provenance.apps(self.paths)[0]["source"], "changed since recorded")
+
+    def test_core_and_runtimes_are_reported_from_the_real_machine(self):
+        c = provenance.core()
+        self.assertEqual(c["kind"], "git")
+        self.assertRegex(c["commit"], r"^[0-9a-f]{7,}$")
+        self.assertNotIn("@", c["origin"].split("://", 1)[-1].split("/", 1)[0])      # no embedded credentials
+        names = [r["name"] for r in provenance.runtimes()]
+        for want in ("python", "node.js", "npm", "linux kernel"):
+            self.assertIn(want, names)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(provenance.core(Path(d))["kind"], "image")
+
+
+class TestSourcesAndUpdates(Env):
+    def setUp(self):
+        super().setUp()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))           # hello 1.0
+        self.srv = Path(self.tmp.name) / "srv"
+        self.srv.mkdir()
+        self.src = Sources(self.paths)
+
+    def add_folder(self, name="shelf"):
+        self.src.add(self.authority(PW), name, "folder", str(self.srv))
+
+    def put(self, version, **kw):
+        k = make_kapp(Path(self.tmp.name), version, **kw)
+        _shutil.copy(k, self.srv / k.name)
+        return k
+
+    def installed_version(self):
+        return {a.name: a.version for a in AppStore(self.paths).installed()}["hello"]
+
+    # --- the list of sources ---------------------------------------------------
+    def test_adding_and_removing_a_source_needs_the_password_and_valid_input(self):
+        with self.assertRaises(AuthorizationDenied):
+            self.src.add(self.authority("no", "no", "no"), "shelf", "folder", str(self.srv))
+        self.assertEqual(self.src.list(), [])
+        self.add_folder()
+        self.assertEqual([s["name"] for s in self.src.list()], ["shelf"])
+        for kind, loc in (("folder", "relative/dir"), ("folder", "/nonexistent-dir"), ("github", "not a repo"),
+                          ("github", "a/b/c"), ("https", "http://example.com"), ("https", "https://u:p@example.com/x"),
+                          ("https", "https://example.com/x?token=1"), ("ftp", "x"), ("https", "file:///etc")):
+            with self.assertRaises(SourceError, msg=(kind, loc)):
+                self.src.add(self.authority(PW), "other", kind, loc)
+        with self.assertRaises(SourceError):
+            self.src.add(self.authority(PW), "shelf", "folder", str(self.srv))       # duplicate
+        with self.assertRaises(SourceError):
+            self.src.add(self.authority(PW), "Bad Name", "folder", str(self.srv))
+        self.src.remove(self.authority(PW), "shelf")
+        self.assertEqual(self.src.list(), [])
+
+    # --- checking and installing from a folder ------------------------------------
+    def test_check_needs_the_password_and_finds_only_newer_versions(self):
+        self.add_folder()
+        self.put("1.1")
+        self.put("0.9", extra=b"old")                                              # older: never offered
+        with self.assertRaises(AuthorizationDenied):
+            self.src.check(self.authority("no", "no", "no"), include_core=False)
+        r = self.src.check(self.authority(PW), include_core=False)
+        self.assertEqual([(u["name"], u["installed"], u["version"], u["source"]) for u in r["updates"]],
+                         [("hello", "1.0", "1.1", "shelf")])
+        self.assertEqual(r["new"], [])
+
+    def test_install_updates_records_where_it_came_from_and_clears_the_pending_update(self):
+        self.add_folder()
+        k = self.put("1.1")
+        self.src.check(self.authority(PW), include_core=False)
+        msg = self.src.install(self.authority(PW), "hello")
+        self.assertIn("1.0 -> 1.1", msg)
+        self.assertEqual(self.installed_version(), "1.1")
+        a = provenance.apps(self.paths)[0]
+        self.assertEqual((a["source"], a["via"], a["known"]), ("shelf", "update", True))
+        self.assertEqual(a["location"], str(self.srv / k.name))
+        self.assertEqual(self.src.last_report()["updates"], [])
+        with self.authority(PW).authorize("app.run", "hello") as g:
+            self.assertEqual(AppStore(self.paths).load_verified("hello", g).manifest.version, "1.1")   # sealed + verifies
+
+    def test_install_without_a_check_and_a_wrong_password_do_nothing(self):
+        self.add_folder()
+        self.put("1.1")
+        with self.assertRaises(SourceError):
+            self.src.install(self.authority(PW), "hello")
+        self.src.check(self.authority(PW), include_core=False)
+        with self.assertRaises(AuthorizationDenied):
+            self.src.install(self.authority("no", "no", "no"), "hello")
+        self.assertEqual(self.installed_version(), "1.0")
+
+    def test_a_new_app_is_offered_installed_but_not_permitted(self):
+        self.add_folder()
+        self.put("1.0", name="clock")
+        r = self.src.check(self.authority(PW), include_core=False)
+        self.assertEqual([n["name"] for n in r["new"]], ["clock"])
+        self.assertIn("still needs: permit clock", self.src.install(self.authority(PW), "clock"))
+        self.assertFalse(PermitStore(self.paths).is_permitted("clock"))
+
+    def test_an_update_that_asks_for_new_permissions_is_held_back_until_approved(self):
+        self.add_folder()
+        self.put("1.2", permissions=("network",))
+        r = self.src.check(self.authority(PW), include_core=False)
+        self.assertEqual(r["updates"][0]["adds_permissions"], ["network"])
+        with self.assertRaises(SourceError) as ctx:
+            self.src.install(self.authority(PW), "hello")
+        self.assertIn("NEW permissions (network)", str(ctx.exception))
+        self.assertEqual(self.installed_version(), "1.0")
+        self.assertEqual([l for l in self.src.install_all(self.authority())][0].split(":")[0], "hello")   # skipped, no prompt
+        self.src.install(self.authority(PW), "hello", allow_new_permissions=True)
+        self.assertEqual(self.installed_version(), "1.2")
+
+    def test_a_flagged_update_is_quarantined_and_the_old_version_stays(self):
+        self.add_folder()
+        self.put("1.1", extra=EICAR)
+        self.src.check(self.authority(PW), include_core=False)
+        with self.assertRaises(VirusFoundError):
+            self.src.install(self.authority(), "hello")                             # refused before any password
+        self.assertEqual(self.installed_version(), "1.0")
+        self.assertEqual(len(list((self.paths.state / "quarantine").glob("hello-*.kapp"))), 1)
+
+    # --- an https source (a real local web server) ---------------------------------
+    def serve(self, directory):
+        handler = _ft.partial(_http.SimpleHTTPRequestHandler, directory=str(directory))
+        handler.log_message = lambda *a, **k: None
+        httpd = _http.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (httpd.shutdown(), httpd.server_close()))
+        return f"http://127.0.0.1:{httpd.server_port}"
+
+    def index(self, *entries):
+        (self.srv / "kapps.json").write_text(json.dumps({"apps": list(entries)}))
+
+    def entry(self, k: Path, **over):
+        return {"name": "hello", "version": "1.1", "file": k.name, "sha256": _hl.sha256(k.read_bytes()).hexdigest(), **over}
+
+    def test_a_website_source_downloads_and_verifies_the_hash(self):
+        k = self.put("1.1")
+        self.index(self.entry(k))
+        base = self.serve(self.srv)
+        web = Sources(self.paths, allow_http=True)
+        web.add(self.authority(PW), "site", "https", base)
+        r = web.check(self.authority(PW), include_core=False)
+        self.assertEqual(r["updates"][0]["ref"], f"{base}/{k.name}")
+        web.install(self.authority(PW), "hello")
+        self.assertEqual(self.installed_version(), "1.1")
+        self.assertEqual(provenance.apps(self.paths)[0]["source"], "site")
+
+    def test_a_download_that_does_not_match_its_advertised_hash_is_refused(self):
+        k = self.put("1.1")
+        self.index(self.entry(k, sha256="0" * 64))
+        base = self.serve(self.srv)
+        web = Sources(self.paths, allow_http=True)
+        web.add(self.authority(PW), "site", "https", base)
+        web.check(self.authority(PW), include_core=False)
+        with self.assertRaises(SourceError) as ctx:
+            web.install(self.authority(), "hello")
+        self.assertIn("does not match the hash", str(ctx.exception))
+        self.assertEqual(self.installed_version(), "1.0")
+
+    def test_the_index_cannot_name_a_different_app_or_escape_its_folder(self):
+        k = self.put("1.1")
+        self.index(self.entry(k, file="../../etc/passwd"), self.entry(k, name="../evil"),
+                   self.entry(k, version="x" * 90), {"name": "hello"}, "junk",
+                   self.entry(k, name="other"))                                      # right file, wrong name
+        base = self.serve(self.srv)
+        web = Sources(self.paths, allow_http=True)
+        web.add(self.authority(PW), "site", "https", base)
+        r = web.check(self.authority(PW), include_core=False)
+        self.assertEqual([n["name"] for n in r["new"]], ["other"])                   # only the well-formed one survives
+        with self.assertRaises(SourceError) as ctx:
+            web.install(self.authority(PW), "other")                                 # but the file is hello 1.1
+        self.assertIn("not what the index said", str(ctx.exception))
+
+    def test_plain_http_to_the_outside_world_is_never_fetched(self):
+        """Refused by POLICY (checked before any connection is attempted), not merely unreachable."""
+        from kos.sources import fetch
+        calls = []
+        with mock.patch("urllib.request.OpenerDirector.open", lambda *a, **k: calls.append(1)):
+            for url in ("http://example.com/kapps.json", "file:///etc/passwd", "ftp://example.com/x",
+                        "http://127.0.0.1.evil.com/x"):
+                with self.assertRaises(SourceError, msg=url) as ctx:
+                    fetch(url, 1000)
+                self.assertIn("only https", str(ctx.exception), url)
+            with self.assertRaises(SourceError) as ctx:
+                fetch("https://user:pw@example.com/x", 1000)
+            self.assertIn("must not contain a password", str(ctx.exception))
+            with self.assertRaises(SourceError):
+                fetch("http://127.0.0.1:1/x", 1000)                    # loopback http only when allow_http
+        self.assertEqual(calls, [])                                   # no connection was even attempted
+
+    def test_an_unreachable_source_is_an_error_line_not_a_crash(self):
+        web = Sources(self.paths, allow_http=True)
+        web.add(self.authority(PW), "dead", "https", "http://127.0.0.1:9")
+        self.add_folder()
+        self.put("1.1")
+        r = web.check(self.authority(PW), include_core=False)
+        self.assertTrue(r["errors"] and r["errors"][0].startswith("dead:"))
+        self.assertEqual(r["updates"][0]["version"], "1.1")                          # the folder source still worked
+
+
+class TestUpdatingKosItself(Env):
+    def git(self, cwd, *args):
+        return _sp.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", *args],
+                       cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+    def setUp(self):
+        super().setUp()
+        base = Path(self.tmp.name)
+        self.origin, self.clone, self.pusher = base / "origin.git", base / "clone", base / "pusher"
+        _sp.run(["git", "init", "-q", "--bare", "-b", "main", str(self.origin)], check=True)
+        _sp.run(["git", "clone", "-q", str(self.origin), str(self.clone)], check=True, capture_output=True)
+        (self.clone / "kos.txt").write_text("v1")
+        self.git(self.clone, "add", "."); self.git(self.clone, "commit", "-q", "-m", "first")
+        self.git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.git(self.clone, "branch", "-q", "--set-upstream-to=origin/main")
+        _sp.run(["git", "clone", "-q", str(self.origin), str(self.pusher)], check=True, capture_output=True)
+        self.src = Sources(self.paths, core_root=self.clone)
+
+    def publish(self, text, msg):
+        (self.pusher / "kos.txt").write_text(text)
+        self.git(self.pusher, "add", "."); self.git(self.pusher, "commit", "-q", "-m", msg)
+        self.git(self.pusher, "push", "-q", "origin", "HEAD:main")
+
+    def test_it_sees_new_commits_and_fast_forwards_with_the_password(self):
+        self.assertEqual(self.src.core_status()["behind"], 0)
+        self.publish("v2", "second change")
+        self.publish("v3", "third change")
+        st = self.src.core_status()
+        self.assertEqual((st["behind"], st["subjects"]), (2, ["third change", "second change"]))
+        with self.assertRaises(AuthorizationDenied):
+            self.src.core_update(self.authority("no", "no", "no"))
+        self.assertEqual((self.clone / "kos.txt").read_text(), "v1")
+        self.assertIn("restart KOS", self.src.core_update(self.authority(PW)))
+        self.assertEqual((self.clone / "kos.txt").read_text(), "v3")
+        self.assertEqual(self.src.core_update(self.authority()), "KOS is up to date")
+
+    def test_it_never_touches_a_modified_checkout_or_a_diverged_branch(self):
+        self.publish("v2", "second")
+        (self.clone / "kos.txt").write_text("local edit")
+        with self.assertRaises(SourceError) as ctx:
+            self.src.core_update(self.authority())
+        self.assertIn("uncommitted", str(ctx.exception))
+        self.assertEqual((self.clone / "kos.txt").read_text(), "local edit")
+        self.git(self.clone, "commit", "-q", "-am", "my own commit")                 # now it has diverged
+        with self.assertRaises(SourceError) as ctx:
+            self.src.core_update(self.authority(PW))
+        self.assertIn("cannot fast-forward", str(ctx.exception))
+
+    def test_a_system_image_is_updated_by_a_new_image(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SourceError) as ctx:
+                Sources(self.paths, core_root=Path(d)).core_update(self.authority())
+            self.assertIn("new image", str(ctx.exception))
+
+
+class TestUpdatesThroughTheBridge(Env):
+    def setUp(self):
+        super().setUp()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        self.srv = Path(self.tmp.name) / "srv"
+        self.srv.mkdir()
+
+    def ask(self, req, *answers):
+        sent = []
+        with mock.patch.object(Sources, "core_status", lambda self: {"kind": "image", "behind": 0, "subjects": []}):
+            SystemBridge(self.paths).handle({"cmd": "request", "action": "updates", **req}, sent.append,
+                                            self.authority(*answers))
+        return sent[-1]
+
+    def test_the_whole_flow(self):
+        r = self.ask({"op": "provenance"})
+        self.assertEqual((r["cmd"], r["data"]["apps"][0]["name"], r["data"]["sources"]), ("updates", "hello", []))
+        self.assertTrue(self.ask({"op": "source_add", "name": "shelf", "kind": "folder", "location": str(self.srv)}, PW)["ok"])
+        k = make_kapp(Path(self.tmp.name), "1.1")
+        _shutil.copy(k, self.srv / k.name)
+        self.assertFalse(self.ask({"op": "check"}, "no", "no", "no")["ok"])
+        report = self.ask({"op": "check"}, PW)["data"]
+        self.assertEqual(report["updates"][0]["version"], "1.1")
+        self.assertIn("hello", self.ask({"op": "provenance"})["data"]["last"]["updates"][0]["name"])
+        self.assertTrue(self.ask({"op": "install", "name": "hello"}, PW)["ok"])
+        self.assertEqual({a.name: a.version for a in AppStore(self.paths).installed()}["hello"], "1.1")
+        self.assertTrue(self.ask({"op": "source_remove", "name": "shelf"}, PW)["ok"])
+
+
+class TestNoTicksWithoutThePermission(DesktopSessionEnv):
+    def test_a_session_without_ticks_never_sends_one(self):
+        s = self.start(EXAMPLE, "hello", "cmd")
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=0.3)
+        self.assertNotIn('"cmd":"tick"', self.output())
+
+
+class TestUpdatesProtocol(unittest.TestCase):
+    def v(self, **m):
+        return validate_app_message({"cmd": "request", "action": "updates", **m}, "tui")
+
+    def test_valid_and_hostile(self):
+        self.assertEqual(self.v(op="check")["op"], "check")
+        self.assertTrue(self.v(op="install", name="hello", permissions=True)["permissions"])
+        self.assertFalse(self.v(op="install", name="hello", permissions="yes")["permissions"])
+        self.assertEqual(self.v(op="source_add", name="shelf", kind="github", location="me/repo")["kind"], "github")
+        for bad in (dict(op="rm"), dict(op="install"), dict(op="install", name="../x"),
+                    dict(op="source_add", name="s", kind="ftp", location="x"),
+                    dict(op="source_add", name="s", kind="folder", location=""),
+                    dict(op="source_add", name="s", kind="folder", location="x" * 400)):
+            with self.assertRaises(ProtocolError, msg=bad):
+                self.v(**bad)

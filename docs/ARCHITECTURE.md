@@ -90,6 +90,39 @@ the password), then commits the zip to a local mirror and pushes it using the
 user's own git credentials. Gap: not encrypted; the probe cannot distinguish a
 private repo from a missing one.
 
+## npm runtime (`kos/loader.py`)
+`runtime: "npm"`: `loader._plan_npm` unpacks the verified archive into
+`/dev/shm/kos-<uid>/<app>-<rand>/app` (files 0444/0555) next to a writable
+`scratch` (HOME, TMPDIR, npm cache/logs); the sandbox gets scratch as its only
+writable directory and `app` + the Node prefix as read-only. Command:
+`node <prefix>/lib/node_modules/npm/bin/npm-cli.js run <entry>` (or `npx-cli.js
+--no-install TOOL`) with `npm_config_offline`, no update notifier/audit/fund, distinct
+empty user/global npmrc files (npm refuses to load one file twice), `OPENSSL_CONF=/dev/null`
+(node reads `/etc/ssl/openssl.cnf` at start; the sandbox says no) and a 64 GiB address-space
+limit (V8 reserves address space it never touches). **npm closes inherited fds above 2**, so
+the command channel of an npm app is its **stdin** (`KOS_CHANNEL_FD=0`). Gap: the code is
+unpacked (RAM only) rather than run from a sealed memfd; npm startup costs ~0.25 s.
+
+## OS facts and control (`kos/osinfo.py`, `kos/proctl.py`, `kos/fschange.py`)
+Eight read-only readers over `/proc` and `/sys` (`sys` request; roots are parameters so
+parsers are tested against fixtures). Acting needs the password: `process.signal` /
+`process.renice` (same-uid only, never PID 1 / KOS / its ancestors, four signals, nice can only
+rise), `file.change` (also `requires` the admin keyboard; never KOS state; delete = recoverable
+trash that `optimize` empties after 30 days; chmod refuses setuid/setgid), `net.check` (the
+only thing that touches the outside). `ticks` is a manifest permission recorded on the instance;
+`Session` then sends `{"cmd":"tick"}` once a second.
+
+## Provenance and updates (`kos/provenance.py`, `kos/sources.py`)
+`provenance.json` is written by `AppStore._install` for every install/update (source, location,
+sha256, via, history); an entry whose sha256 no longer matches the installed app reads "changed
+since recorded". `Sources.check` (password) fetches each source's index (https only, bounded,
+no credentials in URLs, redirects may not downgrade), picks the highest version per app and caches
+the report; `install` re-downloads, **verifies the advertised sha256**, checks the file's manifest
+is the app/version the index promised, holds back added permissions, then `AppStore.update`
+(scan/quarantine, no downgrade, seal). `core_update` is `git fetch` + `merge --ff-only @{u}` and
+refuses a dirty or diverged checkout. Gap: an https source is trusted for its index as much as
+TLS and your choice of source allow - there is no publisher signature yet.
+
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short
 list of hand-written regex rules (reverse shells, obfuscated

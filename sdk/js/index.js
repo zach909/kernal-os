@@ -86,6 +86,7 @@ class App {
   requestSignal(pid, sig) { this.send({ cmd: 'request', action: 'signal', pid, sig }); }
   requestRenice(pid, nice) { this.send({ cmd: 'request', action: 'renice', pid, nice }); }
   requestFsChange(op, p, extra = {}) { this.send({ cmd: 'request', action: 'fschange', op, path: p, ...extra }); }
+  requestUpdates(op, extra = {}) { this.send({ cmd: 'request', action: 'updates', op, ...extra }); }
   requestNetCheck() { this.send({ cmd: 'request', action: 'netcheck' }); }
 
   cacheDir() { return process.env.KOS_CACHE_DIR || null; }

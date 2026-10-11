@@ -157,6 +157,9 @@ class App:
     def request_netcheck(self) -> None:
         self.send({"cmd": "request", "action": "netcheck"})
 
+    def request_updates(self, op: str, **extra) -> None:
+        self.send({"cmd": "request", "action": "updates", "op": op, **extra})
+
     def request_remote(self, url: str) -> None:
         self.send({"cmd": "request", "action": "remote", "url": url})
 

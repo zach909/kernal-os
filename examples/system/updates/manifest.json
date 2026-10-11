@@ -1,0 +1,9 @@
+{
+  "name": "updates",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["system"],
+  "description": "Software sources and updates: where every app and component came from, and installing newer versions."
+}

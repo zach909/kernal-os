@@ -23,6 +23,7 @@ OS -> app
     {"cmd": "listing", "path": str, "entries": [{name, kind: dir|zip|file}]}
     {"cmd": "text", "action": str, "title": str, "lines": [str], "lossy": bool?}
     {"cmd": "sys", "kind": str, "data": object}
+    {"cmd": "updates", "op": str, "data": object}
     {"cmd": "tick", "t": epoch}                                (apps with the 'ticks' permission, 1/s)
     {"cmd": "backups", "backups": [{name, path, size, t, files}], "remote": str}
     {"cmd": "quit"}
@@ -54,6 +55,9 @@ app -> OS
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
     {"cmd": "request", "action": "fschange", "op": "mkdir"|"trash"|"rename"|"chmod", "path": P, ...}   (admin keyboard + password)
     {"cmd": "request", "action": "netcheck"}                   test the internet (password)
+    {"cmd": "request", "action": "updates", "op": OP, ...}     where software comes from + updates:
+        op = provenance (read-only) | check (password; network) | install NAME [permissions] (password)
+           | install_all | core (password) | source_add NAME KIND LOCATION | source_remove NAME (password)
     {"cmd": "request", "action": "remote", "url": URL}         set that GitHub repository (password; github.com only)
     {"cmd": "request", "action": "restore", "backup": ZIP, "member": PATH, "to": PATH}   guarded write
     {"cmd": "exit", "code": int}
@@ -173,6 +177,26 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "renice", "pid": pid, "nice": _int(msg.get("nice"), 0, 19)}
     if action == "netcheck":
         return {"cmd": "request", "action": "netcheck"}
+    if action == "updates":
+        op = msg.get("op")
+        if op not in ("provenance", "check", "install", "install_all", "core", "source_add", "source_remove"):
+            raise ProtocolError("unknown updates op")
+        out = {"cmd": "request", "action": "updates", "op": op}
+        if op in ("install", "source_add", "source_remove"):
+            name = msg.get("name")
+            if not isinstance(name, str) or not _APP_NAME_RE.match(name):
+                raise ProtocolError("updates.name must be a name")
+            out["name"] = name
+        if op == "install":
+            out["permissions"] = msg.get("permissions") is True
+        if op == "source_add":
+            kind, loc = msg.get("kind"), msg.get("location")
+            if kind not in ("folder", "https", "github"):
+                raise ProtocolError("updates.kind must be folder, https or github")
+            if not isinstance(loc, str) or not loc or len(loc) > 300 or "\x00" in loc:
+                raise ProtocolError("updates.location must be a short string")
+            out.update(kind=kind, location=loc)
+        return out
     if action == "fschange":
         op = msg.get("op")
         if op not in ("mkdir", "trash", "rename", "chmod"):

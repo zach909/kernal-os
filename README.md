@@ -185,6 +185,19 @@ keyboard capture needs real evdev hardware and has **not been run on hardware
 here**; over a plain terminal set `KOS_DEV_ADMIN_WEAK=1` (the lease is then
 marked WEAK and the keyboard is not exclusive).
 
+## Apps run through npm
+
+Every app is started the same way: **`npm run start`** (or `npx --no-install TOOL`).
+A `.kapp` with `"runtime": "npm"` ships a `package.json`; the manifest's `entry` is
+the script name (default `start`). The zip is verified against its seal exactly as
+before, then **unpacked into RAM only** (`/dev/shm`, never the disk), read-only to the
+app with a separate scratch folder, and run inside the same sandbox (unprivileged
+user, no network unless allowed, Landlock) - offline, nothing is ever installed at
+run time. All of it is wiped when the app ends. Apps can be written in JavaScript
+(`sdk/js`: `const { App, Canvas } = require(process.env.KOS_SDK_JS)`) or anything
+npm can launch - the Python apps in `examples/` start through npm too. Limits:
+npm needs Node.js on the machine; **cells (VMs) run Python/native apps only**.
+
 ## The built-in apps
 
 Everything on the desktop is an app: sandboxed, no screen/file/network access of
@@ -200,8 +213,35 @@ anything that changes something, your password in the OS's own prompt).
 | `editor` | **File editor**: opens a file (password), edit, Ctrl-S saves through the *guarded write* (admin keyboard, password, then a scan + optimize are owed). A file that would not round-trip exactly (tabs, CRLF, very long lines, binary, too big) opens **read-only**. |
 | `backup` | **Backups of your documents**: back up a file/folder into a zip that only KOS writes and scans; browse a backup without extracting; restore one file (guarded write); push to *your own* private GitHub. |
 | `settings` | Kernel protections; which apps are permitted to run (Enter toggles, password). |
+| `updates` | **Where everything comes from** (every app's source, KOS's git origin and commit, Python/Node/npm/kernel and who updates them) and **installing newer versions** from sources you add - see below. |
+| `processes` | Process manager: every task, state, scheduling (nice, priority, context switches), pause/continue/terminate, lower priority, and the IPC channels. |
+| `memory` | Memory manager: RAM, cache, swap, paging, pressure, available-over-time history, biggest users. |
+| `filesystem` | File systems & permissions: mounts and capacity, who may read/write/run what (explained), make folder / trash / rename / chmod. |
+| `devices` | I/O: disks and throughput, input devices, drivers, display, buffers and cache. |
+| `network` | Interfaces and rates, protocol counters, connections, local IPC sockets, internet check. |
+| `isolation` | Protection: how each app is confined, kernel hardening verdicts, authentication and access levels. |
+| `health` | Error handling: sensors, link/disk errors, apps that crashed, security events; stop a faulty app. |
+| `resources` | Accounting: CPU/memory/disk, per-app consumption, priority tuning. |
 | `security` | Administrator keyboard status, what is owed, scans, recent decisions; settle / optimize. |
 | `terminal` | The line shell as an app: plain language *and* code lines (sandboxed). |
+
+### Sources and updates
+
+`kos provenance` / the Updates app list, for every app: the source, exact location,
+version, hash and date it was installed or updated from; for KOS itself its git remote
+and commit; and the Python, Node.js, npm, kernel and OS underneath with who updates each.
+
+A **source** is a place you chose: a `folder` of `.kapp` files, an `https` site serving
+`kapps.json` (`{"apps":[{"name","version","file","sha256"}]}`) beside them, or a `github`
+OWNER/REPO whose latest release has the same. `kos sources add NAME KIND LOCATION`,
+`kos updates check`, `kos updates install NAME|all`, `kos updates core`. Nothing is
+automatic: *checking* contacts your sources (password); *installing* needs the download
+to match the advertised sha256, then runs the normal `kos update` path (scanned -
+a flagged file is quarantined - no downgrades, sealed with your password), and an update
+that asks for **more permissions than the version you have is held back** until you
+approve it. KOS itself, when it runs from a git checkout, is fast-forwarded from its own
+remote (refused if modified or diverged); Python, Node and the kernel are reported but left
+to your operating system. Plain `http` is refused (loopback only in tests).
 
 ### Backups and your own GitHub
 
