@@ -44,6 +44,10 @@ def main():
             app.request_backups()
         elif cmd == "apps":
             st["open"] = ev["open"]
+        elif cmd == "launch":
+            kind = {"new": "backup", "remote": "remote"}.get(ev.get("command"))
+            if kind:
+                st["typing"] = {"kind": kind, "buf": ""}
         elif cmd == "backups":
             st["backups"] = ev["backups"]
             st["remote"] = ev.get("remote", "")

@@ -1,0 +1,7 @@
+{
+  "name": "widget-network",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Network widget: link state, address, speeds, and an internet check.",
+  "scripts": { "start": "node app.js" }
+}

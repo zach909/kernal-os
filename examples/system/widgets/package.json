@@ -1,0 +1,7 @@
+{
+  "name": "widgets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The widget handler: show, hide and reorder the desktop widgets.",
+  "scripts": { "start": "node app.js" }
+}

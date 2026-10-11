@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# kos-desktop - apply, preview, reload, revert the KOS native desktop (macOS-style layout, Windows Blue accent).
+#
+#   kos-desktop status               what is installed and running
+#   kos-desktop preview [SECONDS]    try it for a while (default 30) WITHOUT changing any of your files
+#   kos-desktop apply [--autostart]  back up your current files, then install the configs
+#   kos-desktop reload               restart the panel, dock and compositor with the installed configs
+#   kos-desktop revert               put your backed-up files back and remove what apply added
+#   kos-desktop start                what the autostart entry runs
+#
+# Everything is per-user (nothing under /etc, no root). Your originals are kept in ~/.local/state/kos-desktop/original/.
+# Needs an X11 session: polybar, picom and plank are X11 programs. Set KOS_DRY_RUN=1 to only print.
+set -euo pipefail
+
+KIT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/kos-desktop"
+DRY="${KOS_DRY_RUN:-0}"
+
+# source (inside the kit's config/) -> destination
+FILES=(
+  "polybar/config.ini|$CFG/polybar/config.ini"
+  "picom/picom.conf|$CFG/picom/picom.conf"
+  "rofi/kos.rasi|$CFG/rofi/kos.rasi"
+  "gtk-3.0/settings.ini|$CFG/gtk-3.0/settings.ini"
+  "gtk-3.0/gtk.css|$CFG/gtk-3.0/gtk.css"
+  "gtk-4.0/gtk.css|$CFG/gtk-4.0/gtk.css"
+  "fontconfig/60-kos.conf|$CFG/fontconfig/conf.d/60-kos.conf"
+  "plank/themes/KOS/dock.theme|$DATA/plank/themes/KOS/dock.theme"
+)
+AUTOSTART="$CFG/autostart/kos-desktop.desktop"
+PLANK_PATH="/net/launchpad/plank/docks/dock1/"
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'kos-desktop: %s\n' "$*" >&2; }
+die() { warn "$*"; exit 1; }
+run() { if [ "$DRY" = 1 ]; then say "  would run: $*"; else "$@"; fi; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+need_x11() {
+  [ "${XDG_SESSION_TYPE:-x11}" != "wayland" ] || [ -n "${KOS_FORCE:-}" ] ||
+    die "this is a Wayland session; polybar/picom/plank need X11. Log in to an X11 session (or set KOS_FORCE=1 to try anyway)."
+  [ -n "${DISPLAY:-}" ] || [ "$DRY" = 1 ] || die "no DISPLAY: run this from inside your desktop session"
+}
+
+# Is something other than picom already compositing? Two compositors fight, so we leave it alone.
+other_compositor() {
+  local p
+  for p in compton xcompmgr; do pgrep -x "$p" >/dev/null 2>&1 && { echo "$p"; return 0; }; done
+  return 1
+}
+
+# ----------------------------------------------------------------------------- status
+cmd_status() {
+  say "KOS native desktop kit: $KIT"
+  say "session: ${XDG_SESSION_TYPE:-unknown}  display: ${DISPLAY:-none}"
+  local t
+  for t in polybar picom plank rofi feh dconf; do
+    if have "$t"; then say "  tool    $t: installed"; else say "  tool    $t: MISSING"; fi
+  done
+  fc-list 2>/dev/null | grep -qi 'Inter' && say "  font    Inter: installed" || say "  font    Inter: MISSING"
+  local pair dst
+  for pair in "${FILES[@]}"; do
+    dst="${pair#*|}"
+    if cmp -s "$KIT/config/${pair%%|*}" "$dst" 2>/dev/null; then say "  config  $dst: applied"
+    elif [ -e "$dst" ]; then say "  config  $dst: present, differs from the kit"
+    else say "  config  $dst: absent"; fi
+  done
+  [ -e "$AUTOSTART" ] && say "  autostart: on" || say "  autostart: off"
+  for t in polybar picom plank; do pgrep -x "$t" >/dev/null 2>&1 && say "  running $t" || true; done
+  [ -f "$BASE/manifest" ] && say "  baseline of your originals: $BASE" || true
+}
+
+# ------------------------------------------------------------------------------ apply
+# The first time apply sees a destination it records what was there (the file, or "nothing") in a
+# baseline that later runs never overwrite - so applying twice still reverts to YOUR original.
+BASE="$STATE/original"
+
+remember() {  # remember DEST: put DEST's current state in the baseline, once
+  local dst="$1"
+  [ -f "$BASE/manifest" ] && grep -qF "	$dst" "$BASE/manifest" && return 0
+  if [ -e "$dst" ]; then
+    run mkdir -p "$BASE/files$(dirname "$dst")"
+    run cp -a "$dst" "$BASE/files$dst"
+    [ "$DRY" = 1 ] || printf 'had\t%s\n' "$dst" >> "$BASE/manifest"
+  else
+    [ "$DRY" = 1 ] || printf 'new\t%s\n' "$dst" >> "$BASE/manifest"
+  fi
+}
+
+cmd_apply() {
+  local autostart=0 a pair src dst
+  for a in "$@"; do [ "$a" = "--autostart" ] && autostart=1; done
+  need_x11
+  say "Recording your current files in $BASE (first time only)"
+  run mkdir -p "$BASE"
+  [ "$DRY" = 1 ] || touch "$BASE/manifest"
+  for pair in "${FILES[@]}"; do remember "${pair#*|}"; done
+  [ "$autostart" = 0 ] || remember "$AUTOSTART"
+  if have dconf && [ ! -e "$BASE/plank.done" ]; then
+    if [ "$DRY" = 1 ]; then say "  would run: dconf dump $PLANK_PATH > baseline"
+    else dconf dump "$PLANK_PATH" > "$BASE/plank.dconf" 2>/dev/null || true; : > "$BASE/plank.done"; fi
+  fi
+  say "Installing configs"
+  for pair in "${FILES[@]}"; do
+    src="$KIT/config/${pair%%|*}"; dst="${pair#*|}"
+    run mkdir -p "$(dirname "$dst")"
+    run install -m 0644 "$src" "$dst"
+  done
+  if have dconf; then
+    if [ "$DRY" = 1 ]; then say "  would run: dconf load $PLANK_PATH < plank/dock.dconf"
+    else dconf load "$PLANK_PATH" < "$KIT/config/plank/dock.dconf" || warn "could not load the Plank settings (is dconf running?)"; fi
+  else
+    warn "dconf not found: Plank keeps its default settings (theme: choose KOS in 'plank --preferences')"
+  fi
+  run fc-cache -f
+  if [ "$autostart" = 1 ]; then
+    run mkdir -p "$(dirname "$AUTOSTART")"
+    if [ "$DRY" = 1 ]; then say "  would write $AUTOSTART"; else
+      cat > "$AUTOSTART" <<DESK
+[Desktop Entry]
+Type=Application
+Name=KOS desktop
+Exec=$KIT/bin/kos-desktop start
+X-GNOME-Autostart-enabled=true
+DESK
+    fi
+  fi
+  say "Applied. Your originals are kept in $BASE.   Undo: kos-desktop revert"
+  say "Now run: kos-desktop reload"
+}
+
+# ----------------------------------------------------------------------------- revert
+cmd_revert() {
+  local kind path
+  [ -f "$BASE/manifest" ] || die "nothing recorded in $BASE: nothing to revert"
+  say "Reverting to what was there before apply (from $BASE)"
+  while IFS=$'\t' read -r kind path; do
+    [ -n "$path" ] || continue
+    case "$kind" in
+      had) run mkdir -p "$(dirname "$path")"; run cp -a "$BASE/files$path" "$path" ;;
+      new) run rm -f "$path" ;;
+    esac
+  done < "$BASE/manifest"
+  if have dconf && [ -e "$BASE/plank.done" ]; then
+    if [ -s "$BASE/plank.dconf" ]; then
+      if [ "$DRY" = 1 ]; then say "  would run: dconf load $PLANK_PATH < baseline"; else dconf load "$PLANK_PATH" < "$BASE/plank.dconf"; fi
+    else
+      run dconf reset -f "$PLANK_PATH"
+    fi
+  fi
+  run fc-cache -f
+  stop_ours
+  [ "$DRY" = 1 ] || rm -rf "$BASE"
+  say "Reverted. (Log out and in, or restart your usual panel/dock, to get your old layout back.)"
+}
+
+# ---------------------------------------------------------------------------- start / stop
+stop_ours() {
+  # only things this kit starts; never your window manager
+  local t
+  for t in polybar plank; do pgrep -x "$t" >/dev/null 2>&1 && run pkill -x "$t" || true; done
+  pgrep -x picom >/dev/null 2>&1 && run pkill -x picom || true
+}
+
+start_components() {
+  # $1 = config root to use (installed: $CFG; preview: the kit)
+  local root="$1" other
+  if other="$(other_compositor)"; then
+    warn "$other is already compositing; not starting picom (blur/rounded corners come from it)"
+  elif have picom; then
+    pgrep -x picom >/dev/null 2>&1 || { [ "$DRY" = 1 ] && say "  would start picom" || picom --config "$root/picom/picom.conf" -b; }
+  else warn "picom not installed: no blur or rounded corners"; fi
+  if have polybar; then
+    pgrep -x polybar >/dev/null 2>&1 && run polybar-msg cmd restart || {
+      [ "$DRY" = 1 ] && say "  would start polybar" || { polybar -c "$root/polybar/config.ini" kos >/dev/null 2>&1 & }; }
+  else warn "polybar not installed: no top panel"; fi
+  if have plank; then
+    pgrep -x plank >/dev/null 2>&1 || { [ "$DRY" = 1 ] && say "  would start plank" || { plank >/dev/null 2>&1 & }; }
+  else warn "plank not installed: no dock"; fi
+}
+
+cmd_start() { need_x11; start_components "$CFG"; }
+
+cmd_reload() {
+  need_x11
+  if pgrep -x picom >/dev/null 2>&1; then run pkill -USR1 -x picom; fi     # picom re-reads its config on SIGUSR1
+  if pgrep -x polybar >/dev/null 2>&1; then run polybar-msg cmd restart; fi
+  if pgrep -x plank >/dev/null 2>&1; then run pkill -x plank; sleep 1; [ "$DRY" = 1 ] || { plank >/dev/null 2>&1 & }; fi
+  start_components "$CFG"
+  say "Reloaded."
+}
+
+# --------------------------------------------------------------------------------- preview
+cmd_preview() {
+  local secs="${1:-30}"
+  need_x11
+  case "$secs" in ''|*[!0-9]*) die "preview takes a number of seconds" ;; esac
+  say "Preview for ${secs}s. Your config files are NOT touched; everything this starts is stopped afterwards."
+  local started=() other
+  # Plank reads its settings from dconf, so the preview uses its own dock id and removes it again.
+  if other="$(other_compositor)"; then warn "$other is compositing; skipping picom"
+  elif have picom && ! pgrep -x picom >/dev/null 2>&1; then
+    [ "$DRY" = 1 ] && say "  would start picom" || { picom --config "$KIT/config/picom/picom.conf" & started+=("$!"); }
+  fi
+  if have polybar && ! pgrep -x polybar >/dev/null 2>&1; then
+    [ "$DRY" = 1 ] && say "  would start polybar" || { polybar -c "$KIT/config/polybar/config.ini" kos >/dev/null 2>&1 & started+=("$!"); }
+  fi
+  local pdock="/net/launchpad/plank/docks/kospreview/"
+  if have plank && have dconf && ! pgrep -x plank >/dev/null 2>&1; then
+    if [ "$DRY" = 1 ]; then say "  would start plank -n kospreview"; else
+      dconf load "$pdock" < "$KIT/config/plank/dock.dconf"
+      XDG_DATA_DIRS="$KIT/config/plank:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" plank -n kospreview >/dev/null 2>&1 &
+      started+=("$!")
+    fi
+  fi
+  [ "$DRY" = 1 ] && return 0
+  [ "${#started[@]}" -gt 0 ] || { warn "nothing to preview (everything is already running, or the tools are not installed)"; return 0; }
+  trap 'for p in "${started[@]}"; do kill "$p" 2>/dev/null || true; done; dconf reset -f "'"$pdock"'" 2>/dev/null || true' EXIT INT TERM
+  sleep "$secs"
+  say "Preview over."
+}
+
+case "${1:-}" in
+  status) cmd_status ;;
+  apply) shift; cmd_apply "$@" ;;
+  revert) cmd_revert ;;
+  reload) cmd_reload ;;
+  preview) shift; cmd_preview "$@" ;;
+  start) cmd_start ;;
+  ""|-h|--help|help) sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $1 (try: kos-desktop help)" ;;
+esac

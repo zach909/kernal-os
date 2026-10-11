@@ -9,5 +9,64 @@
   "permissions": [
     "system"
   ],
-  "description": "The line shell as an app: every line is a command, in your own language."
+  "description": "The line shell as an app: every line is a command, in your own language.",
+  "commands": [
+    {
+      "id": "optimize",
+      "title": "Optimize the disk",
+      "keywords": [
+        "clean",
+        "space",
+        "compact"
+      ],
+      "line": "optimize"
+    },
+    {
+      "id": "list-apps",
+      "title": "List installed apps",
+      "keywords": [
+        "installed",
+        "apps"
+      ],
+      "line": "list"
+    },
+    {
+      "id": "owed",
+      "title": "Show what is still owed after writes",
+      "keywords": [
+        "pending",
+        "scan"
+      ],
+      "line": "owed"
+    },
+    {
+      "id": "diagnose",
+      "title": "Check which kernel protections exist",
+      "keywords": [
+        "doctor",
+        "kernel",
+        "security"
+      ],
+      "line": "doctor"
+    },
+    {
+      "id": "audit",
+      "title": "Show the password and security log",
+      "keywords": [
+        "history",
+        "log",
+        "decisions"
+      ],
+      "line": "audit"
+    },
+    {
+      "id": "activity",
+      "title": "Show recent activity",
+      "keywords": [
+        "feed",
+        "recent"
+      ],
+      "line": "activity"
+    }
+  ]
 }

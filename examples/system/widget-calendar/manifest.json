@@ -1,0 +1,9 @@
+{
+  "name": "widget-calendar",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["ticks"],
+  "description": "Calendar widget: this month, today highlighted."
+}

@@ -1,0 +1,7 @@
+{
+  "name": "widget-clock",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Clock widget: analog and digital time, and the date.",
+  "scripts": { "start": "node app.js" }
+}

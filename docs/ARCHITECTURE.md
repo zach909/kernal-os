@@ -75,6 +75,34 @@ following ones via `preboot`.
 Gap: the desktop's first-session password also covers every later app it
 switches to for *devices*; opening an app still always asks.
 
+## Compositor and the interface apps (`kos/shell.py`, `kos/fbgfx.py`, `kos/ttf.py`)
+`kos boot desktop` runs one `Shell` that owns the screen and the input devices. Each interface part (wallpaper,
+menubar, dock, icons, search, widget handler, widgets) and each window is a **layer** backed by a separate
+sandboxed app instance. Apps send the same schema-checked `frame` ops as any graphical app (`rect`, `line`,
+`text`, and `stext` for smooth type); the shell validates them, rasterizes into a per-layer surface clipped to the
+layer's rect, and composites by z-order. Glass (frost = downsampled blur, tint, sheen, bevel, shadow, rounded
+corners) is applied by the OS *around* what an app draws, cached per layer and invalidated only when something
+beneath it changes. Window chrome (traffic lights, title bar) is drawn by the OS, so an app cannot fake it.
+Trust: apps have no screen, device or file access; `resize` and `layout` need the extra manifest permission
+`shell` (the dock uses it to size itself - the OS keeps it centered; the search box to grow its result list),
+everything else needs `system` and a password in the OS's own overlay (`SessionPrompter`, drawn last, never
+routed to an app). One boot password authorizes the whole interface set (`Authority.authorize_batch`).
+Smooth text: `ttf.py` parses TrueType `glyf` outlines, flattens the quadratics and computes exact area coverage
+(the accumulation-buffer method), caching per (glyph, size). The `hello` event carries the advance table so an
+app can measure text it cannot rasterize. Limits: no kerning, no hinting, no CFF/OpenType outlines, overlapping
+contours are clamped; falls back to the pixel font if no system face exists.
+Gap: layers repaint their content on every compose (only the glass is cached); fine at 1280x720 in pure
+Python (a full compose is ~0.5 s cold, a one-widget change ~55 ms) but a large screen with many busy apps will
+want a damage-rectangle pass. Pointer events go to the topmost layer under the pointer; there is no keyboard
+focus ring or accessibility tree yet.
+
+## Native desktop kit (`native-desktop/`)
+Not part of the trust base: a per-user configuration kit for a stock Linux X11 session (polybar, plank, picom,
+rofi, GTK, fontconfig) that reproduces the same layout and accent. `kos-desktop apply` records the first-seen
+state of every file it touches in a baseline that later runs never overwrite, so `revert` is exact however many
+times you applied. It never uses root outside the package step, never replaces your window manager, and refuses
+on Wayland. It could not be exercised against a live X server in the development environment.
+
 ## Built-in apps, backups, off-site (`kos/sysinfo.py`, `kos/backup.py`, `kos/offsite.py`)
 More `request`s on the same bridge: `info`, `ls`, `view` (password), `scan`,
 `optimize`/`settle` (password), `permit`/`revoke` (password), `line` (the line

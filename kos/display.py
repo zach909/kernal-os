@@ -23,7 +23,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import font
+from . import font, ttf
 
 
 def parse_color(c: str) -> bytes:
@@ -95,6 +95,15 @@ class Framebuffer:
                     if bits & (0x10 >> col):
                         self.rect(gx + col * scale, y + row * scale, scale, scale, color)
 
+    def stext(self, x: int, y: int, s: str, color: str, px: int, face: int = 0) -> None:
+        """Smooth proportional text (0 sans, 1 bold, 2 mono); the pixel font if no TrueType face exists."""
+        f = ttf.load(("sans", "bold", "mono")[face])
+        if f is None:
+            self.text(x, y, s.upper(), parse_color(color), max(1, px // 9))
+            return
+        c = parse_color(color)
+        f.draw(self, x, y, s, (c[2], c[1], c[0]), px)
+
     def apply(self, ops: list[list]) -> None:
         for op in ops:
             kind = op[0]
@@ -106,6 +115,8 @@ class Framebuffer:
                 self.line(op[1], op[2], op[3], op[4], parse_color(op[5]))
             elif kind == "text":
                 self.text(op[1], op[2], op[3], parse_color(op[4]), op[5])
+            elif kind == "stext":
+                self.stext(op[1], op[2], op[3], op[4], op[5], op[6])
 
 
 _CURSOR = [
@@ -173,6 +184,7 @@ class HeadlessBackend:
 
     def show(self, fb: Framebuffer) -> None:
         self.frames.append(fb.copy())
+        del self.frames[:-8]                    # keep the last few: a long run must not eat memory
 
     def set_status(self, text: str) -> None:
         self.status = text

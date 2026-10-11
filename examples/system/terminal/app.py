@@ -23,6 +23,9 @@ def main():
             app.request_apps()
         elif cmd == "apps":
             st["open"] = ev["open"]
+        elif cmd == "launch" and ev.get("line"):       # opened from a search result: run that line now
+            st["log"].append("kos> " + ev["line"])
+            app.request_line(ev["line"])
         elif cmd == "text":
             st["log"] += ["  " + l for l in ev["lines"]] or []
         elif cmd == "result" and not ev.get("ok"):

@@ -3,7 +3,41 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system", "ticks"],
-  "description": "Process manager: every task, its state and scheduling, signals, priority, and IPC channels."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system",
+    "ticks"
+  ],
+  "description": "Process manager: every task, its state and scheduling, signals, priority, and IPC channels.",
+  "commands": [
+    {
+      "id": "sort-mem",
+      "title": "Find what is using the most memory",
+      "keywords": [
+        "ram",
+        "hog",
+        "task manager"
+      ]
+    },
+    {
+      "id": "sort-cpu",
+      "title": "Find what is using the most CPU",
+      "keywords": [
+        "slow",
+        "busy",
+        "task manager"
+      ]
+    },
+    {
+      "id": "ipc",
+      "title": "Show how programs talk to each other",
+      "keywords": [
+        "sockets",
+        "ipc",
+        "channels"
+      ]
+    }
+  ]
 }

@@ -3,7 +3,30 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system", "ticks"],
-  "description": "Protection: how each app is confined, kernel hardening, authentication and access levels."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system",
+    "ticks"
+  ],
+  "description": "Protection: how each app is confined, kernel hardening, authentication and access levels.",
+  "commands": [
+    {
+      "id": "hardening",
+      "title": "Check how hardened the kernel is",
+      "keywords": [
+        "security",
+        "sysctl"
+      ]
+    },
+    {
+      "id": "apps",
+      "title": "See how each app is confined",
+      "keywords": [
+        "sandbox",
+        "cage"
+      ]
+    }
+  ]
 }

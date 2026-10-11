@@ -53,6 +53,10 @@ const FILTERS = ['ALL', 'ESTABLISHED', 'LISTEN'];
       st.d = ev.data;
       const t = Date.now() / 1000;
       for (const i of ev.data.interfaces) st.rates[i.name] = { rx: rate.of(i.name + 'rx', i.rx_bytes, t), tx: rate.of(i.name + 'tx', i.tx_bytes, t) };
+    } else if (ev.cmd === 'launch') {
+      if (ev.command === 'internet') { st.inet = 'checking - type your password in the OS prompt'; app.requestNetCheck(); }
+      else if (ev.command === 'connections') st.tab = 2;
+      else if (ev.command === 'interfaces') st.tab = 0;
     } else if (ev.cmd === 'result') st.inet = `${ev.ok ? 'OK' : 'NO'} - ${ev.detail} (${new Date().toTimeString().slice(0, 8)})`;
     else if (ev.cmd === 'key') {
       const k = ev.key;

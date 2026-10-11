@@ -41,6 +41,7 @@ class Instance:
     status: str = "starting"  # starting -> running -> exited
     system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
     ticks: bool = False       # manifest has 'ticks': the OS sends it a tick event every second
+    shell: bool = False       # manifest has 'shell': may resize its own layer / arrange the widgets
 
 
 def _alive(pid: int) -> bool:

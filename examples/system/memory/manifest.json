@@ -3,7 +3,23 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system", "ticks"],
-  "description": "Memory manager: RAM, cache, swap, paging, pressure, and who is using it."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system",
+    "ticks"
+  ],
+  "description": "Memory manager: RAM, cache, swap, paging, pressure, and who is using it.",
+  "commands": [
+    {
+      "id": "memory",
+      "title": "Show memory use and swap",
+      "keywords": [
+        "ram",
+        "swap",
+        "paging"
+      ]
+    }
+  ]
 }

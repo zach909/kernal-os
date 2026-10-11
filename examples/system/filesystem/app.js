@@ -55,7 +55,11 @@ const explain = (s) => {
   for await (const ev of app.events()) {
     nav.see(ev);
     if (ev.cmd === 'hello') { app.requestApps(); app.requestSys('mounts'); app.requestLs(st.path); }
-    else if (ev.cmd === 'sys' && ev.kind === 'mounts') st.mounts = ev.data;
+    else if (ev.cmd === 'launch') {
+      if (ev.command === 'mounts') st.tab = 1;
+      else if (ev.command === 'permissions') st.tab = 2;
+      else if (ev.command === 'mkdir') { st.tab = 2; st.prompt = { kind: 'mkdir', label: 'new folder name:', buf: '' }; }
+    } else if (ev.cmd === 'sys' && ev.kind === 'mounts') st.mounts = ev.data;
     else if (ev.cmd === 'sys' && ev.kind === 'stat') st.stat = ev.data;
     else if (ev.cmd === 'listing') { st.path = ev.path; st.entries = ev.entries; cur.sel = 0; inspect(); }
     else if (ev.cmd === 'result') { st.note = (ev.ok ? '' : 'NOT DONE: ') + ev.detail; if (ev.ok) { app.requestLs(st.path); app.requestSys('mounts'); } }

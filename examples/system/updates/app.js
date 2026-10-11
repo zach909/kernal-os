@@ -59,7 +59,11 @@ const day = (t) => (t ? new Date(t * 1000).toISOString().slice(0, 10) : '-');
   for await (const ev of app.events()) {
     nav.see(ev);
     if (ev.cmd === 'hello') { app.requestApps(); refresh(); }
-    else if (ev.cmd === 'updates') {
+    else if (ev.cmd === 'launch') {
+      if (ev.command === 'check') { st.tab = 2; st.note = 'checking your sources - type your password in the OS prompt'; app.requestUpdates('check'); }
+      else if (ev.command === 'provenance') st.tab = 0;
+      else if (ev.command === 'add-source') { st.tab = 1; st.prompt = { label: 'name kind location:', buf: '' }; }
+    } else if (ev.cmd === 'updates') {
       if (ev.op === 'provenance') st.d = ev.data;
       else if (ev.op === 'check') { st.note = `checked: ${ev.data.updates.length} update(s), ${ev.data.new.length} new`; refresh(); }
     } else if (ev.cmd === 'result') { st.note = (ev.ok ? '' : 'NOT DONE: ') + ev.detail; refresh(); }

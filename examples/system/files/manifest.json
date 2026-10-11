@@ -9,5 +9,27 @@
   "permissions": [
     "system"
   ],
-  "description": "File manager: browse folders and zips without extracting; viewing asks for your password."
+  "description": "File manager: browse folders and zips without extracting; viewing asks for your password.",
+  "commands": [
+    {
+      "id": "browse",
+      "title": "Browse files and folders",
+      "keywords": [
+        "folder",
+        "directory",
+        "explore",
+        "open"
+      ]
+    },
+    {
+      "id": "scan-file",
+      "title": "Scan a file for viruses",
+      "keywords": [
+        "virus",
+        "security",
+        "malware",
+        "check"
+      ]
+    }
+  ]
 }

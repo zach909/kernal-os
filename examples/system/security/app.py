@@ -26,6 +26,15 @@ def main():
             app.request_info()
         elif cmd == "apps":
             st["open"] = ev["open"]
+        elif cmd == "launch":
+            if ev.get("command") == "settle":
+                st["note"] = "settling - type your password in the OS prompt"
+                app.request_settle()
+            elif ev.get("command") == "optimize":
+                st["note"] = "optimizing - type your password in the OS prompt"
+                app.request_optimize()
+            elif ev.get("command") == "scan":
+                st["typing"] = ""
         elif cmd == "info":
             st["info"] = ev
         elif cmd == "text":

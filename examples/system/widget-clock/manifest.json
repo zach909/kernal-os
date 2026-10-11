@@ -1,0 +1,9 @@
+{
+  "name": "widget-clock",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["ticks"],
+  "description": "Clock widget: analog and digital time, and the date."
+}

@@ -3,7 +3,24 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system", "ticks"],
-  "description": "Error handling: hardware health, connectivity, faulty apps, and security events."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system",
+    "ticks"
+  ],
+  "description": "Error handling: hardware health, connectivity, faulty apps, and security events.",
+  "commands": [
+    {
+      "id": "health",
+      "title": "Check hardware and app health",
+      "keywords": [
+        "temperature",
+        "errors",
+        "crash",
+        "faults"
+      ]
+    }
+  ]
 }

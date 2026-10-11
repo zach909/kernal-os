@@ -45,12 +45,23 @@ NPM_ENTRY_RE = re.compile(r"^(?:npx:[A-Za-z0-9._-]{1,60}|[A-Za-z0-9:_-]{1,40})$"
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native", "npm"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network", "system", "ticks"}
-_MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description"}
+PERMISSIONS = {"network", "system", "ticks", "shell"}
+_MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description", "commands"}
+COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,60}$")
+MAX_COMMANDS = 24
 
 
 class KAppError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class Command:
+    """Something an app can do, which desktop search can find and start."""
+    id: str
+    title: str
+    keywords: tuple[str, ...] = ()
+    line: str = ""        # a line of the line shell to run in the app when it opens (optional)
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class Manifest:
     modes: tuple[str, ...] = ("tui",)
     permissions: tuple[str, ...] = ()
     description: str = ""
+    commands: tuple[Command, ...] = ()
 
     @classmethod
     def parse(cls, raw: bytes) -> "Manifest":
@@ -99,7 +111,28 @@ class Manifest:
                 r"^[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?$", d["entry"]):
             raise KAppError("python entry must look like 'module' or 'module:function'")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
-                   modes=modes, permissions=perms, description=desc)
+                   modes=modes, permissions=perms, description=desc, commands=_commands(d.get("commands", [])))
+
+
+def _commands(raw) -> tuple[Command, ...]:
+    if not isinstance(raw, list) or len(raw) > MAX_COMMANDS:
+        raise KAppError(f"commands must be a list of at most {MAX_COMMANDS}")
+    out = []
+    for c in raw:
+        if not isinstance(c, dict) or not set(c) <= {"id", "title", "keywords", "line"}:
+            raise KAppError("each command is {id, title, keywords?, line?}")
+        cid, title, kw, line = c.get("id"), c.get("title"), c.get("keywords", []), c.get("line", "")
+        if not isinstance(cid, str) or not COMMAND_ID_RE.match(cid):
+            raise KAppError(f"bad command id {cid!r}")
+        if not isinstance(title, str) or not 1 <= len(title) <= 70:
+            raise KAppError("a command title is 1 to 70 characters")
+        if (not isinstance(kw, list) or len(kw) > 8
+                or not all(isinstance(k, str) and 1 <= len(k) <= 24 for k in kw)):
+            raise KAppError("command keywords: up to 8 short words")
+        if not isinstance(line, str) or len(line) > 200:
+            raise KAppError("a command line is at most 200 characters")
+        out.append(Command(cid, title, tuple(k.lower() for k in kw), line))
+    return tuple(out)
 
 
 def _check_member_name(n: str) -> None:

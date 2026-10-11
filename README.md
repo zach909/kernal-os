@@ -51,8 +51,9 @@ kos open [graphical|cmd] NAME   open in the background, return immediately
 kos ps                     apps opened with 'kos open'
 kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
 kos close ID                actually stop one
-kos desktop install         pack, scan, install + permit the taskbar and App Library
-kos boot desktop            the desktop: taskbar + App Library apps (--graphical for pixels)
+kos desktop install         pack, scan, install + permit every interface app (one password)
+kos boot desktop            the desktop: a compositor over separate apps (--classic: the older one-app-at-a-time mode)
+kos desktop shot OUT.png    boot it headless and save a picture (--size WxH --open a,b --search TEXT)
 kos ls PATH / kos cat PATH  browse/view real dirs and zips, never extracted
 kos explore [PATH]          interactively cd/ls/cat, straight into zip files
 kos activity                one feed: what's open + recent password decisions
@@ -137,21 +138,39 @@ first; each code line is its own app, so variables do not persist.
 ## The desktop is made of apps
 
 ```
-kos desktop install       # once: packs, scans, installs and permits the two apps
-kos boot desktop          # or just say: desktop
+kos desktop install       # once: packs, scans, installs and permits every interface app (one password)
+kos boot desktop          # or just say: desktop        (kos boot desktop --classic = the older mode)
+kos desktop shot out.png  # no screen needed: boot it headless and save what it looks like
 ```
 
-There is no window manager. `boot desktop` opens the **taskbar** (home) and
-the **App Library** as background apps and moves your terminal between running
-apps: taskbar → pick an app → attach; **right mouse anywhere → App Library**;
-Ctrl-C returns to the taskbar; Ctrl-C on the taskbar leaves (nothing is closed).
-Mouse and keyboard are booted once, with your password, and carry over as you
-move. Opening a new app from the library asks for your password in the OS's own
-prompt, which no app can see or cover. Any app can be part of this: give it
-`"permissions": ["system"]`, `kos permit` it, and it can list, open, close and
-switch apps - but only by asking, and only with your password for anything that
-starts or stops something. Starting the desktop asks for the password five
-times (desktop, taskbar, library, mouse, keyboard); after that, switching is free.
+The interface is not one program. The OS runs a small **compositor** (`kos/shell.py`) and every part of what you
+see is a *separate sandboxed app* that only draws flat shapes and text:
+
+| Interface app | Role |
+|---|---|
+| `wallpaper` | the background (sky and layered waves, drawn from code - there are no image files) |
+| `menubar` | the **top panel**: KOS menu, the active app's name and the commands it offers (click one to run it), CPU/memory, network, date and clock |
+| `dock` | the **floating dock**, centered at the bottom: pinned apps, then whatever else is running; a dot marks open apps (Windows Blue when active) |
+| `icons` | every installed app as an icon; click to open |
+| `search` | type anywhere: finds apps **and the commands they offer**; any other line is a command too - `print(1)` runs sandboxed and prints 1 |
+| `widgets` + `widget-clock/calendar/network/system` | the widget handler (show/hide/reorder, remembered) and the widgets |
+
+Apps never touch the screen. The OS adds the glass (blur, tint, sheen, bevel, soft shadow, rounded corners) around
+their shapes, draws the window frames itself, and asks for your password in its own overlay that no app can see or
+cover. Opening anything is a *request*; the right mouse button shows the desktop.
+
+**Look:** a minimalist top panel and a floating bottom dock (macOS-style), Windows Blue **`#0078D4`** for active and
+selected states, neutral dark glass instead of navy, and smooth proportional type. Smooth type is the OS's own
+pure-Python TrueType rasterizer (`kos/ttf.py`, exact-coverage anti-aliasing) using a system font; apps send
+`["stext", x, y, text, color, px, face]` and the OS draws it, so apps never need a font file. Not yet converted:
+the app windows' *content* is still the older text-mode pages (now drawn in a smooth monospace font), and a few
+widget details still use the pixel font.
+
+**Real desktop on your own machine:** `native-desktop/` is a separate kit that gives a normal Linux X11 session
+the same layout - polybar (top panel), plank (floating dock), picom (blur, rounded corners), rofi, Papirus icons,
+Inter font - all in `#0078D4`, with `install.sh` and `kos-desktop apply|preview|reload|revert`. It runs natively on
+your session (no nested desktop), changes only files in your home, and `revert` restores your originals exactly. See
+`native-desktop/README.md`; it could not be looked at in the environment it was written in, so use `preview` first.
 
 ## "Requires"
 
@@ -207,7 +226,7 @@ anything that changes something, your password in the OS's own prompt).
 
 | App | What it does |
 |---|---|
-| `taskbar` | Home screen: what is open, switch to it. |
+| `taskbar` | Home screen of the classic (`--classic`) mode: what is open, switch to it. |
 | `app-library` | Every installed app; Enter opens one (password). Right mouse = this. |
 | `files` | **File viewer**: browse folders and zips (never extracted); Enter on a file views it (password); `s` scans it. |
 | `editor` | **File editor**: opens a file (password), edit, Ctrl-S saves through the *guarded write* (admin keyboard, password, then a scan + optimize are owed). A file that would not round-trip exactly (tabs, CRLF, very long lines, binary, too big) opens **read-only**. |
@@ -295,8 +314,11 @@ python3 -m unittest discover -s tests -v
   the OS prompt through a real broker); and the real CLI end to end through a
   pseudo-terminal (`desktop install`, `admin boot`, `write`, EICAR blocked,
   `boot desktop` with switching, right-click, launching from the library).
+* **Verified here as pictures and tests, not on a real screen:** the compositor desktop (headless screenshots,
+  geometry/permission tests); the typeface (checked against FreeType: straight glyphs within ~5%, curves 15-25%
+  mostly hinting); `native-desktop/` (parse, dry-run, apply/revert in a throwaway home - not run against a live X server).
 * **Written but not yet booted:** exclusive evdev capture for the admin
-  keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the
+  keyboard, the compositor on a real framebuffer (`kos boot desktop` on a VT), the initramfs, kos-init as real PID 1, the
   image builder, framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).
 * The userland is Python (stdlib only) to move fast. Python can't fully wipe

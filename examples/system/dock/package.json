@@ -1,0 +1,7 @@
+{
+  "name": "dock",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The floating dock.",
+  "scripts": { "start": "node app.js" }
+}

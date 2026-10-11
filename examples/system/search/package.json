@@ -1,0 +1,7 @@
+{
+  "name": "search",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Search: type to find apps and what they can do - or run anything as a command, even code.",
+  "scripts": { "start": "node app.js" }
+}

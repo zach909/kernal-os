@@ -9,5 +9,33 @@
   "permissions": [
     "system"
   ],
-  "description": "Backups of your documents: back up a file or folder, browse a backup, restore one file."
+  "description": "Backups of your documents: back up a file or folder, browse a backup, restore one file.",
+  "commands": [
+    {
+      "id": "new",
+      "title": "Back up a folder or file",
+      "keywords": [
+        "copy",
+        "safe",
+        "documents"
+      ]
+    },
+    {
+      "id": "remote",
+      "title": "Set your private GitHub for backups",
+      "keywords": [
+        "github",
+        "push",
+        "off-site"
+      ]
+    },
+    {
+      "id": "restore",
+      "title": "Restore a file from a backup",
+      "keywords": [
+        "recover",
+        "undo"
+      ]
+    }
+  ]
 }

@@ -1,0 +1,9 @@
+{
+  "name": "widget-network",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system", "ticks"],
+  "description": "Network widget: link state, address, speeds, and an internet check."
+}

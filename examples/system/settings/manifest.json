@@ -9,5 +9,23 @@
   "permissions": [
     "system"
   ],
-  "description": "Kernel protections and which apps are permitted to run."
+  "description": "Kernel protections and which apps are permitted to run.",
+  "commands": [
+    {
+      "id": "permit",
+      "title": "Allow or block an app from running",
+      "keywords": [
+        "permission",
+        "allow",
+        "deny"
+      ]
+    },
+    {
+      "id": "kernel",
+      "title": "Show kernel protections",
+      "keywords": [
+        "landlock"
+      ]
+    }
+  ]
 }

@@ -49,6 +49,11 @@ class Canvas:
         self.ops.append(["text", int(x), int(y), s, color, int(scale)])
         return self
 
+    def stext(self, x: int, y: int, s: str, color: str, px: int = 14, face: int = 0) -> "Canvas":
+        """Smooth proportional text; face 0 sans, 1 bold, 2 mono."""
+        self.ops.append(["stext", int(x), int(y), s, color, int(px), int(face)])
+        return self
+
 
 class App:
     def __init__(self, sock: Optional[socket.socket] = None):
@@ -59,6 +64,9 @@ class App:
         self.mode = os.environ.get("KOS_MODE", "tui")
         self.width = 80
         self.height = 24
+        self.scale = 1
+        self.font: dict = {}
+        self.insets = [0, 0, 0, 0]
         self.devices: set[str] = set()
 
     def send(self, obj: dict) -> None:
@@ -75,6 +83,9 @@ class App:
                 self.mode = ev.get("mode", self.mode)
                 self.width = ev.get("width", self.width)
                 self.height = ev.get("height", self.height)
+                self.scale = ev.get("scale", self.scale)
+                self.font = ev.get("font", self.font)
+                self.insets = ev.get("insets", self.insets)
             elif cmd == "device" and ev.get("state") == "attached":
                 self.devices.add(ev.get("device", ""))
             elif cmd == "quit":
@@ -84,6 +95,13 @@ class App:
     # --- commands the app can issue -------------------------------------
     def screen(self, title: str, lines: list[str], status: str = "") -> None:
         self.send({"cmd": "screen", "title": title, "lines": lines, "status": status})
+
+    def text_width(self, s: str, px: int = 14, face: int = 0) -> int:
+        """Pixel width of smooth text, from the advances the OS sent in hello."""
+        adv = self.font.get(("sans", "bold", "mono")[face], {}).get("adv")
+        if not adv:
+            return int(len(s) * px * 0.55)
+        return round(sum(adv[ord(c) - 32] if 32 <= ord(c) < 127 else 600 for c in s) * px / 1000)
 
     def present(self, canvas: Canvas) -> None:
         self.send({"cmd": "frame", "ops": canvas.ops})
@@ -103,8 +121,13 @@ class App:
     def request_apps(self) -> None:
         self.send({"cmd": "request", "action": "apps"})
 
-    def request_open(self, app: str, mode: str = "tui") -> None:
-        self.send({"cmd": "request", "action": "open", "app": app, "mode": mode})
+    def request_open(self, app: str, mode: str = "tui", command: str = "", line: str = "") -> None:
+        msg = {"cmd": "request", "action": "open", "app": app, "mode": mode}
+        if command:
+            msg["command"] = command
+        if line:
+            msg["line"] = line
+        self.send(msg)
 
     def request_focus(self, instance_id: str) -> None:
         self.send({"cmd": "request", "action": "focus", "id": instance_id})
@@ -159,6 +182,17 @@ class App:
 
     def request_updates(self, op: str, **extra) -> None:
         self.send({"cmd": "request", "action": "updates", "op": op, **extra})
+
+    def request_resize(self, w: int = 0, h: int = 0) -> None:
+        msg = {"cmd": "request", "action": "resize"}
+        if w:
+            msg["w"] = int(w)
+        if h:
+            msg["h"] = int(h)
+        self.send(msg)
+
+    def request_layout(self, order: list, hidden: list) -> None:
+        self.send({"cmd": "request", "action": "layout", "order": order, "hidden": hidden})
 
     def request_remote(self, url: str) -> None:
         self.send({"cmd": "request", "action": "remote", "url": url})

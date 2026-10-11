@@ -1,0 +1,7 @@
+{
+  "name": "widget-calendar",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Calendar widget: this month, today highlighted.",
+  "scripts": { "start": "node app.js" }
+}

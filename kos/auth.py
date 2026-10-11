@@ -284,6 +284,39 @@ class Grant:
 class Authority:
     MAX_ATTEMPTS = 3
 
+    def authorize_batch(self, items: list[tuple[str, str]], label: str) -> list[Grant]:
+        """One password, several grants - for starting something made of parts (the
+        desktop and each of its built-in apps and devices). The prompt names the whole
+        batch; every (action, target) is audited separately and gets its own grant."""
+        for action, _ in items:
+            if action not in ACTIONS:
+                raise AuthorizationDenied(f"unknown action {action!r}")
+        if not self.store.exists():
+            raise AuthError("no password has been set up (run: kos setup)")
+        for _ in range(self.MAX_ATTEMPTS):
+            self.throttle.wait(self.prompter.info)
+            password = self.prompter.password(f"Password to {label}: ")
+            if password is None:
+                for a, t in items:
+                    self.audit.record(a, t, "cancelled")
+                raise AuthorizationDenied("cancelled")
+            master = self.store.verify(password)
+            if master is not None:
+                self.throttle.success()
+                grants = []
+                for a, t in items:
+                    self.audit.record(a, t, "granted")
+                    grants.append(Grant(a, t, SecretBytes(bytes(master.raw))))
+                master.wipe()
+                return grants
+            self.throttle.fail()
+            for a, t in items:
+                self.audit.record(a, t, "bad-password")
+            self.prompter.info("Wrong password.")
+        for a, t in items:
+            self.audit.record(a, t, "denied")
+        raise AuthorizationDenied(f"not authorized to {label}")
+
     def __init__(self, paths: Paths, prompter, throttle: Optional[Throttle] = None):
         self.paths = paths
         self.store = PasswordStore(paths)

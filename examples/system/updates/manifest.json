@@ -3,7 +3,41 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system"],
-  "description": "Software sources and updates: where every app and component came from, and installing newer versions."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system"
+  ],
+  "description": "Software sources and updates: where every app and component came from, and installing newer versions.",
+  "commands": [
+    {
+      "id": "check",
+      "title": "Check for updates",
+      "keywords": [
+        "upgrade",
+        "new version",
+        "sources"
+      ]
+    },
+    {
+      "id": "provenance",
+      "title": "Show where every app came from",
+      "keywords": [
+        "origin",
+        "source",
+        "install",
+        "from"
+      ]
+    },
+    {
+      "id": "add-source",
+      "title": "Add a software source",
+      "keywords": [
+        "repository",
+        "github",
+        "folder"
+      ]
+    }
+  ]
 }

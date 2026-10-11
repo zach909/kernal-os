@@ -71,7 +71,11 @@ const STATE = { R: 'running', S: 'sleeping', D: 'waiting on disk', Z: 'zombie', 
   for await (const ev of app.events()) {
     nav.see(ev);
     if (ev.cmd === 'hello') { app.requestApps(); refresh(); }
-    else if (ev.cmd === 'tick') { if (++st.tick % 2 === 0) refresh(); continue; }
+    else if (ev.cmd === 'launch') {
+      if (ev.command === 'sort-mem') st.sort = 'mem';
+      else if (ev.command === 'sort-cpu') st.sort = 'cpu';
+      else if (ev.command === 'ipc') { st.view = 'ipc'; refresh(); }
+    } else if (ev.cmd === 'tick') { if (++st.tick % 2 === 0) refresh(); continue; }
     else if (ev.cmd === 'sys' && ev.kind === 'processes') {
       st.data = ev.data;
       for (const p of ev.data.processes) st.cpu.set(p.pid, rate.of(p.pid, p.cpu_ticks, ev.data.uptime) / ev.data.clk_tck * 100);

@@ -73,9 +73,17 @@ land instead of getting lost in chat.
   `auth.json` gap in ARCHITECTURE.md).
 - **Boot-test the exclusive keyboard.** `EVIOCGRAB` capture in
   `kos write` and the graphical desktop have not run on real hardware.
-- **A real compositor for the desktop.** One app on screen at a time today;
-  tiling several apps' frames (see the older "real windowing desktop" item)
-  would let the taskbar be a bar *over* apps instead of a home screen.
+- **Damage-rectangle compositing.** The compositor (`kos/shell.py`) caches each layer's glass but repaints all
+  layer content on every compose. A damage-rect pass (repaint only what changed) would let larger screens and many
+  busy apps stay smooth in pure Python; a C/Rust blur would let it use real-time effects.
+- **Smooth type everywhere.** `stext` (TrueType, anti-aliased) is used by the menubar, dock, search, window titles,
+  widgets and icon labels; the window *contents* of the other apps are still text pages (drawn in a smooth monospace).
+  Moving them to native graphical layouts with proportional type is the next visual step. Kerning, hinting and
+  OpenType (CFF) outlines are missing from `kos/ttf.py`.
+- **Dock polish.** Hover magnification beyond a small lift, labels on hover, drag-to-reorder pinned apps, and
+  auto-hide (the layer exists to hide, but nothing triggers it yet).
+- **Verify `native-desktop/` on a live X11 session.** It was written without an X server: config syntax for polybar,
+  picom, plank and rofi is unverified against real versions; add CI with Xvfb + the real programs.
 - **Per-request permissions.** `system` is all-or-nothing; split it into
   list / open / close / focus so a clock app can list without being able to open.
 - **More verbs and languages for the line shell**, and verb-last languages
@@ -106,7 +114,7 @@ land instead of getting lost in chat.
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
   command in the user's own language, and code is a command too (run sandboxed,
   never on the host); `requires` (unlock requires the keyboard requires the
-  kernel; a write owes a scan and optimize afterwards); the built-in apps (taskbar,
+  kernel; a write owes a scan and optimize afterwards); the built-in apps (menubar, dock,
   app library, file viewer, file editor, backup + private-GitHub push, settings,
   security, terminal); the taskbar
   and App Library are ordinary apps that *ask* the OS via `request`, with the

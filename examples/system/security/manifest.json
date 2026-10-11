@@ -9,5 +9,32 @@
   "permissions": [
     "system"
   ],
-  "description": "Security Center: administrator keyboard, kernel protections, what is owed, scans, audit trail."
+  "description": "Security Center: administrator keyboard, kernel protections, what is owed, scans, audit trail.",
+  "commands": [
+    {
+      "id": "settle",
+      "title": "Settle scans and optimizes still owed",
+      "keywords": [
+        "owed",
+        "pending",
+        "scan"
+      ]
+    },
+    {
+      "id": "optimize",
+      "title": "Optimize the disk now",
+      "keywords": [
+        "clean",
+        "space"
+      ]
+    },
+    {
+      "id": "scan",
+      "title": "Scan a path for viruses",
+      "keywords": [
+        "virus",
+        "malware"
+      ]
+    }
+  ]
 }

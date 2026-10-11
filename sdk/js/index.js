@@ -22,6 +22,7 @@ class Canvas {
   clear(color) { this.ops.push(['clear', color]); return this; }
   rect(x, y, w, h, color) { this.ops.push(['rect', Math.round(x), Math.round(y), Math.round(w), Math.round(h), color]); return this; }
   line(x0, y0, x1, y1, color) { this.ops.push(['line', Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1), color]); return this; }
+  stext(x, y, s, color, px = 14, face = 0) { this.ops.push(['stext', Math.round(x), Math.round(y), String(s), color, Math.round(px), face]); return this; }
   text(x, y, s, color, scale = 1) { this.ops.push(['text', Math.round(x), Math.round(y), String(s), color, scale]); return this; }
 }
 
@@ -34,7 +35,19 @@ class App {
     this.mode = process.env.KOS_MODE || 'tui';
     this.width = 80;
     this.height = 24;
+    this.scale = 1;
+    this.insets = [0, 0, 0, 0];
+    this.font = {};
     this.devices = new Set();
+  }
+
+  // Pixel width of smooth text, from the advances the OS sent in hello.
+  textWidth(s, px = 14, face = 0) {
+    const adv = (this.font[['sans', 'bold', 'mono'][face]] || {}).adv;
+    if (!adv) return Math.round(String(s).length * px * 0.55);
+    let w = 0;
+    for (const c of String(s)) { const o = c.codePointAt(0); w += o >= 32 && o < 127 ? adv[o - 32] : 600; }
+    return Math.round(w * px / 1000);
   }
 
   send(obj) { this.sock.write(JSON.stringify(obj) + '\n'); }
@@ -48,6 +61,9 @@ class App {
         this.mode = ev.mode || this.mode;
         this.width = ev.width || this.width;
         this.height = ev.height || this.height;
+        this.scale = ev.scale || this.scale;
+        this.insets = ev.insets || this.insets;
+        this.font = ev.font || this.font;
       } else if (ev.cmd === 'device' && ev.state === 'attached') {
         this.devices.add(ev.device);
       } else if (ev.cmd === 'quit') {
@@ -65,7 +81,7 @@ class App {
 
   // asking the OS for things (needs the 'system' permission); answers arrive as events
   requestApps() { this.send({ cmd: 'request', action: 'apps' }); }
-  requestOpen(app, mode = 'tui') { this.send({ cmd: 'request', action: 'open', app, mode }); }
+  requestOpen(app, mode = 'tui', command = '', line = '') { this.send({ cmd: 'request', action: 'open', app, mode, ...(command ? { command } : {}), ...(line ? { line } : {}) }); }
   requestFocus(id) { this.send({ cmd: 'request', action: 'focus', id }); }
   requestClose(id) { this.send({ cmd: 'request', action: 'close', id }); }
   requestInfo() { this.send({ cmd: 'request', action: 'info' }); }
@@ -87,6 +103,8 @@ class App {
   requestRenice(pid, nice) { this.send({ cmd: 'request', action: 'renice', pid, nice }); }
   requestFsChange(op, p, extra = {}) { this.send({ cmd: 'request', action: 'fschange', op, path: p, ...extra }); }
   requestUpdates(op, extra = {}) { this.send({ cmd: 'request', action: 'updates', op, ...extra }); }
+  requestResize(w = 0, h = 0) { this.send({ cmd: 'request', action: 'resize', ...(w ? { w: Math.round(w) } : {}), ...(h ? { h: Math.round(h) } : {}) }); }
+  requestLayout(order, hidden) { this.send({ cmd: 'request', action: 'layout', order, hidden }); }
   requestNetCheck() { this.send({ cmd: 'request', action: 'netcheck' }); }
 
   cacheDir() { return process.env.KOS_CACHE_DIR || null; }

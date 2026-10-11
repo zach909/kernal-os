@@ -1,0 +1,7 @@
+{
+  "name": "icons",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The app icons: every installed app as a glossy icon you can open.",
+  "scripts": { "start": "node app.js" }
+}

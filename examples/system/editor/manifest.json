@@ -9,5 +9,25 @@
   "permissions": [
     "system"
   ],
-  "description": "File editor. Opening asks for your password; saving is a guarded write (admin keyboard, scan, optimize)."
+  "description": "File editor. Opening asks for your password; saving is a guarded write (admin keyboard, scan, optimize).",
+  "commands": [
+    {
+      "id": "new",
+      "title": "Write a new file",
+      "keywords": [
+        "create",
+        "text",
+        "document"
+      ]
+    },
+    {
+      "id": "open",
+      "title": "Edit an existing file",
+      "keywords": [
+        "open",
+        "change",
+        "modify"
+      ]
+    }
+  ]
 }

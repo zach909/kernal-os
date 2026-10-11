@@ -10,7 +10,12 @@ treated as hostile: size-limited, schema-checked, and every string is stripped
 of control characters so an app cannot inject terminal escape sequences.
 
 OS -> app
-    {"cmd": "hello", "mode": "tui"|"graphical", "width": W, "height": H}
+    {"cmd": "hello", "mode": "tui"|"graphical", "width": W, "height": H, "scale": N?, "insets": [l,t,r,b]?, "font": {sans|bold|mono: {adv,asc,desc}}?}
+    {"cmd": "tick", "t": epoch, "local": {year, month, day, hour, minute, second, weekday, yday, zone, offset}}
+    {"cmd": "widgets", "widgets": [{name, title, visible}], "order": [NAME]}   (the widget handler)
+    {"cmd": "windows", "windows": [{id, name, title, focused, minimized}], "desktop": ID, "focus": ID}   (desktop shell)
+    {"cmd": "launch", "command": ID, "line": str?}      (opened to run one of its own commands)
+    {"cmd": "focus"}                                     (the desktop shell wants the desktop's search box)
     {"cmd": "key", "key": "a" | "enter" | "backspace" | "up" | ...}
     {"cmd": "pointer", "x": X, "y": Y}
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
@@ -33,10 +38,11 @@ app -> OS
     {"cmd": "frame", "ops": [op, ...]}                                   (graphical)
         op = ["clear", color] | ["rect", x, y, w, h, color]
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
+           | ["stext", x, y, str, color, px, face?]     smooth text, face 0 sans / 1 bold / 2 mono
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
-    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd", "command": ID?, "line": TEXT?}
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
     {"cmd": "request", "action": "info"}                       kernel/admin/owed/audit facts
@@ -55,6 +61,8 @@ app -> OS
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
     {"cmd": "request", "action": "fschange", "op": "mkdir"|"trash"|"rename"|"chmod", "path": P, ...}   (admin keyboard + password)
     {"cmd": "request", "action": "netcheck"}                   test the internet (password)
+    {"cmd": "request", "action": "resize", "w": N?, "h": N?}   (shell permission) change my own layer's size
+    {"cmd": "request", "action": "layout", "order": [NAME], "hidden": [NAME]}   (shell permission) arrange the widgets
     {"cmd": "request", "action": "updates", "op": OP, ...}     where software comes from + updates:
         op = provenance (read-only) | check (password; network) | install NAME [permissions] (password)
            | install_all | core (password) | source_add NAME KIND LOCATION | source_remove NAME (password)
@@ -78,7 +86,7 @@ from typing import Any
 MAX_LINE = 1 << 20
 MAX_LINES = 500
 MAX_LINE_CHARS = 1000
-MAX_OPS = 5000
+MAX_OPS = 12000
 MAX_COORD = 16384
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -122,6 +130,10 @@ def _op(op: Any) -> list:
     if kind == "text" and len(op) in (5, 6):
         scale = _int(op[5], 1, 8) if len(op) == 6 else 1
         return ["text", _int(op[1]), _int(op[2]), clean_text(op[3], 256), _color(op[4]), scale]
+    if kind == "stext" and len(op) in (5, 6, 7):
+        face = _int(op[6], 0, 2) if len(op) == 7 else 0
+        return ["stext", _int(op[1]), _int(op[2]), clean_text(op[3], 256), _color(op[4]),
+                _int(op[5], 6, 120) if len(op) >= 6 else 14, face]
     raise ProtocolError(f"bad draw op {kind!r}")
 
 
@@ -135,7 +147,15 @@ def _request(msg: dict) -> dict:
             raise ProtocolError("request.app must be an app name")
         if mode not in REQUEST_MODES:
             raise ProtocolError("request.mode must be tui, graphical or cmd")
-        return {"cmd": "request", "action": "open", "app": app, "mode": mode}
+        out = {"cmd": "request", "action": "open", "app": app, "mode": mode}
+        command = msg.get("command")
+        if command is not None:
+            if not isinstance(command, str) or not _COMMAND_RE.match(command):
+                raise ProtocolError("request.command must be a command id")
+            out["command"] = command
+        if msg.get("line") is not None:
+            out["line"] = clean_text(msg["line"], 200)
+        return out
     if action in ("focus", "close"):
         ident = msg.get("id")
         if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
@@ -177,6 +197,21 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "renice", "pid": pid, "nice": _int(msg.get("nice"), 0, 19)}
     if action == "netcheck":
         return {"cmd": "request", "action": "netcheck"}
+    if action == "resize":
+        out = {"cmd": "request", "action": "resize"}
+        for k in ("w", "h"):
+            if k in msg:
+                out[k] = _int(msg[k], 1, 8192)
+        return out
+    if action == "layout":
+        names = {}
+        for k in ("order", "hidden"):
+            v = msg.get(k, [])
+            if (not isinstance(v, list) or len(v) > 24
+                    or not all(isinstance(n, str) and _APP_NAME_RE.match(n) for n in v)):
+                raise ProtocolError(f"layout.{k} must be a list of widget names")
+            names[k] = v
+        return {"cmd": "request", "action": "layout", **names}
     if action == "updates":
         op = msg.get("op")
         if op not in ("provenance", "check", "install", "install_all", "core", "source_add", "source_remove"):
@@ -225,6 +260,7 @@ def _request(msg: dict) -> dict:
     raise ProtocolError(f"unknown request {action!r}")
 
 
+_COMMAND_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,60}$")
 _BACKUP_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}\.zip$")
 MAX_SAVE = 256 << 10
 _BAD_TEXT_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
@@ -269,7 +305,7 @@ def validate_app_message(msg: Any, mode: str) -> dict:
     if cmd == "frame" and mode == "graphical":
         ops = msg.get("ops")
         if not isinstance(ops, list) or len(ops) > MAX_OPS:
-            raise ProtocolError("frame.ops must be a list of at most 5000 ops")
+            raise ProtocolError("frame.ops must be a list of at most 12000 ops")
         return {"cmd": "frame", "ops": [_op(o) for o in ops]}
     if cmd == "log":
         return {"cmd": "log", "msg": clean_text(msg.get("msg", ""), 2000)}

@@ -1,0 +1,37 @@
+/* KOS native desktop - launcher (rofi). Windows Blue marks the selection. */
+* {
+    bg:        #12151bf0;
+    bg-alt:    #1b1f27;
+    fg:        #f2f6fc;
+    muted:     #a9b6c8;
+    accent:    #0078d4;
+    font:      "Inter 12";
+    background-color: transparent;
+    text-color: @fg;
+}
+window {
+    location: north;
+    anchor: north;
+    y-offset: 80px;
+    width: 640px;
+    border-radius: 14px;
+    background-color: @bg;
+    padding: 14px;
+}
+mainbox { spacing: 10px; children: [ inputbar, listview ]; }
+inputbar {
+    padding: 10px 14px;
+    border-radius: 12px;
+    background-color: @bg-alt;
+    border: 2px;
+    border-color: @accent;
+    children: [ prompt, entry ];
+    spacing: 10px;
+}
+prompt { text-color: @accent; }
+entry { placeholder: "Search apps..."; placeholder-color: @muted; }
+listview { lines: 8; columns: 1; spacing: 4px; scrollbar: false; }
+element { padding: 8px 12px; border-radius: 10px; spacing: 12px; }
+element selected.normal, element selected.active { background-color: @accent; text-color: #ffffff; }
+element-icon { size: 28px; }
+element-text { vertical-align: 0.5; }

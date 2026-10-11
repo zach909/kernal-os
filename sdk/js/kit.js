@@ -3,6 +3,8 @@
 // "back to the taskbar". Pure functions plus one tiny class; no dependencies.
 
 const HOME = 'taskbar';
+// The apps that make up the interface itself: they are not offered as things to launch.
+const SHELL = new Set(['wallpaper', 'icons', 'search', 'widgets', 'widget-clock', 'widget-calendar', 'widget-network', 'widget-system', 'menubar', 'dock', 'taskbar']);
 
 const bytes = (n) => {
   const u = ['B', 'K', 'M', 'G', 'T', 'P'];
@@ -85,4 +87,40 @@ class Rate {
   }
 }
 
-module.exports = { HOME, bytes, kb, pct, dur, fit, pad, rpad, bar, spark, History, Nav, Cursor, Rate };
+/** Rank search items against a query. Items: {name, words: [..]} (name weighs most). */
+function rank(items, query, limit = 12) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const terms = q.split(/\s+/);
+  const scored = [];
+  for (const it of items) {
+    let total = 0;
+    for (const t of terms) {
+      const name = it.name.toLowerCase(), ws = name.split(/[^a-z0-9]+/);
+      let best = 0;
+      if (name === t) best = 100;
+      else if (name.startsWith(t)) best = 80;
+      else if (ws.some((w) => w.startsWith(t))) best = 60;
+      else if (name.includes(t)) best = 40;
+      else {
+        for (const w of it.words || []) {
+          const lw = w.toLowerCase();
+          if (lw.startsWith(t)) best = Math.max(best, 30);
+          else if (lw.split(/[^a-z0-9]+/).some((x) => x.startsWith(t))) best = Math.max(best, 25);
+          else if (lw.includes(t)) best = Math.max(best, 15);
+        }
+        if (!best) {                                  // a subsequence ("prc" finds "processes")
+          let i = 0;
+          for (const ch of name) if (ch === t[i]) i++;
+          if (i === t.length && t.length >= 2) best = 8;
+        }
+      }
+      if (!best) { total = 0; break; }
+      total += best;
+    }
+    if (total) scored.push({ ...it, score: total + (it.boost || 0) });
+  }
+  return scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
+}
+
+module.exports = { rank, HOME, SHELL, bytes, kb, pct, dur, fit, pad, rpad, bar, spark, History, Nav, Cursor, Rate };

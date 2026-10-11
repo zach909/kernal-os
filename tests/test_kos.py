@@ -888,6 +888,7 @@ from kos.system import SystemBridge, close_instance, list_apps, open_background 
 from kos.tui import TUISurface  # noqa: E402
 
 SYSTEM_DIR = Path(__file__).resolve().parent.parent / "examples" / "system"
+SDK_JS = Path(__file__).resolve().parent.parent / "sdk" / "js"
 
 
 def _keys(text):
@@ -933,7 +934,11 @@ class TestSystemApps(Env):
             out = Path(self.tmp.name) / f"{name}.kapp"
             m = pack(SYSTEM_DIR / name, out)
             self.assertEqual(m.name, name)
-            self.assertIn("system", m.permissions)
+            if name == "wallpaper":
+                self.assertEqual(m.permissions, (), name)             # the background only draws: no permission at all
+            else:
+                self.assertTrue(set(m.permissions) & {"system", "ticks", "shell"}, name)   # widgets: ticks; the handler: shell
+            self.assertEqual(m.runtime, "npm" if name != "hello" else m.runtime)
             self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
 
     def test_an_app_cannot_claim_a_permission_that_does_not_exist(self):
@@ -2505,3 +2510,320 @@ class TestUpdatesProtocol(unittest.TestCase):
                     dict(op="source_add", name="s", kind="folder", location="x" * 400)):
             with self.assertRaises(ProtocolError, msg=bad):
                 self.v(**bad)
+
+
+class TestTrueType(unittest.TestCase):
+    """The OS rasterizes TrueType itself; apps send `stext` and never see a font file."""
+
+    @classmethod
+    def setUpClass(cls):
+        from kos import ttf
+        cls.ttf = ttf
+        cls.font = ttf.load("sans")
+        if cls.font is None:
+            raise unittest.SkipTest("no TrueType sans font on this machine")
+
+    def test_glyph_coverage_matches_the_shape(self):
+        bm = self.font.bitmap("l", 40)                       # a tall stem: inked in the middle, empty at the edges
+        mid = bm.h // 2
+        self.assertGreater(bm.cov[mid * bm.w + bm.w // 2], 200)
+        self.assertEqual(bm.cov[mid * bm.w], 0)
+        self.assertEqual(bm.cov[0], 0)
+        o = self.font.bitmap("o", 40)                        # a counter: the middle of an 'o' is empty
+        self.assertLess(o.cov[(o.h // 2) * o.w + o.w // 2], 20)
+        self.assertGreater(sum(o.cov), 0)
+
+    def test_width_is_proportional_and_scales(self):
+        f = self.font
+        self.assertLess(f.width("iii", 20), f.width("mmm", 20))
+        self.assertAlmostEqual(f.width("Hello", 40), 2 * f.width("Hello", 20), delta=0.5)
+        self.assertEqual(f.width("", 20), 0)
+
+    def test_stext_draws_smoothly_into_the_framebuffer(self):
+        fb = Framebuffer(120, 30)
+        fb.clear(parse_color("#000000"))
+        fb.apply([["stext", 4, 4, "Hg", "#ffffff", 20, 0]])
+        levels = {fb.pixel(x, y)[0] for x in range(120) for y in range(30)}
+        self.assertGreater(len(levels), 8)                   # anti-aliased: many grey levels, not just black/white
+        self.assertEqual(fb.pixel(119, 29), (0, 0, 0))
+
+    def test_stext_is_clipped_not_a_crash_when_off_screen(self):
+        fb = Framebuffer(20, 20)
+        fb.apply([["stext", -30, -5, "Hello", "#ffffff", 40, 1], ["stext", 15, 15, "Hello", "#ffffff", 40, 0]])
+
+    def test_protocol_validates_stext(self):
+        ok = validate_app_message({"cmd": "frame", "ops": [["stext", 1, 2, "hi", "#0078D4", 14, 1]]}, "graphical")
+        self.assertEqual(ok["ops"], [["stext", 1, 2, "hi", "#0078d4", 14, 1]])
+        for bad in (["stext", 1, 2, "hi", "#0078d4", 2], ["stext", 1, 2, "hi", "#0078d4", 999], ["stext", 1, 2, "hi", "blue", 14],
+                    ["stext", 1, 2, "hi", "#0078d4", 14, 7], ["stext", 1, 2, 5, "#0078d4", 14]):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message({"cmd": "frame", "ops": [bad]}, "graphical")
+
+    def test_apps_get_advances_to_lay_text_out(self):
+        m = self.font.metrics()
+        self.assertEqual(len(m["adv"]), 95)                  # printable ASCII
+        self.assertGreater(m["adv"][ord("m") - 32], m["adv"][ord("i") - 32])
+        self.assertGreater(m["asc"], 0)
+
+
+class TestShellDesign(Env):
+    """The macOS-style layout: top panel, floating centered dock, windows kept clear of both."""
+
+    def make(self, w=1280, h=720):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(w, h), ScriptedDevices(), preboot=())
+
+    def test_the_interface_is_a_menubar_and_a_dock_not_a_taskbar(self):
+        from kos.shell import CORE
+        self.assertIn("menubar", CORE)
+        self.assertIn("dock", CORE)
+        for gone in ("taskbar", "start", "tray"):
+            self.assertNotIn(gone, CORE)
+
+    def test_menubar_spans_the_top_and_the_dock_floats_centered_at_the_bottom(self):
+        for w, h in ((1280, 720), (1920, 1080), (800, 600)):
+            s = self.make(w, h)
+            kind, (x, y, bw, bh) = s.core_rect("menubar")
+            self.assertEqual((kind, x, y, bw), ("bar", 0, 0, w))
+            kind, (dx, dy, dw, dh) = s.core_rect("dock")
+            self.assertEqual(kind, "dock")
+            self.assertEqual(dx * 2 + dw, w, "centered")
+            self.assertLess(dy + dh, h, "floats: there is a margin under it")
+            self.assertGreater(dy, h // 2)
+
+    def test_the_dock_stays_centered_whatever_width_it_asks_for(self):
+        s = self.make()
+        for want in (200, 333, 701):
+            s.dock_w = want
+            x, y, w, h = s.dock_rect()
+            self.assertEqual((x, w), ((s.W - want) // 2, want))
+        s.dock_w = 10 ** 6
+        self.assertLessEqual(s.dock_rect()[2], s.W)
+
+    def test_new_windows_open_between_the_panel_and_the_dock(self):
+        for w, h in ((1280, 720), (1920, 1080), (800, 600)):
+            s = self.make(w, h)
+            for _ in range(8):                               # cascade
+                x, y, ww, wh = s.window_rect()
+                self.assertGreaterEqual(y, s.bar_h)
+                self.assertLessEqual(y + wh, s.dock_top)
+                self.assertGreaterEqual(x, 0)
+                self.assertLessEqual(x + ww, s.W)
+
+    def test_widgets_and_icons_start_below_the_menubar(self):
+        s = self.make()
+        for name in ("icons", "search", "widgets", "widget-clock"):
+            self.assertGreaterEqual(s.core_rect(name)[1][1], s.bar_h, name)
+        icons = s.core_rect("icons")[1]
+        self.assertLessEqual(icons[1] + icons[3], s.dock_top)
+
+    def test_accent_is_windows_blue_and_no_muddy_navy_is_left_in_the_interface(self):
+        from kos import shell
+        self.assertEqual(shell.ACCENT, "#0078d4")
+        for path in list((SYSTEM_DIR).glob("*/app.js")) + [SDK_JS / "gfx.js"]:
+            text = path.read_text().lower()
+            for navy in ("#3b63d6", "#27449c", "#10173f", "#0c1434", "#080826"):
+                self.assertFalse(navy in text, f"{path.parent.name}/{path.name} still uses {navy}")
+        self.assertIn("#0078d4", (SDK_JS / "gfx.js").read_text().lower())
+
+    def test_the_menubar_and_dock_ask_only_for_what_they_need(self):
+        import json as _j
+        menubar = _j.loads((SYSTEM_DIR / "menubar" / "manifest.json").read_text())
+        dock = _j.loads((SYSTEM_DIR / "dock" / "manifest.json").read_text())
+        self.assertEqual(set(menubar["permissions"]), {"system", "ticks"})
+        self.assertEqual(set(dock["permissions"]), {"system", "shell"})    # shell: to size itself, nothing else
+
+    def test_the_dock_can_resize_only_with_the_shell_permission(self):
+        s = self.make()
+        a, b = socket.socketpair()
+        from kos.shell import Layer
+        dock = Layer(id="d1", name="dock", kind="dock", channel=Channel(a), mode="graphical",
+                     rect=list(s.core_rect("dock")[1]), shell=False, system=True)
+        s.layers["d1"] = dock
+        s._on_request(dock, {"cmd": "request", "action": "resize", "w": 400})
+        self.assertNotEqual(dock.rect[2], 400)               # refused: no shell permission
+        dock.shell = True
+        s._on_request(dock, {"cmd": "request", "action": "resize", "w": 400})
+        self.assertEqual((dock.rect[0], dock.rect[2]), ((s.W - 400) // 2, 400))
+        a.close()
+        b.close()
+
+    def test_text_windows_use_the_mono_font_and_the_hit_rows_match_the_drawn_rows(self):
+        s = self.make()
+        a, b = socket.socketpair()
+        from kos.shell import Layer
+        win = Layer(id="w1", name="files", kind="window", channel=Channel(a), mode="tui", rect=[100, 100, 600, 400], z=21)
+        s.layers["w1"] = win
+        sc, cols, rows, pad = s.tui_metrics(win)
+        cx, cy, _, _ = s.content_rect(win)
+        for row in (0, 1, 5):
+            y = cy + pad + row * 12 * sc + 3                 # inside the drawn row `row`
+            self.assertEqual(s._local(win, cx + pad + 6 * sc * 3 + 1, y), (3, row))
+        a.close()
+        b.close()
+
+
+class TestNativeDesktopKit(unittest.TestCase):
+    """The Linux kit (native-desktop/): scripts parse, dry-runs change nothing, apply/revert are exact."""
+
+    KIT = Path(__file__).resolve().parent.parent / "native-desktop"
+
+    def setUp(self):
+        import shutil
+        import subprocess
+        if not shutil.which("bash"):
+            self.skipTest("no bash")
+        self.sp = subprocess
+        self.home = tempfile.mkdtemp(prefix="kos-home-")
+        self.env = {"PATH": os.environ["PATH"], "HOME": self.home, "DISPLAY": ":0", "XDG_SESSION_TYPE": "x11"}
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def sh(self, *argv, env=None, check=False):
+        return self.sp.run(["bash", *map(str, argv)], capture_output=True, text=True, env={**self.env, **(env or {})}, timeout=60)
+
+    def files(self):
+        return sorted(str(p.relative_to(self.home)) for p in Path(self.home).rglob("*") if p.is_file())
+
+    def test_scripts_parse(self):
+        for s in ("install.sh", "bin/kos-desktop"):
+            r = self.sp.run(["bash", "-n", str(self.KIT / s)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_every_config_uses_the_windows_blue_accent(self):
+        for rel in ("polybar/config.ini", "rofi/kos.rasi", "gtk-3.0/gtk.css", "gtk-4.0/gtk.css"):
+            self.assertIn("0078d4", (self.KIT / "config" / rel).read_text().lower(), rel)
+        self.assertIn("alignment='center'", (self.KIT / "config/plank/dock.dconf").read_text())
+
+    def test_dry_run_installs_nothing_and_says_what_it_would_do(self):
+        r = self.sh(self.KIT / "install.sh", "--dry-run", "--no-packages")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would run", r.stdout)
+        self.assertEqual(self.files(), [])
+        r = self.sh(self.KIT / "bin/kos-desktop", "apply", "--autostart", env={"KOS_DRY_RUN": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.files(), [])
+
+    def test_apply_is_idempotent_and_revert_restores_exactly_what_was_there(self):
+        old = Path(self.home, ".config/polybar/config.ini")
+        old.parent.mkdir(parents=True)
+        old.write_text("MY OLD CONFIG\n")
+        before = self.files()
+        for flags in (["--autostart"], ["--autostart"], []):
+            r = self.sh(self.KIT / "bin/kos-desktop", "apply", *flags)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("0078d4", old.read_text().lower())
+        self.assertTrue(Path(self.home, ".config/picom/picom.conf").exists())
+        self.assertTrue(Path(self.home, ".config/autostart/kos-desktop.desktop").exists())
+        r = self.sh(self.KIT / "bin/kos-desktop", "revert")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(old.read_text(), "MY OLD CONFIG\n")
+        self.assertEqual(self.files(), before)               # everything apply added is gone
+        again = self.sh(self.KIT / "bin/kos-desktop", "revert")
+        self.assertNotEqual(again.returncode, 0)              # nothing left to revert: refuses, harmlessly
+
+    def test_it_refuses_to_run_where_it_cannot_work(self):
+        r = self.sh(self.KIT / "bin/kos-desktop", "apply", env={"XDG_SESSION_TYPE": "wayland"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Wayland", r.stderr)
+        r = self.sh(self.KIT / "bin/kos-desktop", "reload", env={"DISPLAY": ""})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.files(), [])
+        r = self.sh(self.KIT / "bin/kos-desktop", "preview", "abc")
+        self.assertNotEqual(r.returncode, 0)
+        r = self.sh(self.KIT / "bin/kos-desktop", "nonsense")
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_the_scripts_never_use_sudo_outside_the_package_step_or_touch_etc(self):
+        tool = (self.KIT / "bin/kos-desktop").read_text()
+        self.assertNotIn("sudo", tool)
+        self.assertNotIn("/etc/", tool.replace("# Everything is per-user (nothing under /etc, no root)", ""))
+        self.assertNotIn("rm -rf /", tool)
+
+
+class TestCompositorEndToEnd(Env):
+    """The real thing: every interface app as a sandboxed npm process, composited headless.
+    Slow (starts ~11 Node processes), so it is one test that checks a lot."""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        if not shutil.which("node") or not shutil.which("npm"):
+            self.skipTest("needs node and npm")
+        self.shell = None
+
+    def tearDown(self):
+        from kos.registry import Registry
+        if self.shell:
+            self.shell.close()
+        for inst in Registry(self.paths).list():
+            try:
+                os.kill(inst.broker_pid, 15)
+            except (ProcessLookupError, TypeError, PermissionError):
+                pass
+        import time as _t
+        _t.sleep(1.0)
+        super().tearDown()
+
+    def pump(self, secs):
+        import time as _t
+        end = _t.monotonic() + secs
+        while _t.monotonic() < end:
+            self.shell.pump(0.1)
+
+    def ops_text(self, layer):
+        return [op[3] for op in layer.ops if op and op[0] in ("stext", "text")]
+
+    def test_the_interface_boots_draws_and_runs_a_code_line_from_search(self):
+        from kos.desktop import SYSTEM_APPS, boot_core, make_shell
+        from kos.permit import PermitStore
+        from kos.shell import CORE
+        authority = self.authority(*[PW] * 80)
+        store = AppStore(self.paths)
+        for name in SYSTEM_APPS:
+            out = Path(self.tmp.name) / f"{name}.kapp"
+            pack(SYSTEM_DIR / name, out)
+            store.install(out, authority)
+            PermitStore(self.paths).grant(name)
+        core = boot_core(self.paths, authority, devices=())
+        self.assertEqual(set(core), set(CORE))
+        devices = ScriptedDevices()
+        self.shell = make_shell(self.paths, authority, HeadlessBackend(960, 540), devices, keep_prompter=True, preboot=())
+        for inst in core.values():
+            self.shell.add_core(inst)
+        self.pump(5)
+        s, by = self.shell, {l.name: l for l in self.shell.layers.values()}
+
+        # the top panel and the dock are where the design says, and drew real content
+        self.assertEqual(by["menubar"].rect[:3], [0, 0, 960])
+        self.assertIn("KOS", self.ops_text(by["menubar"]))
+        dock = by["dock"]
+        self.assertEqual(dock.rect[0] * 2 + dock.rect[2], 960, "the dock is centered")
+        self.assertEqual(dock.rect, s.dock_rect(), "and was sized by its own request")
+        self.assertGreater(dock.rect[2], 100)
+        self.assertTrue(any(op[0] == "rect" for op in dock.ops))
+        labels = " ".join(self.ops_text(by["icons"]))
+        for app_name in ("Files", "Terminal", "Settings"):
+            self.assertIn(app_name, labels)
+        self.assertNotIn("Menubar", labels)                  # the interface apps are not offered as things to launch
+
+        # glass and the accent are on screen
+        fb = s.compose()
+        wall = s._wallpaper()
+        x, y, w, h = dock.rect
+        self.assertNotEqual(bytes(fb.buf[(y + h // 2) * 960 * 4 + (x + 4) * 4:][:16]),
+                            bytes(wall.buf[(y + h // 2) * 960 * 4 + (x + 4) * 4:][:16]), "the dock is drawn over the wallpaper")
+
+        # search: type code, the first result is "RUN: ...", Enter opens the terminal with the line
+        for ch in "print(1)":
+            devices.push({"type": "key", "key": ch})
+        self.pump(2)
+        self.assertTrue(any(t == "RUN: print(1)" for t in self.ops_text(by["search"])), self.ops_text(by["search"]))
+        devices.push({"type": "key", "key": "enter"})
+        self.pump(12)
+        terms = [l for l in s.layers.values() if l.kind == "window" and l.name == "terminal"]
+        self.assertEqual(len(terms), 1, s.log)
+        screen = "\n".join(terms[0].screen["lines"]) if terms[0].screen else ""
+        self.assertRegex(screen, r"(?m)^\s*1\s*$", screen)   # print(1) printed 1, run sandboxed

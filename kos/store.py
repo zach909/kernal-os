@@ -63,8 +63,8 @@ class AppStore:
             raise KAppError(f"invalid app name {name!r}")
         return self.paths.apps / f"{name}.kapp", self.paths.apps / f"{name}.seal"
 
-    def install(self, src: Path, authority: Authority, origin: Optional[dict] = None) -> Manifest:
-        return self._install(src, authority, update=False, origin=origin)
+    def install(self, src: Path, authority: Authority, origin: Optional[dict] = None, grant=None) -> Manifest:
+        return self._install(src, authority, update=False, origin=origin, grant=grant)
 
     def update(self, src: Path, authority: Authority,
                origin: Optional[dict] = None) -> tuple[str, Manifest]:
@@ -109,7 +109,7 @@ class AppStore:
         return results
 
     def _install(self, src: Path, authority: Authority, update: bool,
-                 origin: Optional[dict] = None) -> Manifest:
+                 origin: Optional[dict] = None, grant=None) -> Manifest:
         # Validate first so we never ask for a password for garbage.
         app = KApp.from_file(src)
         m = app.manifest
@@ -125,8 +125,13 @@ class AppStore:
             qpath = qdir / f"{m.name}-{int(time.time())}.kapp"
             atomic_write(qpath, app.data)
             raise VirusFoundError(m.name, result, qpath)
-        with authority.authorize("app.update" if update else "app.install", m.name) as grant:
-            seal = compute_seal(grant.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
+        if grant is not None:                  # typed already, as part of a batch (kos desktop install)
+            grant.check("app.install", m.name)
+            with grant:
+                seal = compute_seal(grant.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
+        else:
+            with authority.authorize("app.update" if update else "app.install", m.name) as g:
+                seal = compute_seal(g.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
         self.paths.ensure()
         kapp_path, seal_path = self._files(m.name)
         atomic_write(kapp_path, app.data)

@@ -1,0 +1,9 @@
+{
+  "name": "dock",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system", "shell"],
+  "description": "The floating dock: your pinned apps and the ones that are running, centered at the bottom."
+}

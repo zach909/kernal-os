@@ -69,14 +69,16 @@ def list_apps(paths: Paths) -> list[dict]:
     permits = PermitStore(paths)
     out = []
     for a in AppStore(paths).installed()[:MAX_LISTED]:
-        desc, modes = "", ["tui"]
+        desc, modes, commands = "", ["tui"], []
         try:
             m = KApp.from_file(paths.apps / f"{a.name}.kapp").manifest
             desc, modes = m.description, list(m.modes)
+            commands = [{"id": c.id, "title": clean_text(c.title, 70), "keywords": list(c.keywords)}
+                        for c in m.commands]
         except (KAppError, OSError):
             pass
         out.append({"name": a.name, "version": a.version,
-                    "description": clean_text(desc, 200), "modes": modes,
+                    "description": clean_text(desc, 200), "modes": modes, "commands": commands,
                     "permitted": permits.is_permitted(a.name)})
     return out
 
@@ -101,15 +103,19 @@ def wait_running(registry: Registry, instance_id: str, timeout: float = 5.0) -> 
 
 def open_background(paths: Paths, authority: Authority, name: str, mode: str = "tui", *,
                     spawner: Callable = spawn, release: Optional[Callable[[], None]] = None,
-                    wait: float = 5.0) -> Instance:
+                    wait: float = 5.0, grant=None) -> Instance:
     """Start an app under a broker and return its instance. The one code path
     for ``kos open`` and for an app's ``open`` request: permit check, then the
     password, then the seal check, then the sandboxed launch."""
     PermitStore(paths).require(name)      # refused before we even ask for the password
     store = AppStore(paths)
     action = "app.graphical" if mode == "graphical" else "app.open"
-    with authority.authorize(action, name) as grant:
-        app = store.load_verified(name, grant)
+    if grant is not None:                  # typed already, as part of a batch (see desktop.boot_core)
+        with grant:
+            app = store.load_verified(name, grant)
+    else:
+        with authority.authorize(action, name) as grant:
+            app = store.load_verified(name, grant)
     policy = authorize_app_action(name, app, mode, authority, authority.prompter)
     if release:
         release()                          # e.g. close the TTY before forking the broker
@@ -123,7 +129,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
                     log_path=str(paths.logs / f"{inst_id}.log"), started=time.time(),
                     system="system" in app.manifest.permissions,
-                    ticks="ticks" in app.manifest.permissions)
+                    ticks="ticks" in app.manifest.permissions,
+                    shell="shell" in app.manifest.permissions)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)

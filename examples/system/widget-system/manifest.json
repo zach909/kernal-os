@@ -1,0 +1,9 @@
+{
+  "name": "widget-system",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system", "ticks"],
+  "description": "System widget: CPU, memory, load and uptime, live."
+}

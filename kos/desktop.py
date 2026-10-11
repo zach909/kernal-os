@@ -24,7 +24,8 @@ from typing import Callable
 from .kapp import KAppError
 from .registry import RegistryError
 
-SYSTEM_APPS = ("taskbar", "app-library", "files", "editor", "backup", "settings", "security",
+SYSTEM_APPS = ("wallpaper", "icons", "search", "widgets", "widget-clock", "widget-calendar",
+               "widget-network", "widget-system", "menubar", "dock", "taskbar", "app-library", "files", "editor", "backup", "settings", "security",
                "terminal", "processes", "memory", "filesystem", "devices", "network", "isolation",
                "health", "resources", "updates")
 DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library
@@ -62,3 +63,67 @@ class Desktop:
             if target == self.home:
                 return int(out.get("exit_code", 0))
             target = self.home
+
+
+# ---------------------------------------------------------------------------- the shell
+def boot_core(paths, authority, *, mode: str = "graphical", devices: tuple = ("mouse", "keyboard")) -> dict:
+    """Make sure the desktop's own apps are running. Anything missing is started with
+    ONE password that names every app (``authorize_batch``): the prompt reads
+    "Password to start the desktop (desktop, taskbar, ...)". Returns {name: Instance}."""
+    from .kapp import KAppError
+    from .registry import Registry
+    from .shell import CORE
+    from .store import AppStore
+    from .system import open_background
+
+    running = {i.name: i for i in Registry(paths).list() if i.status == "running" and i.mode == mode}
+    need = [n for n in CORE if n not in running]
+    missing = [n for n in need if n not in {a.name for a in AppStore(paths).installed()}]
+    if missing:
+        raise KAppError(f"{', '.join(missing)} not installed (run: kos desktop install)")
+    action = "app.graphical" if mode == "graphical" else "app.open"
+    items = [(action, n) for n in need] + [(f"device.{d}", "desktop") for d in devices]
+    if items:
+        label = f"start the desktop ({', '.join(need)})" if need else "boot the desktop"
+        label += f" and boot the {' and '.join(devices)}" if devices else ""
+        grants = authority.authorize_batch(items, label)
+        for name, grant in zip(need, grants):
+            running[name] = open_background(paths, authority, name, mode, grant=grant)
+        for grant in grants[len(need):]:
+            grant.close()
+    return running
+
+
+def make_shell(paths, authority, backend, devices, **kw):
+    """A :class:`kos.shell.Shell` wired to this machine's apps."""
+    from .shell import Shell
+    from .store import AppStore
+    from .system import close_instance, list_apps, open_background
+    from .kapp import KApp
+
+    def modes_of(name: str) -> list[str]:
+        return next((a["modes"] for a in list_apps(paths) if a["name"] == name), [])
+
+    def commands_of(name: str) -> dict:
+        try:
+            m = KApp.from_file(paths.apps / f"{name}.kapp").manifest
+        except Exception:
+            return {}
+        return {c.id: c.line for c in m.commands}
+
+    holder: dict = {}
+
+    def opener(name: str, mode: str):
+        from .registry import Registry
+        for i in Registry(paths).list():                    # already running (e.g. opened earlier): attach, no password
+            if i.name == name and i.mode == mode and i.status == "running":
+                return i
+        return open_background(paths, holder["shell"].authority, name, mode)
+
+    def closer(instance_id: str) -> None:
+        close_instance(paths, holder["shell"].authority, instance_id)
+
+    shell = Shell(paths, authority, backend, devices, opener=opener, closer=closer,
+                  modes_of=modes_of, commands_of=commands_of, **kw)
+    holder["shell"] = shell
+    return shell

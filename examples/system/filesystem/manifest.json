@@ -3,7 +3,39 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system"],
-  "description": "File systems and permissions: mounts, capacity, who may read/write/run what, safe changes."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system"
+  ],
+  "description": "File systems and permissions: mounts, capacity, who may read/write/run what, safe changes.",
+  "commands": [
+    {
+      "id": "mounts",
+      "title": "Show disks and how full they are",
+      "keywords": [
+        "storage",
+        "space",
+        "capacity"
+      ]
+    },
+    {
+      "id": "permissions",
+      "title": "Check who may read or write a file",
+      "keywords": [
+        "chmod",
+        "access",
+        "owner"
+      ]
+    },
+    {
+      "id": "mkdir",
+      "title": "Make a new folder",
+      "keywords": [
+        "directory",
+        "create"
+      ]
+    }
+  ]
 }

@@ -1,0 +1,9 @@
+{
+  "name": "widgets",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["shell"],
+  "description": "The widget handler: show, hide and reorder the desktop widgets."
+}

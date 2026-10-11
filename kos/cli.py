@@ -16,8 +16,8 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
-    kos desktop install             pack, scan, install + permit the taskbar and App Library
-    kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
+    kos desktop install             pack, scan, install + permit every interface app (one password)
+    kos boot desktop [--classic]    the desktop: a compositor over separate apps (menubar, dock, icons, search, widgets)
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
     kos activity                    one feed: open apps + recent password decisions
@@ -306,11 +306,13 @@ def _ensure_open(paths: Paths, name: str, mode: str) -> str:
 
 
 def cmd_boot(args, paths: Paths) -> int:
-    """`kos boot desktop`: the desktop is just two apps - the taskbar and the
-    App Library - and a way of moving between running apps (kos/desktop.py).
-    There is no windowing system; the taskbar *is* the home screen."""
+    """`kos boot desktop`: the compositing desktop (kos/shell.py) - wallpaper, widgets, taskbar
+    and windows, each a separate app, drawn by code. ``--classic`` is the older mode that
+    shows one app at a time."""
     if args.what != "desktop":
         raise KAppError("usage: kos boot desktop")
+    if not args.classic:
+        return _boot_shell(args, paths)
     from .desktop import Desktop, DesktopError
     from .registry import Registry
 
@@ -338,7 +340,72 @@ def cmd_boot(args, paths: Paths) -> int:
         raise KAppError(str(e)) from None
 
 
+def _boot_shell(args, paths: Paths) -> int:
+    from .desktop import boot_core, make_shell
+    from .devices import EvdevDevices, TerminalDevices
+    from .display import FbdevBackend, TerminalBackend
+    from .term import RawTerminal
+
+    authority, prompter = _authority(paths)
+    core = boot_core(paths, authority)            # ONE password: the apps and the devices
+    prompter.close()
+    with RawTerminal() as term:
+        if (os.path.exists("/dev/fb0") and _on_console_vt() and os.environ.get("KOS_DISPLAY") != "terminal"):
+            backend = FbdevBackend(tty_fd=0)
+            devices = EvdevDevices(backend.width, backend.height)
+        else:
+            cols, rows = term.size()
+            backend = TerminalBackend(1, cols, rows)
+            devices = TerminalDevices(term, cell_to_pixels=True)
+        shell = make_shell(paths, authority, backend, devices)
+        try:
+            for inst in core.values():
+                shell.add_core(inst)
+            shell.run()
+        finally:
+            devices.close()
+            backend.close()
+    return 0
+
+
+def _shot(args, paths: Paths) -> int:
+    """`kos desktop shot OUT.png`: boot the desktop headless, optionally open apps and type
+    into search, and save what it looks like. Useful for pictures and for testing."""
+    import time as _t
+    from . import png
+    from .desktop import boot_core, make_shell
+    from .devices import ScriptedDevices
+    from .display import HeadlessBackend
+
+    w, _, h = args.size.partition("x")
+    authority, prompter = _authority(paths)
+    core = boot_core(paths, authority, devices=())
+    backend, devices = HeadlessBackend(int(w), int(h)), ScriptedDevices()
+    shell = make_shell(paths, authority, backend, devices, keep_prompter=True, preboot=())
+    try:
+        for inst in core.values():
+            shell.add_core(inst)
+        for name in [n for n in (args.open or "").split(",") if n]:
+            shell.open_window(name)
+        end = _t.monotonic() + args.wait
+        while _t.monotonic() < end:
+            shell.pump(0.1)                                  # let the apps draw; paint only once, at the end
+        for ch in args.search or "":
+            devices.push({"type": "key", "key": ch})
+        end = _t.monotonic() + 1.5
+        while _t.monotonic() < end:
+            shell.pump(0.1)
+        png.save(shell.compose(), args.out)
+    finally:
+        shell.close()
+        prompter.close()
+    print(f"saved {args.out} ({w}x{h})")
+    return 0
+
+
 def cmd_desktop(args, paths: Paths) -> int:
+    if args.desktop_cmd == "shot":
+        return _shot(args, paths)
     """`kos desktop install`: pack, scan, install and permit the two apps the
     desktop is made of. Same gates as any other app: each install is scanned
     first and asks for the password; permitting asks once more."""
@@ -349,15 +416,25 @@ def cmd_desktop(args, paths: Paths) -> int:
     src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "examples" / "system"
     authority, _ = _authority(paths)
     store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
+    need = [n for n in SYSTEM_APPS if n not in have]
+    for n in SYSTEM_APPS:
+        if n in have:
+            print(f"{n}: already installed")
     with tempfile.TemporaryDirectory() as tmp:
-        for name in SYSTEM_APPS:
-            if name in have:
-                print(f"{name}: already installed")
-                continue
-            kapp = Path(tmp) / f"{name}.kapp"
-            pack(src / name, kapp)
-            m = store.install(kapp, authority)
-            print(f"installed {m.name} {m.version}")
+        kapps = {}
+        for name in need:
+            kapps[name] = Path(tmp) / f"{name}.kapp"
+            pack(src / name, kapps[name])
+        if need:   # ONE password installs them all (each is scanned first; the prompt names the batch)
+            from .scan import scan_bytes
+            for name, kapp in kapps.items():
+                if not scan_bytes(kapp.read_bytes(), name).clean:
+                    raise KAppError(f"{name} was flagged by the security scan; nothing was installed")
+            grants = authority.authorize_batch([("app.install", n) for n in need],
+                                               f"install {len(need)} desktop apps")
+            for (name, kapp), grant in zip(kapps.items(), grants):
+                m = store.install(kapp, authority, origin={"source": "built-in", "location": str(src / name)}, grant=grant)
+                print(f"installed {m.name} {m.version}")
     permits = PermitStore(paths)
     need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
     if need:
@@ -906,10 +983,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s = sub.add_parser("boot", help="boot the desktop: the taskbar + App Library, made of apps")
     s.add_argument("what", choices=["desktop"])
-    s.add_argument("--graphical", action="store_true", help="draw the desktop graphically")
-    s = sub.add_parser("desktop", help="set up the desktop apps")
-    s.add_argument("desktop_cmd", choices=["install"])
-    s.add_argument("--from", dest="src", help="directory holding taskbar/ and app-library/")
+    s.add_argument("--graphical", action="store_true", help="(classic mode) draw the desktop graphically")
+    s.add_argument("--classic", action="store_true", help="the older one-app-at-a-time desktop")
+    s = sub.add_parser("desktop", help="set up the desktop apps, or take a screenshot of it")
+    s.add_argument("desktop_cmd", choices=["install", "shot"])
+    s.add_argument("out", nargs="?", default="desktop.png", help="shot: the PNG to write")
+    s.add_argument("--from", dest="src", help="install: directory holding the apps (examples/system)")
+    s.add_argument("--size", default="960x540", help="shot: screen size, e.g. 1280x720")
+    s.add_argument("--open", help="shot: comma-separated apps to open as windows")
+    s.add_argument("--search", help="shot: text to type into the desktop search")
+    s.add_argument("--wait", type=float, default=2.5, help="shot: seconds to let apps draw")
     s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
     s.add_argument("path")
     s = sub.add_parser("cat", help="view a file, including one inside a zip")

@@ -3,7 +3,43 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system", "ticks"],
-  "description": "Networking: interfaces, protocols, connections, local IPC sockets, and an internet check."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system",
+    "ticks"
+  ],
+  "description": "Networking: interfaces, protocols, connections, local IPC sockets, and an internet check.",
+  "commands": [
+    {
+      "id": "internet",
+      "title": "Check the internet connection",
+      "keywords": [
+        "online",
+        "connected",
+        "ping",
+        "wifi"
+      ]
+    },
+    {
+      "id": "connections",
+      "title": "Show open network connections",
+      "keywords": [
+        "tcp",
+        "sockets",
+        "ports",
+        "listening"
+      ]
+    },
+    {
+      "id": "interfaces",
+      "title": "Show network interfaces and speeds",
+      "keywords": [
+        "ethernet",
+        "ip",
+        "address"
+      ]
+    }
+  ]
 }

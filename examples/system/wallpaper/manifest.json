@@ -1,0 +1,9 @@
+{
+  "name": "wallpaper",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": [],
+  "description": "The background: a wallpaper drawn entirely by code."
+}

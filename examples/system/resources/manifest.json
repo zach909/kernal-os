@@ -3,7 +3,24 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["tui"],
-  "permissions": ["system", "ticks"],
-  "description": "Resource accounting: CPU, memory and storage use, per-app consumption, priorities."
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system",
+    "ticks"
+  ],
+  "description": "Resource accounting: CPU, memory and storage use, per-app consumption, priorities.",
+  "commands": [
+    {
+      "id": "usage",
+      "title": "See what each app is costing",
+      "keywords": [
+        "cpu",
+        "memory",
+        "accounting",
+        "priority"
+      ]
+    }
+  ]
 }
