@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import backup as backups_mod
+from . import loader
+from . import fschange, osinfo, proctl
 from . import cache, sysinfo
 from .admin import AdminError, AdminKeyboard, write_file
 from .auth import AuthError, Authority, AuthorizationDenied
@@ -112,15 +114,16 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     if release:
         release()                          # e.g. close the TTY before forking the broker
     paths.ensure()
-    cache_dir = cache.alloc(paths, name)
-    policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
+    cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime == "npm")
+    loader.apply_to_policy(policy, app, cache_dir)
     registry = Registry(paths)
     registry.prune()
     inst_id = registry.new_id(name)
     inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
                     sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
                     log_path=str(paths.logs / f"{inst_id}.log"), started=time.time(),
-                    system="system" in app.manifest.permissions)
+                    system="system" in app.manifest.permissions,
+                    ticks="ticks" in app.manifest.permissions)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
@@ -214,6 +217,24 @@ class SystemBridge:
                 url = Offsite(self.paths).set_remote(authority, req["url"])
                 result(True, f"off-site repository: {url}")
                 return None
+            if action == "sys":
+                reply({"cmd": "sys", "kind": req["kind"], "data": osinfo.KINDS[req["kind"]](self.paths, req["arg"])})
+                return None
+            if action == "signal":
+                result(True, proctl.signal_process(authority, req["pid"], req["sig"]))
+                return None
+            if action == "renice":
+                result(True, proctl.renice(authority, req["pid"], req["nice"]))
+                return None
+            if action == "fschange":
+                result(True, fschange.change(self.paths, authority, AdminKeyboard(self.paths), req["op"],
+                                             req["path"], to=req.get("to"), mode=req.get("mode")))
+                return None
+            if action == "netcheck":
+                authority.authorize("net.check", "1.1.1.1:443").close()
+                ok, detail = osinfo.net_check()
+                result(ok, detail)
+                return None
             if action == "push":
                 from .offsite import Offsite
                 self._text(reply, action, req["backup"],
@@ -252,7 +273,7 @@ class SystemBridge:
                 result(True, f"switching to {inst.id}", id=inst.id)
                 return ("instance", inst.id)
         except (AuthorizationDenied, AuthError, PermitError, KAppError, SandboxError,
-                RegistryError, TamperedError, VFSError, AdminError, OSError) as e:
+                RegistryError, TamperedError, VFSError, AdminError, OSError, FileNotFoundError) as e:
             result(False, str(e))
         return None
 

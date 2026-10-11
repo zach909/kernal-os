@@ -212,8 +212,8 @@ def cmd_run(args, paths: Paths) -> int:
         send_app(sock, app, mode)
         proc = None
     else:
-        cache_dir = cache.alloc(paths, name)
-        policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
+        cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime == "npm")
+        loader.apply_to_policy(policy, app, cache_dir)
         sock, child = socket.socketpair()
         proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir), policy, log_path)
         child.close()
@@ -221,7 +221,7 @@ def cmd_run(args, paths: Paths) -> int:
     try:
         bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge)
+                            bridge=bridge, ticks="ticks" in app.manifest.permissions)
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -263,7 +263,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
     bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True, bridge=bridge, **session_kwargs)
+                        detach_on_interrupt=True, bridge=bridge, ticks=inst.ticks, **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:

@@ -1,9 +1,14 @@
 {
   "name": "app-library",
   "version": "1.0",
-  "runtime": "python",
-  "entry": "app:main",
-  "modes": ["tui", "graphical"],
-  "permissions": ["system"],
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "tui",
+    "graphical"
+  ],
+  "permissions": [
+    "system"
+  ],
   "description": "Every installed app. Pick one and the OS asks for your password to open it."
 }

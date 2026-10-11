@@ -1,0 +1,9 @@
+{
+  "name": "app-library",
+  "version": "1.0",
+  "private": true,
+  "description": "Every installed app. Pick one and the OS asks for your password to open it.",
+  "scripts": {
+    "start": "\"$KOS_PYTHON\" -I -S -B run.py"
+  }
+}

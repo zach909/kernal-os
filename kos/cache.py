@@ -12,10 +12,15 @@ from pathlib import Path
 from .paths import Paths
 
 
-def alloc(paths: Paths, name: str) -> Path:
-    base = paths.state / "cache"
+def alloc(paths: Paths, name: str, ram: bool = False) -> Path:
+    """A private scratch directory. ``ram=True`` puts it on tmpfs (/dev/shm) so
+    an app that has to be unpacked (npm) never touches the disk."""
+    if ram and os.access("/dev/shm", os.W_OK):
+        base = Path("/dev/shm") / f"kos-{os.getuid()}"
+    else:
+        base = paths.state / "cache"
     base.mkdir(parents=True, exist_ok=True)
-    os.chmod(base, 0o700)
+    os.chmod(base, 0o755 if (ram and os.geteuid() == 0) else 0o700)
     d = base / f"{name}-{secrets.token_hex(4)}"
     d.mkdir(mode=0o700)
     return d

@@ -1,0 +1,9 @@
+{
+  "name": "terminal",
+  "version": "1.0",
+  "private": true,
+  "description": "The line shell as an app: every line is a command, in your own language.",
+  "scripts": {
+    "start": "\"$KOS_PYTHON\" -I -S -B run.py"
+  }
+}

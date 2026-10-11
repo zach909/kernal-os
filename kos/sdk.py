@@ -142,6 +142,21 @@ class App:
     def request_backups(self) -> None:
         self.send({"cmd": "request", "action": "backups"})
 
+    def request_sys(self, kind: str, arg: str = "") -> None:
+        self.send({"cmd": "request", "action": "sys", "kind": kind, "arg": arg})
+
+    def request_signal(self, pid: int, sig: str) -> None:
+        self.send({"cmd": "request", "action": "signal", "pid": pid, "sig": sig})
+
+    def request_renice(self, pid: int, nice: int) -> None:
+        self.send({"cmd": "request", "action": "renice", "pid": pid, "nice": nice})
+
+    def request_fschange(self, op: str, path: str, **extra) -> None:
+        self.send({"cmd": "request", "action": "fschange", "op": op, "path": path, **extra})
+
+    def request_netcheck(self) -> None:
+        self.send({"cmd": "request", "action": "netcheck"})
+
     def request_remote(self, url: str) -> None:
         self.send({"cmd": "request", "action": "remote", "url": url})
 
@@ -162,6 +177,13 @@ class App:
 
     def resource(self, name: str) -> bytes:
         """Read a file from this app's own zip (still never extracted)."""
+        root = os.environ.get("KOS_APP_DIR")
+        if root:                              # npm apps are unpacked read-only into RAM
+            full = os.path.realpath(os.path.join(root, name))
+            if not full.startswith(os.path.realpath(root) + os.sep):
+                raise ValueError("outside the app")
+            with open(full, "rb") as f:
+                return f.read()
         import zipfile
         with zipfile.ZipFile(f"/proc/self/fd/{os.environ['KOS_KAPP_FD']}") as z:
             return z.read(name)

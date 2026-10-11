@@ -1,9 +1,13 @@
 {
   "name": "settings",
   "version": "1.0",
-  "runtime": "python",
-  "entry": "app:main",
-  "modes": ["tui"],
-  "permissions": ["system"],
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system"
+  ],
   "description": "Kernel protections and which apps are permitted to run."
 }

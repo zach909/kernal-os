@@ -1,9 +1,13 @@
 {
   "name": "security",
   "version": "1.0",
-  "runtime": "python",
-  "entry": "app:main",
-  "modes": ["tui"],
-  "permissions": ["system"],
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system"
+  ],
   "description": "Security Center: administrator keyboard, kernel protections, what is owed, scans, audit trail."
 }

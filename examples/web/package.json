@@ -1,0 +1,9 @@
+{
+  "name": "web",
+  "version": "1.0",
+  "private": true,
+  "description": "Text web browser: pages are folders of links you click through; 'run' shows the page",
+  "scripts": {
+    "start": "\"$KOS_PYTHON\" -I -S -B run.py"
+  }
+}

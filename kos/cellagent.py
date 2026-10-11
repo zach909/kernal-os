@@ -59,6 +59,8 @@ def handle(conn: socket.socket, policy: SandboxPolicy):
     if "network" in app.manifest.permissions:
         # Cells have no network device at all; the permission can't be honoured.
         policy.allow_network = False
+    if app.manifest.runtime == "npm":
+        raise ValueError("cells run Python and native apps only: there is no Node.js inside a cell")
     p = loader.plan(app, conn.fileno(), h["mode"])
     return loader.launch(p, policy, log_path=None)
 

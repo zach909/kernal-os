@@ -22,6 +22,8 @@ OS -> app
     {"cmd": "info", "admin": str, "kernel": [str], "owed": [str], "audit": [str], "permits": [str]}
     {"cmd": "listing", "path": str, "entries": [{name, kind: dir|zip|file}]}
     {"cmd": "text", "action": str, "title": str, "lines": [str], "lossy": bool?}
+    {"cmd": "sys", "kind": str, "data": object}
+    {"cmd": "tick", "t": epoch}                                (apps with the 'ticks' permission, 1/s)
     {"cmd": "backups", "backups": [{name, path, size, t, files}], "remote": str}
     {"cmd": "quit"}
 
@@ -47,6 +49,11 @@ app -> OS
     {"cmd": "request", "action": "backup", "path": PATH}       back a file/folder up (password)
     {"cmd": "request", "action": "backups"}                    list backups
     {"cmd": "request", "action": "push", "backup": ZIP}        push a backup to the user's OWN private GitHub (password)
+    {"cmd": "request", "action": "sys", "kind": KIND, "arg": str?}   read-only OS facts (see osinfo.KINDS)
+    {"cmd": "request", "action": "signal", "pid": N, "sig": "TERM"|"KILL"|"STOP"|"CONT"}   (password)
+    {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
+    {"cmd": "request", "action": "fschange", "op": "mkdir"|"trash"|"rename"|"chmod", "path": P, ...}   (admin keyboard + password)
+    {"cmd": "request", "action": "netcheck"}                   test the internet (password)
     {"cmd": "request", "action": "remote", "url": URL}         set that GitHub repository (password; github.com only)
     {"cmd": "request", "action": "restore", "backup": ZIP, "member": PATH, "to": PATH}   guarded write
     {"cmd": "exit", "code": int}
@@ -146,6 +153,39 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "line", "text": clean_text(msg.get("text", ""), 500)}
     if action == "backups":
         return {"cmd": "request", "action": "backups"}
+    if action == "sys":
+        from .osinfo import KINDS
+        kind = msg.get("kind")
+        if kind not in KINDS:
+            raise ProtocolError(f"sys.kind must be one of {sorted(KINDS)}")
+        arg = msg.get("arg", "")
+        if not isinstance(arg, str) or len(arg) > 1024 or "\x00" in arg:
+            raise ProtocolError("sys.arg must be a short string")
+        return {"cmd": "request", "action": "sys", "kind": kind, "arg": arg}
+    if action in ("signal", "renice"):
+        pid = msg.get("pid")
+        if isinstance(pid, bool) or not isinstance(pid, int) or not 2 <= pid <= 4194304:
+            raise ProtocolError("pid must be an integer")
+        if action == "signal":
+            if msg.get("sig") not in ("TERM", "KILL", "STOP", "CONT"):
+                raise ProtocolError("sig must be TERM, KILL, STOP or CONT")
+            return {"cmd": "request", "action": "signal", "pid": pid, "sig": msg["sig"]}
+        return {"cmd": "request", "action": "renice", "pid": pid, "nice": _int(msg.get("nice"), 0, 19)}
+    if action == "netcheck":
+        return {"cmd": "request", "action": "netcheck"}
+    if action == "fschange":
+        op = msg.get("op")
+        if op not in ("mkdir", "trash", "rename", "chmod"):
+            raise ProtocolError("fschange.op must be mkdir, trash, rename or chmod")
+        out = {"cmd": "request", "action": "fschange", "op": op, "path": _path(msg.get("path"))}
+        if op == "rename":
+            out["to"] = _path(msg.get("to"))
+        if op == "chmod":
+            mode = msg.get("mode")
+            if not isinstance(mode, str) or not re.match(r"^[0-7]{3,4}$", mode):
+                raise ProtocolError("fschange.mode must be octal like 644")
+            out["mode"] = mode
+        return out
     if action == "remote":
         url = msg.get("url")
         if not isinstance(url, str) or not url or len(url) > 300 or "\x00" in url:

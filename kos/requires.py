@@ -42,6 +42,7 @@ RULES: dict[str, Rule] = {
     "admin.keyboard": Rule(before=("kernel",)),
     "file.write": Rule(before=("admin.keyboard",), after=("scan", "optimize")),
     "backup.create": Rule(after=("scan",)),
+    "file.change": Rule(before=("admin.keyboard",)),
 }
 
 

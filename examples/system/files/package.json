@@ -1,0 +1,9 @@
+{
+  "name": "files",
+  "version": "1.0",
+  "private": true,
+  "description": "File manager: browse folders and zips without extracting; viewing asks for your password.",
+  "scripts": {
+    "start": "\"$KOS_PYTHON\" -I -S -B run.py"
+  }
+}

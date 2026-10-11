@@ -1,0 +1,9 @@
+{
+  "name": "settings",
+  "version": "1.0",
+  "private": true,
+  "description": "Kernel protections and which apps are permitted to run.",
+  "scripts": {
+    "start": "\"$KOS_PYTHON\" -I -S -B run.py"
+  }
+}

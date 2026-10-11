@@ -1,9 +1,13 @@
 {
   "name": "editor",
   "version": "1.0",
-  "runtime": "python",
-  "entry": "app:main",
-  "modes": ["tui"],
-  "permissions": ["system"],
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system"
+  ],
   "description": "File editor. Opening asks for your password; saving is a guarded write (admin keyboard, scan, optimize)."
 }

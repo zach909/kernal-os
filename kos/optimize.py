@@ -108,6 +108,10 @@ def optimize(paths: Paths, authority: Authority, grant: Optional[Grant] = None) 
                 f.unlink()
                 report.quarantine_removed += 1
 
+    # 2b. Forget trash older than the retention window.
+    from .fschange import empty_old_trash
+    report.quarantine_removed += empty_old_trash(paths)
+
     # 3. Prune registry entries for brokers that are already gone.
     report.dead_instances_pruned = Registry(paths).prune()
 

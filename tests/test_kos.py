@@ -55,6 +55,12 @@ class Env(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        shm = Path("/dev/shm") / f"kos-{os.getuid()}"          # empty RAM scratch left by fake spawners
+        for d in shm.glob("*") if shm.exists() else []:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
 
     def authority(self, *answers):
         self.prompter = ScriptedPrompter(answers)
@@ -219,7 +225,15 @@ class TestSandboxedRun(Env):
         self.assertIn(("device.keyboard", "granted"), outcomes)
 
     def test_cell_agent_runs_app(self):
-        app = KApp(self.kapp.read_bytes())
+        """Cells hold Python/native apps only (no Node.js inside a cell VM)."""
+        import shutil
+        src = Path(self.tmp.name) / "hello-py"
+        shutil.copytree(EXAMPLE, src)
+        manifest = json.loads((src / "manifest.json").read_text())
+        manifest.update(runtime="python", entry="app:main")
+        (src / "manifest.json").write_text(json.dumps(manifest))
+        pack(src, Path(self.tmp.name) / "hello-py.kapp")
+        app = KApp((Path(self.tmp.name) / "hello-py.kapp").read_bytes())
         path = os.path.join(self.tmp.name, "agent.sock")
         lst = socket.socket(socket.AF_UNIX)
         lst.bind(path)
@@ -1809,3 +1823,15 @@ class TestEachUserUsesTheirOwnGitHub(AdminEnv):
         root = Path(__file__).resolve().parent.parent
         for f in list((root / "kos").glob("*.py")) + list((root / "examples").rglob("*.py")):
             self.assertNotIn("zach909", f.read_text(), f.name)
+
+
+class TestCellsRefuseNpmApps(Env):
+    def test_an_npm_app_is_refused_inside_a_cell_with_a_clear_reason(self):
+        from kos.cellagent import handle
+        a, b = socket.socketpair()
+        send_app(a, KApp(self.kapp.read_bytes()), "tui")           # hello is an npm app now
+        with self.assertRaises(ValueError) as ctx:
+            handle(b, SandboxPolicy())
+        self.assertIn("no Node.js inside a cell", str(ctx.exception))
+        a.close()
+        b.close()

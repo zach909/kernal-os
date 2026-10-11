@@ -41,10 +41,11 @@ MAX_ENTRIES = 4096
 MAX_UNCOMPRESSED = 1 << 30
 MAX_RATIO = 200
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+NPM_ENTRY_RE = re.compile(r"^(?:npx:[A-Za-z0-9._-]{1,60}|[A-Za-z0-9:_-]{1,40})$")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
-RUNTIMES = {"python", "native"}
+RUNTIMES = {"python", "native", "npm"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network", "system"}
+PERMISSIONS = {"network", "system", "ticks"}
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description"}
 
 
@@ -92,6 +93,8 @@ class Manifest:
         desc = d.get("description", "")
         if not isinstance(desc, str) or len(desc) > 200:
             raise KAppError("description must be a string of at most 200 characters")
+        if d["runtime"] == "npm" and not NPM_ENTRY_RE.match(d["entry"]):
+            raise KAppError("npm entry must be an npm script name (e.g. 'start') or 'npx:TOOL'")
         if d["runtime"] == "python" and not re.match(
                 r"^[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?$", d["entry"]):
             raise KAppError("python entry must look like 'module' or 'module:function'")
@@ -159,6 +162,16 @@ class KApp:
             mod = m.entry.split(":")[0].replace(".", "/")
             if f"{mod}.py" not in self._names and f"{mod}/__init__.py" not in self._names:
                 raise KAppError(f"entry module {m.entry!r} not found in archive")
+        elif m.runtime == "npm":
+            if "package.json" not in self._names:
+                raise KAppError("an npm app needs a package.json")
+            try:
+                pkg = json.loads(self.read("package.json", limit=1 << 20))
+            except ValueError:
+                raise KAppError("package.json is not valid JSON") from None
+            scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
+            if not m.entry.startswith("npx:") and (not isinstance(scripts, dict) or m.entry not in scripts):
+                raise KAppError(f"package.json has no script {m.entry!r}")
         elif m.entry not in self._names:
             raise KAppError(f"entry binary {m.entry!r} not found in archive")
 

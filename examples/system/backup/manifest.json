@@ -1,9 +1,13 @@
 {
   "name": "backup",
   "version": "1.0",
-  "runtime": "python",
-  "entry": "app:main",
-  "modes": ["tui"],
-  "permissions": ["system"],
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system"
+  ],
   "description": "Backups of your documents: back up a file or folder, browse a backup, restore one file."
 }

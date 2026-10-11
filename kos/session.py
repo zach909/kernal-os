@@ -114,7 +114,7 @@ class Session:
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
-                 outcome: Optional[dict] = None):
+                 outcome: Optional[dict] = None, ticks: bool = False):
         self.name, self.mode = name, mode
         self.channel = channel
         self.proc = proc
@@ -127,6 +127,7 @@ class Session:
         self.bridge = bridge
         self.right_click_to = right_click_to
         self.outcome = outcome
+        self.ticks, self._last_tick = ticks, 0.0
         self.switch: Optional[tuple[str, str]] = None
         self.log = log
         self.stop_requested = False
@@ -305,6 +306,9 @@ class Session:
                     self.boot_next_device()
                     continue
                 self.pull_input(0.25, include_app=True)
+                if self.ticks and not self.boot_queue and time.monotonic() - self._last_tick >= 1.0:
+                    self._last_tick = time.monotonic()
+                    self._send({"cmd": "tick", "t": time.time()})
                 # An interrupt that arrives before boot prompts have even started
                 # must still stop us; once boot_queue is empty the drain below finds
                 # it in order via route(), so this only needs to fire here.

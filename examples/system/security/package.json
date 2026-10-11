@@ -1,0 +1,9 @@
+{
+  "name": "security",
+  "version": "1.0",
+  "private": true,
+  "description": "Security Center: administrator keyboard, kernel protections, what is owed, scans, audit trail.",
+  "scripts": {
+    "start": "\"$KOS_PYTHON\" -I -S -B run.py"
+  }
+}
