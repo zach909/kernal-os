@@ -1451,7 +1451,7 @@ class Shell:
                 looks.draw_ring(fb, ctl[self.nav].rect, self.u)
         if not self.modal:
             cur = next((l for l in self.layers.values() if l.kind == "cursor" and l.visible and l.ops), None)
-            if cur is not None and self.cfg["look"] != "terminal":
+            if cur is not None:
                 self._paint_content(fb, cur)
             else:
                 draw_cursor(fb, *self.seats[0].pointer, scale=self.u)

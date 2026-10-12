@@ -39,6 +39,7 @@ app -> OS
         op = ["clear", color] | ["rect", x, y, w, h, color]
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
            | ["stext", x, y, str, color, px, face?]     smooth text, face 0 sans / 1 bold / 2 mono
+           | ["poly", [[x, y], ...], color, alpha?]      smooth (anti-aliased) filled shape, alpha 0-255, up to 64 points
            | ["hit", x, y, w, h, label]                 draws nothing: declares a clickable control, so the
                                                        interface can be listed, tabbed through, or shown as text
         color = "#rrggbb"
@@ -153,6 +154,16 @@ def _op(op: Any) -> list:
         face = _int(op[6], 0, 2) if len(op) == 7 else 0
         return ["stext", _int(op[1]), _int(op[2]), clean_text(op[3], 256), _color(op[4]),
                 _int(op[5], 6, 120) if len(op) >= 6 else 14, face]
+    if kind == "poly" and len(op) in (3, 4):
+        pts = op[1]
+        if not isinstance(pts, list) or not 3 <= len(pts) <= 64:
+            raise ProtocolError("a poly needs 3 to 64 points")
+        clean = []
+        for p in pts:
+            if not (isinstance(p, list) and len(p) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)):
+                raise ProtocolError("poly points are [x, y] numbers")
+            clean.append([round(max(-8192.0, min(8192.0, float(v))), 2) for v in p])
+        return ["poly", clean, _color(op[2]), _int(op[3], 0, 255) if len(op) == 4 else 255]
     if kind == "hit" and len(op) == 6:
         return ["hit", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), clean_text(op[5], 60)]
     raise ProtocolError(f"bad draw op {kind!r}")

@@ -3162,6 +3162,20 @@ class TestLooksAndControls(Env):
         sh._route({"type": "key", "key": "escape"})
         self.assertFalse(sh.stack_open)
 
+    def test_poly_op_is_validated_and_draws_smooth_edges(self):
+        ok = validate_app_message({"cmd": "frame", "ops": [["poly", [[1, 1], [9, 1], [1, 9]], "#ffffff"]]}, "graphical")
+        self.assertEqual(ok["ops"][0][3], 255)
+        for bad in ([["poly", [[1, 1], [2, 2]], "#fff"]], [["poly", [[1, 1], [2, "x"], [3, 3]], "#ffffff"]],
+                    [["poly", [[0, 0]] * 65, "#ffffff"]]):
+            with self.assertRaises(ProtocolError):
+                validate_app_message({"cmd": "frame", "ops": bad}, "graphical")
+        fb = Framebuffer(20, 20)
+        fb.apply([["poly", [[2, 2], [18, 2], [2, 18]], "#ffffff", 255]])
+        self.assertEqual(fb.pixel(4, 4), (255, 255, 255))             # inside
+        self.assertEqual(fb.pixel(17, 17), (0, 0, 0))                 # outside
+        edge = fb.pixel(9, 10)                                         # on the diagonal edge: partly covered, not 0 or 255
+        self.assertTrue(0 < edge[0] < 255, edge)
+
     def test_text_look_draws_boxes_and_labels_and_shows_buttons_as_text(self):
         s = self.make()
         self.layer(s, "files", "window", [100, 80, 400, 200], [["stext", 10, 10, "Hello there", "#ffffff", 14, 0]], title="Files")

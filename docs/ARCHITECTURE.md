@@ -79,7 +79,7 @@ switches to for *devices*; opening an app still always asks.
 `kos boot desktop` runs one `Shell` that owns the screen and the input devices. Each interface part (wallpaper,
 menubar, dock, icons, search, widget handler, widgets) and each window is a **layer** backed by a separate
 sandboxed app instance. Apps send the same schema-checked `frame` ops as any graphical app (`rect`, `line`,
-`text`, and `stext` for smooth type); the shell validates them, rasterizes into a per-layer surface clipped to the
+`text`, `stext` for smooth type, and `poly` for anti-aliased filled shapes - the pointer is drawn with it); the shell validates them, rasterizes into a per-layer surface clipped to the
 layer's rect, and composites by z-order. Glass (frost = downsampled blur, tint, sheen, bevel, shadow, rounded
 corners) is applied by the OS *around* what an app draws, cached per layer and invalidated only when something
 beneath it changes. Window chrome (traffic lights, title bar) is drawn by the OS, so an app cannot fake it.

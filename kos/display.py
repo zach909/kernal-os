@@ -17,6 +17,7 @@ Backends:
 from __future__ import annotations
 
 import fcntl
+import math
 import mmap
 import os
 import struct
@@ -95,6 +96,36 @@ class Framebuffer:
                     if bits & (0x10 >> col):
                         self.rect(gx + col * scale, y + row * scale, scale, scale, color)
 
+    def poly(self, pts: list, color: str, alpha: int = 255) -> None:
+        """An anti-aliased filled polygon (non-zero winding, exact pixel coverage), blended at ``alpha``."""
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        x0, y0 = max(0, int(math.floor(min(xs))) - 1), max(0, int(math.floor(min(ys))) - 1)
+        x1, y1 = min(self.width, int(math.ceil(max(xs))) + 2), min(self.height, int(math.ceil(max(ys))) + 2)
+        w, h = x1 - x0, y1 - y0
+        if w <= 0 or h <= 0:
+            return
+        acc = [0.0] * (w * h + 1)
+        n = len(pts)
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            ttf._accumulate(acc, w, h, a[0] - x0, a[1] - y0, b[0] - x0, b[1] - y0)
+        c = parse_color(color)
+        buf, stride = self.buf, self.width * 4
+        for r in range(h):
+            run, row = 0.0, r * w
+            for col in range(w):
+                run += acc[row + col]
+                cov = min(1.0, abs(run))
+                a = int(cov * alpha + 0.5)
+                if a:
+                    i = (y0 + r) * stride + (x0 + col) * 4
+                    if a >= 255:
+                        buf[i], buf[i + 1], buf[i + 2] = c[0], c[1], c[2]
+                    else:
+                        buf[i] += ((c[0] - buf[i]) * a + 127) // 255
+                        buf[i + 1] += ((c[1] - buf[i + 1]) * a + 127) // 255
+                        buf[i + 2] += ((c[2] - buf[i + 2]) * a + 127) // 255
+
     def stext(self, x: int, y: int, s: str, color: str, px: int, face: int = 0) -> None:
         """Smooth proportional text (0 sans, 1 bold, 2 mono); the pixel font if no TrueType face exists."""
         f = ttf.load(("sans", "bold", "mono")[face])
@@ -117,6 +148,8 @@ class Framebuffer:
                 self.text(op[1], op[2], op[3], parse_color(op[4]), op[5])
             elif kind == "stext":
                 self.stext(op[1], op[2], op[3], op[4], op[5], op[6])
+            elif kind == "poly":
+                self.poly(op[1], op[2], op[3])
             # "hit" declares a control and draws nothing
 
 
@@ -127,12 +160,21 @@ _CURSOR = [
 ]
 
 
-def draw_cursor(fb: Framebuffer, x: int, y: int, scale: int = 1) -> None:
-    black, white = parse_color("#000000"), parse_color("#ffffff")
-    for dy, row in enumerate(_CURSOR):
-        for dx, c in enumerate(row):
-            if c != ".":
-                fb.rect(x + dx * scale, y + dy * scale, scale, scale, black if c == "X" else white)
+# The pointer: straight edges, tip at (0, 0), in 1/20 units. The cursor app draws the same shape.
+ARROW = [(0, 0), (0, 16.5), (4.1, 12.9), (6.9, 19.4), (9.6, 18.2), (6.9, 11.9), (12, 11.7)]
+
+
+def draw_cursor(fb: Framebuffer, x: int, y: int, scale: int = 1, fill: str = "#ffffff", edge: str = "#0b0f16") -> None:
+    """The OS's own pointer (used where no cursor app draws: extra seats, the lock prompt). Smooth edges, a thin dark
+    outline that reads on any background, and a soft shadow."""
+    k = scale * 0.95
+    pts = [(x + px * k, y + py * k) for px, py in ARROW]
+    fb.poly([(px + 1.2 * scale, py + 1.8 * scale) for px, py in pts], "#000000", 70)
+    r = 1.1 * scale
+    for i in range(8):
+        a = i * math.pi / 4
+        fb.poly([(px + r * math.cos(a), py + r * math.sin(a)) for px, py in pts], edge)
+    fb.poly(pts, fill)
 
 
 @dataclass

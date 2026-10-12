@@ -54,6 +54,11 @@ class Canvas:
         self.ops.append(["hit", int(x), int(y), int(w), int(h), str(label)])
         return self
 
+    def poly(self, pts, color: str, alpha: int = 255) -> "Canvas":
+        """A smooth (anti-aliased) filled shape: ``pts`` is a list of (x, y)."""
+        self.ops.append(["poly", [[float(x), float(y)] for x, y in pts], color, int(alpha)])
+        return self
+
     def stext(self, x: int, y: int, s: str, color: str, px: int = 14, face: int = 0) -> "Canvas":
         """Smooth proportional text; face 0 sans, 1 bold, 2 mono."""
         self.ops.append(["stext", int(x), int(y), s, color, int(px), int(face)])
