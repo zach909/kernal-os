@@ -124,6 +124,7 @@ class App {
   requestTab(name) { this.send({ cmd: 'request', action: 'tab', name }); }
   requestLinks(op = 'list', fields = {}) { this.send({ cmd: 'request', action: 'links', op, ...fields }); }
   requestOpenLink(id) { this.send({ cmd: 'request', action: 'openlink', id }); }
+  requestQuantum(op = 'devices', fields = {}) { this.send({ cmd: 'request', action: 'quantum', op, ...fields }); }
   requestAutoUpdate(op = 'status', fields = {}) { this.send({ cmd: 'request', action: 'autoupdate', op, ...fields }); }
   requestHeal(op = 'check') { this.send({ cmd: 'request', action: 'heal', op }); }
   requestMods(op = 'list', name = '') { this.send({ cmd: 'request', action: 'mods', op, ...(op !== 'list' ? { name } : {}) }); }

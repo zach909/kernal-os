@@ -4,6 +4,7 @@
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
     kos install APP.kapp            install (the zip is stored as-is, sealed)
+    kos quantum devices|run FILE    find quantum/photonic hardware; run an OpenQASM job through a driver app
     kos autoupdate status|on|off|mode|every|run   keep apps current; see what KOS and the OS have waiting
     kos heal [--fix]                look for broken state and repair it (nothing lowers a gate)
     kos mod list|enable NAME|disable NAME   system mods: apps that replace a part of the interface
@@ -222,6 +223,45 @@ def cmd_mod(args, paths: Paths) -> int:
                 print(f"{args.name} disabled; the built-in app is back. Restart the desktop.")
     finally:
         prompter.close()
+    return 0
+
+
+def cmd_quantum(args, paths: Paths) -> int:
+    """`kos quantum devices` / `kos quantum run FILE [--driver APP] [--shots N]`: quantum and photonic hardware, through a driver app."""
+    from . import qdev, qjob
+    if args.q_cmd == "devices":
+        devs = qdev.with_drivers(qdev.detect(), paths)
+        if not any(d.real for d in devs):
+            print("no quantum or photonic hardware found on this machine (nothing at /dev/qpu*, /dev/quantum*, /dev/qrng*, ...)")
+        for d in devs:
+            tag = "EMULATOR (not hardware)" if not d.real else "hardware"
+            print(f"{d.id:<28} {tag:<24} {d.name}" + (f"  node {d.node}" if d.node else "")
+                  + (f"  drivers: {', '.join(d.drivers)}" if d.drivers else "  no driver installed"))
+        return 0
+    text = Path(args.file).read_text()
+    driver = args.driver
+    if not driver:
+        devs = qdev.with_drivers(qdev.detect(), paths)
+        pick = next((d for d in devs if d.real and d.drivers), None) or next((d for d in devs if d.drivers), None)
+        if not pick:
+            eprint("no quantum driver is installed (install one, e.g. the emulator in examples/drivers/qsim)")
+            return 2
+        driver = pick.drivers[0]
+        print(f"using {driver}" + ("" if pick.real else " (an emulator - there is no hardware driver)"))
+    authority, prompter = _authority(paths)
+    try:
+        res = qjob.run_job(paths, authority, driver, {"program": text, "shots": args.shots, "seed": args.seed})
+    except qjob.JobError as e:
+        eprint(str(e))
+        return 1
+    finally:
+        prompter.close()
+    if res.get("error"):
+        eprint("the driver says:", res["error"])
+        return 1
+    print(f"{'EMULATED' if res['emulated'] else 'HARDWARE'} result from {res.get('device', driver)} ({res.get('shots')} shots)")
+    for bits, n in res.get("counts", {}).items():
+        print(f"  {bits}  {n:>7}  {'#' * round(40 * n / max(1, res['shots']))}")
     return 0
 
 
@@ -627,6 +667,32 @@ def _bench(args, paths: Paths) -> int:
         ms("compose: base frame, cold", lambda: (setattr(shell, "_base", None), shell.compose()), 5)
         ms("compose: base frame, cached", shell.compose, 30)
         ms("render: normal look, one frame", shell.render, 20)
+
+        def poke(slot):
+            lay = next((l for l in shell.layers.values() if l.slot == slot), None)
+            if lay is not None:
+                lay.rev += 1
+            return shell.compose()
+        if os.environ.get("KOS_PROFILE"):
+            import cProfile
+            import pstats
+            for slot in ("widget-clock", "search"):
+                pr = cProfile.Profile()
+                pr.enable()
+                for _ in range(4):
+                    poke(slot)
+                pr.disable()
+                print(f"--- profile: compose after {slot} redrew (4x)")
+                pstats.Stats(pr).sort_stats("cumulative").print_stats(14)
+        if os.environ.get("KOS_PROFILE"):
+            for slot in ("widget-clock", "search", "menubar"):
+                before = {l.slot: id(l.cache) for l in shell.layers.values()}
+                poke(slot)
+                print(f"--- glass recomputed after {slot} redrew:", [l.slot for l in shell.layers.values() if id(l.cache) != before.get(l.slot)])
+        ms("compose: after the clock widget redrew", lambda: poke("widget-clock"), 8)
+        ms("compose: after the top panel redrew", lambda: poke("menubar"), 8)
+        ms("compose: after the search box redrew", lambda: poke("search"), 8)
+        ms("compose: after the dock redrew", lambda: poke("dock"), 8)
         shell.set_look(look="3d")
         for _ in range(10):
             shell.pump(0.05)
@@ -1220,6 +1286,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--out")
     s.add_argument("--name", help="app name (default: from the package)")
     s.add_argument("--entry", help="for a .deb: which program to run, a path inside the package")
+    s = sub.add_parser("quantum", help="quantum / photonic hardware through a driver: quantum devices | quantum run FILE")
+    s.add_argument("q_cmd", choices=["devices", "run"])
+    s.add_argument("file", nargs="?")
+    s.add_argument("--driver")
+    s.add_argument("--shots", type=int, default=1024)
+    s.add_argument("--seed", type=int)
     s = sub.add_parser("autoupdate", help="auto-update: autoupdate status | on | off | mode ask|auto | every HOURS | run")
     s.add_argument("au_cmd", nargs="?", choices=["status", "on", "off", "mode", "every", "run"], default="status")
     s.add_argument("value", nargs="?")
@@ -1343,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
-            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "heal": cmd_heal, "autoupdate": cmd_autoupdate, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
+            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "heal": cmd_heal, "autoupdate": cmd_autoupdate, "quantum": cmd_quantum, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,

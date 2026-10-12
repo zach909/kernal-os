@@ -1,0 +1,13 @@
+{
+  "name": "quantum",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system"],
+  "description": "Quantum and photonic hardware: what KOS can see, which driver serves it, and running an OpenQASM job (an emulator is labelled as one).",
+  "commands": [
+    {"id": "devices", "title": "Show quantum and photonic devices", "keywords": ["quantum", "qpu", "photonic", "majorana", "qram", "hardware"]},
+    {"id": "bell", "title": "Run the Bell-state demo circuit", "keywords": ["quantum", "bell", "entangle", "circuit", "qasm"]}
+  ]
+}

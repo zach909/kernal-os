@@ -51,7 +51,9 @@ SLOTS = {"wallpaper", "menubar", "dock", "pins", "search", "widgets", "cursor", 
          "pins", "widget"}
 BUNDLE_ENTRY_RE = re.compile(r"^[A-Za-z0-9._+-][A-Za-z0-9._+/-]{0,199}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description", "commands",
-                  "args", "slot", "exec_scratch"}
+                  "args", "slot", "exec_scratch", "devices", "driver"}
+DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9_.*?/-]{1,60}$")
+DRIVER_KINDS = {"quantum"}
 COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,60}$")
 MAX_COMMANDS = 24
 
@@ -82,6 +84,8 @@ class Manifest:
     args: tuple[str, ...] = ()          # bundle: arguments the program is started with
     slot: str = ""                      # mod: the interface slot this app fills
     exec_scratch: bool = False          # bundle: the program unpacks code into its scratch dir and runs it (AppImage)
+    devices: tuple[str, ...] = ()       # device nodes (globs under /dev) it asks to open - asked again at every launch
+    driver: str = ""                    # the kind of hardware it is a driver for (see DRIVER_KINDS)
 
     @classmethod
     def parse(cls, raw: bytes) -> "Manifest":
@@ -130,9 +134,16 @@ class Manifest:
             raise KAppError("exec_scratch is only for bundle apps")
         if d["runtime"] == "bundle" and (not BUNDLE_ENTRY_RE.match(d["entry"]) or ".." in d["entry"].split("/")):
             raise KAppError("a bundle entry is a path inside the archive")
+        devices = d.get("devices", [])
+        if (not isinstance(devices, list) or len(devices) > 4
+                or not all(isinstance(x, str) and DEVICE_RE.match(x) and ".." not in x.split("/") for x in devices)):
+            raise KAppError("devices must be up to 4 patterns like /dev/qpu* (under /dev, no ..)")
+        driver = d.get("driver", "")
+        if driver and driver not in DRIVER_KINDS:
+            raise KAppError(f"driver must be one of {sorted(DRIVER_KINDS)}")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
                    modes=modes, permissions=perms, description=desc, commands=_commands(d.get("commands", [])),
-                   args=tuple(args), slot=slot, exec_scratch=xs)
+                   args=tuple(args), slot=slot, exec_scratch=xs, devices=tuple(devices), driver=driver)
 
 
 def _commands(raw) -> tuple[Command, ...]:

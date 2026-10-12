@@ -122,6 +122,8 @@ class SandboxPolicy:
     # wiped by whoever launched it the moment the app's process ends.
     rw_dirs: list[str] = field(default_factory=list)
     ro_files: list[str] = field(default_factory=lambda: ["/dev/urandom"])
+    # Device nodes the owner agreed to give this app for this run (read, write and ioctl): see apps' "devices" manifest key.
+    device_paths: list[str] = field(default_factory=list)
     max_open_files: int = 256
     max_memory: int = 4 << 30
     # Development escape hatch; never set on a real install.
@@ -192,6 +194,8 @@ class SandboxPolicy:
                 self._add_rule(ruleset, p, FS_READ_FILE)
             for p in self.rw_files:
                 self._add_rule(ruleset, p, (FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE) & handled)
+            for p in self.device_paths:                      # exactly these nodes, not the rest of /dev
+                self._add_rule(ruleset, p, (FS_READ_FILE | FS_WRITE_FILE | FS_IOCTL_DEV) & handled)
             rw_dir_rights = (FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE | FS_READ_DIR
                             | FS_MAKE_REG | FS_MAKE_DIR | FS_MAKE_SYM) & handled
             for p in self.rw_dirs:

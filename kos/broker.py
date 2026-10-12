@@ -169,6 +169,16 @@ class Broker:
         self.registry.remove(self.inst.id)
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
           registry: Registry, log_path: Path, cache_dir: Optional[Path] = None) -> None:
     """Fork the broker for one instance. Called from the foreground CLI
@@ -181,7 +191,10 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
         a.close()
         b.close()
         inst.broker_pid = pid
-        registry.write(inst)  # visible to `kos ps` immediately, status "starting"
+        # Visible to `kos ps` immediately, status "starting" - but only if the child has not already recorded itself
+        # (and only if it is still alive: a child that exited already must not leave a ghost "starting" record).
+        if _pid_alive(pid):
+            registry.write_new(inst)
         return
     # child: becomes the broker; keeps `a` as its OS-side app channel
     try:

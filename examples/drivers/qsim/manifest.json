@@ -1,0 +1,10 @@
+{
+  "name": "qsim",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "driver:main",
+  "modes": ["cmd"],
+  "permissions": [],
+  "driver": "quantum",
+  "description": "A quantum EMULATOR driver (state-vector simulation, up to 14 qubits). Not hardware: it exists to test the driver protocol."
+}

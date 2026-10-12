@@ -100,6 +100,51 @@ def draw_ring(fb: Framebuffer, rect: tuple[int, int, int, int], u: int = 1) -> N
         fb.rect(dx, dy, rw, rh, col)
 
 
+# ------------------------------------------------------------------------------------ the stack
+def half(fb: Framebuffer) -> Framebuffer:
+    """A frame at half size (every other pixel of every other row) - memoryview slicing, so it is quick."""
+    W, H = fb.width, fb.height
+    mv = memoryview(fb.buf).cast("I")
+    out = Framebuffer(W // 2, H // 2)
+    ow = out.width
+    dst = memoryview(out.buf).cast("I")
+    for y in range(out.height):
+        dst[y * ow:(y + 1) * ow] = mv[2 * y * W:2 * y * W + 2 * ow:2]
+    return out
+
+
+def stack(shell, cards: list[tuple[str, str, Framebuffer]]) -> tuple[Framebuffer, list[tuple[str, tuple[int, int, int, int]]]]:
+    """The looks as layers in space: the interface in front, the others behind it, each a half-size card offset up and to
+    the left of the one before. ``cards`` is back to front: (look name, title, full-size frame). Returns the picture and each
+    card's rectangle (front-most last) so a click can pick one."""
+    from . import fbgfx
+    W, H, u = shell.W, shell.H, shell.u
+    out = Framebuffer(W, H)
+    fbgfx.gradient_v(out, 0, 0, W, H, "#0e1118", "#06080c")
+    rects = []
+    n = len(cards)
+    cw, ch = W // 2, H // 2
+    step_x, step_y = max(24 * u, (W - cw - 40 * u) // max(1, n - 1) // 2), max(20 * u, (H - ch - 70 * u) // max(1, n - 1) // 2)
+    x0, y0 = (W - cw) // 2 - step_x * (n - 1) // 2, 36 * u
+    for i, (look, title, frame) in enumerate(cards):
+        x, y = x0 + i * step_x, y0 + i * step_y
+        small = half(frame)
+        fbgfx.shadow(out, x, y, cw, ch, spread=10 * u, strength=0.7, dy=6 * u)
+        for r in range(ch):
+            out.buf[(y + r) * W * 4 + x * 4:(y + r) * W * 4 + (x + cw) * 4] = small.buf[r * cw * 4:(r + 1) * cw * 4]
+        if i < n - 1:
+            fbgfx.blend(out, x, y, cw, ch, "#000000", 0.35 * (1 - i / max(1, n - 1)) + 0.1)      # cards further back sit in shadow
+        fbgfx.border(out, x, y, cw, ch, "#ffffff", "#000000", 0.55)
+        px = 7 * u + 2
+        face = ttf.load("bold")
+        if face:
+            tw = int(face.width(title, px))
+            out.stext(x + 8 * u + 1, y - face.line_height(px) - 3 * u + 1, title, "#000000", px, 1)
+            out.stext(x + 8 * u, y - face.line_height(px) - 3 * u, title, ACCENT if i == n - 1 else "#dfe8f5", px, 1)
+        rects.append((look, (x, y, cw, ch)))
+    return out, rects
+
+
 # --------------------------------------------------------------------------------- text look
 class Grid:
     """A character-cell screen: what 'everything is text' draws onto."""

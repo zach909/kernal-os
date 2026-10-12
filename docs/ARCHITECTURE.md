@@ -130,6 +130,28 @@ drops setuid bits, resolves symlinks inside the package only, ignores maintainer
 Slots, ceilings and the enabled set live in `<state>/mods.json`. `desktop.boot_core` asks `mods.core_names` which app to run for each slot; the shell tracks
 `Layer.slot`, so everything that used to look up "dock" or "search" by app name works for a mod filling that slot. A widget mod is a new widget slot.
 
+## Seats, desktops, instances, displays (`kos/shell.py`, `kos/devices.py`, `kos/display.py`)
+`Shell.seats` holds one `Seat` per pointer/keyboard pair (position, drag, focus, text-box owner, button state). `route()` sets `Shell._seat` for the
+duration of an event and `focus`, `pointer`, `drag`, `key_target`, `down` are properties over it, so the existing handlers run per seat unchanged; the union of
+every seat's focus decides which windows draw as focused. Evdev gives each device its own `EvdevTranslator` and tags its events with the seat. Layers carry `ws`
+(None = every desktop); `shown()` is the one visibility test used for painting, hit-testing, controls and the text look, and the desktop number is part of the base
+frame's signature. `open_window(new=, background=)` starts a fresh instance or opens minimized; the opener adopts an instance no window shows yet. Several outputs
+are a `MultiBackend`: the shell composes the full width, lays the panel, dock, sidebar and new windows out on the primary output, centres the password prompt there
+and `show()` cuts the frame into one slice per output. Gap: one password prompt at a time; one sudo window per process; seats and displays unverified on hardware.
+
+## Self-heal and auto-update (`kos/heal.py`, `kos/autoupdate.py`, `kos/osupdate.py`)
+Live healing is in the shell (`remove(expected=False)` -> `_schedule_heal` -> `_run_heal`): backoff, a restarter that reuses a still-running instance or starts a new
+one through the normal authority, give-up and fall-back-to-built-in. `heal.quick` (password-free, safe at every boot) quarantines corrupt preference files and wipes
+stale scratch; `heal.repair` verifies every seal with one batch grant and reinstalls built-ins. Nothing widens a permission. Auto-update separates *due* (policy +
+clock), *can run unattended* (a live sudo window covering the app and command layers) and *what is only listed* (KOS core: kernel-layer; OS: root). Gap: the OS can
+only be listed - applying it needs root KOS does not hold.
+
+## Hardware device layer (`kos/qdev.py`, `kos/qjob.py`, `kos/sandbox.py`)
+The manifest keys `devices` (up to four `/dev/...` globs) and `driver` (`quantum`) describe a driver. `authorize_app_action` resolves the globs to existing nodes, asks,
+requires the password (`app.device`, never remembered) and passes the nodes as `SandboxPolicy.device_paths`, which Landlock opens for read, write and ioctl on exactly
+those files. `qjob.run_job` is the one-shot runner (same shape as `coderun`): verify the driver, grant, launch in `cmd` mode, send the job, read one `RESULT` line,
+kill it. Detection (`qdev.detect`) only reads names and never opens a device. Gap: no vendor driver exists in this repository and no real device was tested.
+
 ## Built-in apps, backups, off-site (`kos/sysinfo.py`, `kos/backup.py`, `kos/offsite.py`)
 More `request`s on the same bridge: `info`, `ls`, `view` (password), `scan`,
 `optimize`/`settle` (password), `permit`/`revoke` (password), `line` (the line

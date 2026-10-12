@@ -37,6 +37,13 @@ class Bitmap:
     left: int           # pixels from the pen position to the bitmap's left edge
     top: int            # pixels from the baseline UP to the bitmap's top edge
     cov: bytes          # w*h coverage 0..255
+    runs: Optional[list] = None   # per row: [(column, coverage)] of the inked pixels only (made on first use)
+
+    def inked(self) -> list:
+        if self.runs is None:
+            w = self.w
+            self.runs = [[(c, a) for c, a in enumerate(self.cov[r * w:(r + 1) * w]) if a] for r in range(self.h)]
+        return self.runs
 
 
 class Font:
@@ -311,25 +318,21 @@ class Font:
             bm = self.bitmap(ch, px)
             if bm:
                 gx, gy = int(pen) + bm.left, base - bm.top
-                cov = bm.cov
-                for row in range(bm.h):
+                for row, inked in enumerate(bm.inked()):          # only the inked pixels: most of a glyph box is empty
                     py = gy + row
-                    if not 0 <= py < H:
+                    if py < 0 or py >= H or not inked:
                         continue
-                    for col in range(bm.w):
-                        a = cov[row * bm.w + col]
-                        if not a:
-                            continue
+                    line = py * stride
+                    for col, a in inked:
                         pxx = gx + col
-                        if not 0 <= pxx < W:
-                            continue
-                        i = py * stride + pxx * 4
-                        if a == 255:
-                            buf[i], buf[i + 1], buf[i + 2] = b, g, r
-                        else:
-                            buf[i] += ((b - buf[i]) * a + 127) // 255
-                            buf[i + 1] += ((g - buf[i + 1]) * a + 127) // 255
-                            buf[i + 2] += ((r - buf[i + 2]) * a + 127) // 255
+                        if 0 <= pxx < W:
+                            i = line + pxx * 4
+                            if a == 255:
+                                buf[i], buf[i + 1], buf[i + 2] = b, g, r
+                            else:
+                                buf[i] += ((b - buf[i]) * a + 127) // 255
+                                buf[i + 1] += ((g - buf[i + 1]) * a + 127) // 255
+                                buf[i + 2] += ((r - buf[i + 2]) * a + 127) // 255
             pen += self.advance(ch, px)
 
     def metrics(self) -> dict:

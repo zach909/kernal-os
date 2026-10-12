@@ -79,8 +79,30 @@ def blend(fb: Framebuffer, x: int, y: int, w: int, h: int, color: str, alpha: fl
         return
     r, g, b = _rgb(color)
     pixel = bytes((b, g, r, 0))
-    crow = pixel * w
-    _put_rows(fb, x, y, [blend_row(row, crow, a) for row in _rows(fb, x, y, w, h)])
+    rows = _rows(fb, x, y, w, h)
+    # The whole region as ONE bytes object: a blend is lane-wise, so one big-integer operation does every row at once
+    # (a row-by-row loop spent most of its time in Python, not arithmetic).
+    mixed = blend_row(b"".join(rows), pixel * (w * h), a)
+    rw = w * 4
+    _put_rows(fb, x, y, [mixed[i * rw:(i + 1) * rw] for i in range(h)])
+
+
+def blend_col(fb: Framebuffer, x: int, y: int, h: int, color: str, alpha: float) -> None:
+    """Tint a 1-pixel-wide column (cheap for the long edges of a shadow): each channel's column is a strided slice."""
+    if not 0 <= x < fb.width:
+        return
+    y0, y1 = max(0, y), min(fb.height, y + h)
+    if y1 <= y0:
+        return
+    a = max(0, min(255, round(alpha * 255)))
+    if a == 0:
+        return
+    r, g, b = _rgb(color)
+    stride, n = fb.width * 4, y1 - y0
+    for c, v in enumerate((b, g, r, 0)):
+        start = (y0 * fb.width + x) * 4 + c
+        sl = slice(start, start + n * stride, stride)
+        fb.buf[sl] = blend_row(bytes(fb.buf[sl]), bytes((v,)) * n, a)
 
 
 def blend_rows(fb: Framebuffer, x: int, y: int, w: int, colors: list[tuple[str, float]]) -> None:
@@ -130,10 +152,24 @@ def blur(fb: Framebuffer, x: int, y: int, w: int, h: int, radius: int = 3, passe
 
 def shadow(fb: Framebuffer, x: int, y: int, w: int, h: int, spread: int = 8, strength: float = 0.45,
            dy: int = 3) -> None:
-    """A soft drop shadow: nested translucent rectangles, darkest nearest the edge."""
-    for i in range(spread, 0, -1):
-        a = strength * (1 - i / (spread + 1)) ** 2 / 2.2
-        blend(fb, x - i, y - i + dy, w + 2 * i, h + 2 * i, "#000000", a)
+    """A soft drop shadow, darkest nearest the edge. The same look as ``spread`` nested translucent rectangles, but each
+    pixel is touched once: the rectangle itself (and the first ring) gets the combined darkness of all of them, and every
+    further ring only its own - so a big panel costs its area once plus a thin border, not its area ``spread`` times."""
+    if spread < 1:
+        return
+    alphas = {i: strength * (1 - i / (spread + 1)) ** 2 / 2.2 for i in range(1, spread + 1)}
+    keep, combined = 1.0, {}
+    for i in range(spread, 0, -1):                          # the pixels inside rect_i are under rects i..spread
+        keep *= 1 - alphas[i]
+        combined[i] = 1 - keep
+    blend(fb, x - 1, y - 1 + dy, w + 2, h + 2, "#000000", combined[1])
+    for i in range(2, spread + 1):
+        a = combined[i]
+        top, bottom, left, right = y - i + dy, y + h + i - 1 + dy, x - i, x + w + i - 1
+        blend(fb, left, top, w + 2 * i, 1, "#000000", a)
+        blend(fb, left, bottom, w + 2 * i, 1, "#000000", a)
+        blend_col(fb, left, top + 1, h + 2 * i - 2, "#000000", a)
+        blend_col(fb, right, top + 1, h + 2 * i - 2, "#000000", a)
 
 
 def save_region(fb: Framebuffer, x: int, y: int, w: int, h: int) -> list[bytes]:

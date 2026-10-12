@@ -71,6 +71,7 @@ app -> OS
     {"cmd": "request", "action": "toggle", "app": NAME}      (shell permission) show or hide an interface app's layer
     {"cmd": "request", "action": "notify", "op": "post"|"clear"|"dismiss", "title": str, "body": str, "id"}   notifications (posting is rate-limited)
     {"cmd": "request", "action": "keys", "on": bool}         (shell permission) take the keyboard for a text box until a click elsewhere
+    {"cmd": "request", "action": "quantum", "op": "devices"|"run", "driver", "device", "program": OpenQASM, "shots", "seed"}
     {"cmd": "request", "action": "autoupdate", "op": "status"|"refresh"|"set"|"run", "enabled", "mode": ask|auto, "every_hours", "scheduled"}
     {"cmd": "request", "action": "heal", "op": "check"|"fix"}   look for broken state / repair it (password for the parts that need it)
     {"cmd": "request", "action": "mods", "op": "list"|"enable"|"disable", "name": APP}   system mods (password to change)
@@ -359,6 +360,23 @@ def _request(msg: dict) -> dict:
         if not isinstance(on, bool):
             raise ProtocolError("keys.on must be true or false")
         return {"cmd": "request", "action": "keys", "on": on}
+    if action == "quantum":
+        op = msg.get("op", "devices")
+        if op not in ("devices", "run"):
+            raise ProtocolError("quantum.op must be devices or run")
+        out = {"cmd": "request", "action": "quantum", "op": op}
+        if op == "run":
+            prog = msg.get("program")
+            if not isinstance(prog, str) or not prog.strip() or len(prog) > 64 << 10 or "\x00" in prog:
+                raise ProtocolError("quantum.program must be OpenQASM text of at most 64 KiB")
+            drv = msg.get("driver", "")
+            if drv and (not isinstance(drv, str) or not _APP_NAME_RE.match(drv)):
+                raise ProtocolError("quantum.driver must be an app name")
+            out.update(program=prog, shots=_int(msg.get("shots", 1024), 1, 100000), driver=drv,
+                       device=clean_text(msg.get("device", ""), 80))
+            if msg.get("seed") is not None:
+                out["seed"] = _int(msg["seed"], 0, 2 ** 31)
+        return out
     if action == "autoupdate":
         op = msg.get("op", "status")
         if op not in ("status", "refresh", "set", "run"):

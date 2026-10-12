@@ -176,6 +176,8 @@ class Shell:
         self._cur_dirty = True
         self.anim_ids: set[str] = set()
         self.nav, self.ring, self.typed = -1, False, ""
+        self.stack_open = False                                  # the looks shown as a stack of cards (Ctrl-Up)
+        self._stack_rects: list = []
         self.notes: list[dict] = []
 
         self._base: Optional[Framebuffer] = None
@@ -834,6 +836,10 @@ class Shell:
             if ev["key"] == "super":                            # the Super key: the launcher
                 self._toggle_named("launcher")
                 return
+            if ev["key"] in ("ctrl-up", "ctrl-down") or (self.stack_open and ev["key"] == "escape"):
+                self.stack_open = ev["key"] == "ctrl-up"          # Ctrl-Up: look down at the stack of looks; Ctrl-Down/Esc: back
+                self.surface_dirty = True
+                return
             if ev["key"] in ("ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4"):    # Ctrl-1..4: switch desktop
                 self.set_workspace(int(ev["key"][-1]) - 1)
                 return
@@ -869,6 +875,15 @@ class Shell:
             if hit and not (hit.kind == "window" and self.chrome_hit(hit, x, y)):
                 lx, ly = self._local(hit, x, y)
                 hit.send({"cmd": "pointer", "x": lx, "y": ly})
+            return
+        if t == "button" and self.stack_open:                   # a click on a card of the stack picks that look
+            if ev["pressed"]:
+                for look, (rx, ry, rw, rh) in reversed(self._stack_rects):
+                    if rx <= x < rx + rw and ry <= y < ry + rh:
+                        self.set_look(look="3d" if look == "normal" and self.cfg["look"] == "3d" else look)
+                        break
+                self.stack_open = False
+                self.surface_dirty = True
             return
         if t == "button":
             self.pointer = (x, y)
@@ -1211,7 +1226,20 @@ class Shell:
         return d.wall
 
     def _signature(self, layer: Layer, ordered: list[Layer]) -> tuple:
-        below = tuple((l.id, l.rev, tuple(l.rect), self.shown(l)) for l in ordered if l.z < layer.z)
+        """What this layer's glass depends on: the layers *behind it that reach its rectangle* (its blur and shadow only
+        see pixels near itself), its own rectangle and its focus. A layer somewhere else redrawing - the clock, the search
+        box - therefore does not make every glass panel re-blur (that was 90% of the cost of a repaint)."""
+        u = self.u
+        m = (16 if self.cfg["look"] == "3d" else 9) * u        # this layer's own blur/shadow touches this far around it (the 3d look casts deeper)
+        x, y, w, h = layer.rect
+        zone = (x - m, y - m, x + w + m, y + h + m)
+        reach = {"window": 28 * u, "plain": 0, "top": 0, "overlay": 0, "cursor": 0, "wallpaper": 0}
+
+        def near(l: Layer) -> bool:                            # does l (and the shadow it casts) reach this layer's zone?
+            r = reach.get(l.kind, 16 * u)
+            lx, ly, lw, lh = l.rect
+            return lx - r < zone[2] and lx + lw + r > zone[0] and ly - r < zone[3] and ly + lh + r > zone[1]
+        below = tuple((l.id, l.rev, tuple(l.rect), self.shown(l)) for l in ordered if l.z < layer.z and near(l))
         return (below, tuple(layer.rect), layer.id in self.focused_ids())
 
     def _glass(self, fb: Framebuffer, rect: list[int], spec: dict, *, radius: int) -> None:
@@ -1366,8 +1394,27 @@ class Shell:
         self.modal = modal
         self.surface_dirty = True
 
+    def _stack_frame(self) -> Framebuffer:
+        """The looks as cards in space: terminal and buttons behind, the interface in front."""
+        saved = self.cfg["look"]
+        try:
+            self.cfg["look"] = "terminal"
+            ctl = self.controls()
+            term, _ = looks.render_terminal(self, ctl, self.nav, self.typed)
+            text = looks.render_text(self)
+            self.cfg["look"] = "normal"
+            front = self.compose().copy()
+        finally:
+            self.cfg["look"] = saved
+        frame, self._stack_rects = looks.stack(self, [("terminal", "Terminal: every button in a list", term),
+                                                     ("text", "Buttons: all text, Tab and Enter", text),
+                                                     ("normal", "Interface", front)])
+        return frame
+
     def _look_frame(self) -> Framebuffer:
         """The frame for the current look, before the pointer is drawn."""
+        if self.stack_open:
+            return self._stack_frame()
         look = self.cfg["look"]
         if look in ("text", "terminal"):
             ctl = self.controls() if look == "terminal" else []

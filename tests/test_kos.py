@@ -3145,6 +3145,23 @@ class TestLooksAndControls(Env):
         self.assertIn("2.", " ".join(str(r) for r in s._term_rows.values()) + "2.")
         self.assertEqual(len(s._term_rows), 3)
 
+    def test_ctrl_up_looks_down_at_the_stack_and_a_click_on_a_card_picks_that_look(self):
+        sh = self.make()
+        sh.booted.add("mouse")
+        self.layer(sh, "dock", "dock", (100, 400, 200, 60), ops=[["hit", 0, 0, 40, 40, "Files"]])
+        sh._route({"type": "key", "key": "ctrl-up"})
+        self.assertTrue(sh.stack_open)
+        sh.render()
+        rects = dict(sh._stack_rects)
+        self.assertEqual([n for n, _ in sh._stack_rects], ["terminal", "text", "normal"])
+        x, y, w, h = rects["terminal"]
+        sh._route({"type": "button", "button": "left", "pressed": True, "x": x + 5, "y": y + 5})
+        self.assertFalse(sh.stack_open)
+        self.assertEqual(sh.cfg["look"], "terminal")
+        sh._route({"type": "key", "key": "ctrl-up"})
+        sh._route({"type": "key", "key": "escape"})
+        self.assertFalse(sh.stack_open)
+
     def test_text_look_draws_boxes_and_labels_and_shows_buttons_as_text(self):
         s = self.make()
         self.layer(s, "files", "window", [100, 80, 400, 200], [["stext", 10, 10, "Hello there", "#ffffff", 14, 0]], title="Files")
@@ -4102,3 +4119,237 @@ class TestAutoUpdate(Env):
         for bad in (dict(op="set", mode="root"), dict(op="set", enabled="yes"), dict(op="set", every_hours=0), dict(op="nuke")):
             with self.assertRaises(ProtocolError, msg=bad):
                 validate_app_message({"cmd": "request", "action": "autoupdate", **bad}, "graphical")
+
+
+class TestRegistryRace(Env):
+    def inst(self, status):
+        return Instance(id="demo-aaaaaa", name="demo", mode="tui", broker_pid=os.getpid(), sock_path="", log_path="", started=0, status=status)
+
+    def test_the_forking_parent_never_overwrites_a_child_that_already_said_running(self):
+        """The bug: parent and child both wrote the record after fork(); if the parent was late, 'starting' replaced
+        'running' and the app looked stuck until its 5 s start-up timeout (seen on a busy machine)."""
+        reg = Registry(self.paths)
+        reg.write(self.inst("running"))                          # the child was quick
+        self.assertFalse(reg.write_new(self.inst("starting")))   # the late parent must not win
+        self.assertEqual(reg.get("demo-aaaaaa").status, "running")
+        reg.remove("demo-aaaaaa")
+        self.assertTrue(reg.write_new(self.inst("starting")))    # the parent first: it writes, the child will overwrite
+        reg.write(self.inst("running"))
+        self.assertEqual(reg.get("demo-aaaaaa").status, "running")
+        self.assertEqual(list(Path(reg.dir).glob(".*.tmp")), [])  # no temp files left behind
+
+
+class TestRepaintCost(Env):
+    """Glass is the expensive part of a repaint; its cache must be exact - reused when nothing it can see changed,
+    redone when something behind it did."""
+
+    def make(self):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(1280, 720), ScriptedDevices(), preboot=())
+
+    def layer(self, s, name, kind, rect, ops=()):
+        from kos.shell import Layer, Z
+        a, b = socket.socketpair()
+        self.addCleanup(lambda: (a.close(), b.close()))
+        L = Layer(id=f"{name}-1", name=name, kind=kind, channel=Channel(a), mode="graphical", rect=list(rect), z=Z[kind], ops=list(ops))
+        s.layers[L.id] = L
+        return L
+
+    def sig(self, s, L):
+        return s._signature(L, sorted(s.layers.values(), key=lambda l: l.z))
+
+    def test_an_unrelated_layer_redrawing_does_not_invalidate_a_panels_glass(self):
+        s = self.make()
+        bar = self.layer(s, "menubar", "bar", s.core_rect("menubar")[1])
+        dock = self.layer(s, "dock", "dock", s.core_rect("dock")[1])
+        clock = self.layer(s, "widget-clock", "widget", [900, 150, 300, 100], [["rect", 0, 0, 5, 5, "#ffffff"]])
+        search = self.layer(s, "search", "plain", [56, 52, 700, 54])
+        before = {n: self.sig(s, L) for n, L in (("bar", bar), ("dock", dock))}
+        for L in (clock, search):
+            L.rev += 1                                                   # each redraws
+        self.assertEqual(self.sig(s, bar), before["bar"])               # far from the clock; the search box casts no shadow
+        self.assertEqual(self.sig(s, dock), before["dock"])
+
+    def test_a_layer_behind_or_beside_a_panel_that_changes_does_invalidate_it(self):
+        s = self.make()
+        side = self.layer(s, "sidebar", "sidebar", s.core_rect("sidebar")[1])
+        below = self.layer(s, "pins", "plain", [800, 300, 100, 100])    # overlaps the panel's left edge and sits under it
+        a = self.sig(s, side)
+        below.rev += 1
+        self.assertNotEqual(self.sig(s, side), a)
+        a = self.sig(s, side)
+        below.rect[0] += 3                                               # moved
+        self.assertNotEqual(self.sig(s, side), a)
+        a = self.sig(s, side)
+        side.rect[3] -= 10                                               # the panel itself resized
+        self.assertNotEqual(self.sig(s, side), a)
+        win = self.layer(s, "files", "window", [700, 200, 200, 200])     # a window's shadow reaches further than its rectangle
+        win.z = 5
+        a = self.sig(s, side)
+        win.rev += 1
+        self.assertNotEqual(self.sig(s, side), a)
+
+    def test_cached_and_recomputed_glass_look_identical(self):
+        """The cache must never change a pixel: compare a repaint that reuses it with one that rebuilds everything."""
+        s = self.make()
+        self.layer(s, "menubar", "bar", s.core_rect("menubar")[1], [["rect", 4, 4, 40, 10, "#00ff00"]])
+        self.layer(s, "dock", "dock", s.core_rect("dock")[1], [["rect", 4, 4, 40, 10, "#ff0000"]])
+        clock = self.layer(s, "widget-clock", "widget", [900, 150, 300, 100], [["rect", 0, 0, 50, 50, "#ffffff"]])
+        self.layer(s, "search", "plain", [56, 52, 700, 54], [["rect", 0, 0, 300, 20, "#0000ff"]])
+        first = bytes(s.compose().buf)
+        clock.ops = [["rect", 0, 0, 80, 80, "#ff00ff"]]
+        clock.rev += 1
+        reused = bytes(s.compose().buf)                                 # glass of the others came from the cache
+        for L in s.layers.values():
+            L.cache = None
+        s._base = None
+        rebuilt = bytes(s.compose().buf)                                # everything from scratch
+        self.assertEqual(reused, rebuilt)
+        self.assertNotEqual(first, reused)
+
+
+class TestQuantumHardwareLayer(Env):
+    DRIVERS = Path(__file__).resolve().parent.parent / "examples" / "drivers"
+
+    def install_driver(self, src, **manifest):
+        import shutil
+        d = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "src"
+        shutil.copytree(src, d)
+        if manifest:
+            m = json.loads((d / "manifest.json").read_text())
+            m.update(manifest)
+            (d / "manifest.json").write_text(json.dumps(m))
+        out = Path(self.tmp.name) / f"{json.loads((d / 'manifest.json').read_text())['name']}.kapp"
+        pack(d, out)
+        name = KApp.from_file(out).manifest.name
+        AppStore(self.paths).install(out, self.authority(PW))
+        from kos.permit import PermitStore
+        PermitStore(self.paths).grant(name)
+        return name
+
+    def fake_machine(self):
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (root / "dev").mkdir()
+        for n in ("qpu0", "quantum1", "qrng0", "null", "sda"):
+            (root / "dev" / n).write_text("")
+        (root / "sys/class/misc/hw_random").mkdir(parents=True)
+        (root / "sys/class/misc/hw_random/rng_available").write_text("tpm-rng-0 Quantis-PCIe-16M intel-rng\n")
+        (root / "sys/class/photonic_chip").mkdir(parents=True)
+        (root / "sys/class/photonic_chip/photonic-ctl0").write_text("")
+        (root / "sys/class/net").mkdir(parents=True)
+        (root / "sys/class/net/eth0").write_text("")
+        pci = root / "sys/bus/pci/devices/0000:03:00.0"
+        pci.mkdir(parents=True)
+        (pci / "vendor").write_text("0x1234\n")
+        (pci / "device").write_text("0xabcd\n")
+        (root / "etc/kos").mkdir(parents=True)
+        (root / "etc/kos/quantum-devices.json").write_text(json.dumps(
+            [{"id": "1234:abcd", "kind": "photonic", "name": "Acme photonic accelerator", "node": "/dev/qpu0", "driver": "acme-driver"},
+             {"id": "ffff:ffff", "name": "not present"}, "junk", {"id": 5}]))
+        return root
+
+    def test_detection_finds_only_what_looks_quantum_and_never_opens_anything(self):
+        from kos import qdev
+        found = {d.id: d for d in qdev.detect(str(self.fake_machine()))}
+        self.assertEqual(sorted(found), ["pci:0000:03:00.0", "qpu:qpu0", "qrng:Quantis-PCIe-16M", "qrng:qrng0",
+                                         "quantum:quantum1", "sysfs:photonic_chip/photonic-ctl0"])
+        self.assertEqual(found["qpu:qpu0"].node, "/dev/qpu0")
+        self.assertEqual(found["pci:0000:03:00.0"].driver, "acme-driver")                # from the registry the owner wrote
+        self.assertNotIn("qrng:tpm-rng-0", found)                                          # an ordinary RNG is not quantum hardware
+        self.assertNotIn("qrng:intel-rng", found)
+        self.assertFalse(any("eth0" in k or "sda" in k or "null" in k for k in found))
+        self.assertEqual(qdev.detect(str(Path(self.tmp.name) / "nothing-here")), [])      # no hardware: an empty list, not an error
+
+    def test_no_hardware_is_reported_as_no_hardware_and_the_emulator_is_never_called_hardware(self):
+        from kos import qdev
+        self.assertEqual(qdev.with_drivers([], self.paths), [])
+        name = self.install_driver(self.DRIVERS / "qsim")
+        devs = qdev.with_drivers([], self.paths)
+        self.assertEqual([(d.id, d.real, d.drivers) for d in devs], [(f"emulator:{name}", False, [name])])
+        self.assertIn("EMULATOR", devs[0].name)
+        self.assertFalse(any(d.real for d in devs))
+
+    def test_a_driver_is_matched_to_the_device_node_it_names(self):
+        from kos import qdev
+        mine = self.install_driver(self.DRIVERS / "qsim", name="my-qpu-driver", devices=["/dev/qpu*"])
+        other = self.install_driver(self.DRIVERS / "qsim", name="other-driver", devices=["/dev/photonic*"])
+        devs = {d.id: d for d in qdev.with_drivers(qdev.detect(str(self.fake_machine())), self.paths)}
+        self.assertEqual(devs["qpu:qpu0"].drivers, [mine])
+        self.assertEqual(devs["quantum:quantum1"].drivers, [])                           # nobody serves it: said plainly
+        self.assertNotIn(other, devs["qpu:qpu0"].drivers)
+
+    def test_manifest_devices_are_validated(self):
+        base = {"name": "d", "version": "1", "runtime": "python", "entry": "m", "driver": "quantum"}
+        from kos.kapp import Manifest
+        ok = Manifest.parse(json.dumps({**base, "devices": ["/dev/qpu*", "/dev/qpu0"]}).encode())
+        self.assertEqual(ok.devices, ("/dev/qpu*", "/dev/qpu0"))
+        for bad in (["/etc/shadow"], ["/dev/../etc/passwd"], ["qpu0"], ["/dev/a b"], ["/dev/x"] * 5, "/dev/qpu0"):
+            with self.assertRaises(KAppError, msg=bad):
+                Manifest.parse(json.dumps({**base, "devices": bad}).encode())
+        with self.assertRaises(KAppError):
+            Manifest.parse(json.dumps({**base, "driver": "toaster"}).encode())
+
+    def test_the_emulator_runs_a_job_in_the_sandbox_and_says_it_is_an_emulator(self):
+        from kos import qjob
+        name = self.install_driver(self.DRIVERS / "qsim")
+        res = qjob.run_job(self.paths, self.authority(PW), name, {"program": "qubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc = measure q;", "shots": 400, "seed": 3})
+        self.assertTrue(res["emulated"])
+        self.assertEqual(set(res["counts"]), {"00", "11"})                                  # a Bell pair: only 00 and 11
+        self.assertEqual(sum(res["counts"].values()), 400)
+        self.assertAlmostEqual(res["counts"]["00"] / 400, 0.5, delta=0.12)
+        flip = qjob.run_job(self.paths, self.authority(PW), name, {"program": "qreg q[3]; creg c[3]; x q[0]; x q[2]; measure q -> c;", "shots": 20})
+        self.assertEqual(flip["counts"], {"101": 20})
+        bad = qjob.run_job(self.paths, self.authority(PW), name, {"program": "qreg q[1]; wibble q[0];", "shots": 1})
+        self.assertIn("unknown gate", bad["error"])                                          # a bad circuit is an answer, not a crash
+
+    def test_job_inputs_are_checked_and_a_non_driver_is_refused(self):
+        from kos import qjob
+        name = self.install_driver(self.DRIVERS / "qsim")
+        for bad in ({"program": ""}, {"program": "x" * (65 << 10)}, {"program": "h q;", "shots": 0},
+                    {"program": "h q;", "shots": 10 ** 7}, {"program": "h q;", "shots": True}, {"program": 5}):
+            with self.assertRaises(qjob.JobError, msg=str(bad)[:30]):
+                qjob.run_job(self.paths, self.authority(PW), name, bad)
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        from kos.permit import PermitStore
+        PermitStore(self.paths).grant("hello")
+        with self.assertRaises(qjob.JobError):
+            qjob.run_job(self.paths, self.authority(PW), "hello", {"program": "qreg q[1];"})
+
+    def test_a_device_node_is_opened_to_the_driver_only_after_asking_and_only_that_node(self):
+        """Real Landlock: /dev/zero is unreachable for an app, reachable for exactly the driver you agreed to give it to."""
+        from kos import qjob
+        d = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "probe"
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps({"name": "probe-driver", "version": "1", "runtime": "python", "entry": "probe:main",
+                                                      "modes": ["cmd"], "driver": "quantum", "devices": ["/dev/zero"]}))
+        (d / "probe.py").write_text(
+            "import json\nfrom kos.sdk import App\n\n\ndef main():\n    app = App()\n    for ev in app.events():\n"
+            "        if ev.get('command') != 'job':\n            continue\n        out = {'emulated': False, 'counts': {}, 'shots': 1}\n"
+            "        for path in ('/dev/zero', '/dev/random', '/etc/hostname'):\n            try:\n"
+            "                with open(path, 'rb') as f:\n                    f.read(4)\n                out['counts'][path] = 1\n"
+            "            except OSError:\n                out['counts'][path] = 0\n"
+            "        app.log('RESULT ' + json.dumps(out))\n        app.exit(0)\n        break\n")
+        out = Path(self.tmp.name) / "probe.kapp"
+        pack(d, out)
+        AppStore(self.paths).install(out, self.authority(PW))
+        from kos.permit import PermitStore
+        PermitStore(self.paths).grant("probe-driver")
+        with self.assertRaises(qjob.JobError):                                            # you said no to the device
+            qjob.run_job(self.paths, self.authority(PW, False), "probe-driver", {"program": "x"})
+        res = qjob.run_job(self.paths, self.authority(PW, True, PW), "probe-driver", {"program": "x"})   # password, confirm, password
+        self.assertEqual(res["counts"], {"/dev/zero": 1, "/dev/random": 0, "/etc/hostname": 0})        # that node, not the rest
+
+    def test_the_bridge_lists_devices_runs_jobs_and_refuses_bad_requests(self):
+        from kos.system import SystemBridge
+        name = self.install_driver(self.DRIVERS / "qsim")
+        sent = []
+        b = SystemBridge(self.paths)
+        b.handle({"cmd": "request", "action": "quantum", "op": "devices"}, sent.append, self.authority())
+        self.assertEqual(sent[-1]["cmd"], "quantum")
+        self.assertTrue(any(d["id"] == f"emulator:{name}" and not d["real"] for d in sent[-1]["devices"]))
+        b.handle({"cmd": "request", "action": "quantum", "op": "run", "program": "qreg q[1]; creg c[1]; x q[0]; measure q -> c;",
+                  "shots": 5, "driver": "", "device": ""}, sent.append, self.authority(PW))
+        self.assertEqual(sent[-1]["result"]["counts"], {"1": 5})
+        for bad in (dict(op="run", program=""), dict(op="run", program="h q;", shots=0), dict(op="run", program="h q;", driver="../x"), dict(op="teleport")):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message({"cmd": "request", "action": "quantum", **bad}, "graphical")

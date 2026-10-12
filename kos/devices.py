@@ -170,6 +170,8 @@ class EvdevTranslator:
 
     def _key(self, code: int) -> Optional[dict]:
         if code in _NAMED:
+            if self.ctrl and _NAMED[code] in ("up", "down"):        # Ctrl-Up / Ctrl-Down: the stack of looks
+                return {"type": "key", "key": "ctrl-" + _NAMED[code]}
             return {"type": "key", "key": _NAMED[code]}
         pair = _US.get(code)
         if not pair:

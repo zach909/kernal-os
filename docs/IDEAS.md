@@ -82,8 +82,14 @@ land instead of getting lost in chat.
   OpenType (CFF) outlines are missing from `kos/ttf.py`.
 - **The 3D stack.** The look of the whole interface as layered cards in space: the graphical interface in front, the terminal view visible beneath it when
   you look down, and the button-by-button view behind. Today the four looks are switched, and the tilt only shears the front frame.
-- **Workspaces, multiple pointers/keyboards, extra displays, background instances.** Layers have no workspace, the shell has one pointer and one focus, and
-  one framebuffer; opening an app attaches to an already-running instance instead of starting another.
+- **Verify the multiples on hardware.** Seats (per-device evdev state), several framebuffers, and a second display's hot-plug are exercised only with scripted
+  devices and headless outputs. Per-seat passwords/sudo windows, window move between displays by drag with per-display scale, and a taskbar per display are not done.
+- **Real quantum drivers.** The device layer finds hardware and grants a driver one device node; the first vendor driver (and a real device to test it on) is the
+  missing half. Same for photonic and Majorana-based devices, which have no common interface - each needs its own driver written to the OpenQASM job protocol.
+- **A graphical display for converted programs.** `.deb`/AppImage programs run text-only. A nested X/Wayland server rendered into a window would let GUI AppImages run.
+- **Damage-rectangle compositing and a native blur.** Repaints are ~20 ms; most of that is re-rasterizing text and shapes in pure Python for every layer.
+- **A compiler.** Code lines in languages other than Python are understood but not run. Which language, and whether to drive a host compiler in the sandbox or write
+  one, is undecided.
 - **Dock polish.** Hover magnification beyond a small lift, labels on hover, drag-to-reorder pinned apps, and
   auto-hide (the layer exists to hide, but nothing triggers it yet).
 - **Verify `native-desktop/` on a live X11 session.** It was written without an X server: config syntax for polybar,

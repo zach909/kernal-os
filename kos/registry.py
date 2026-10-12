@@ -75,6 +75,22 @@ class Registry:
         os.chmod(self.dir, 0o700)
         atomic_write(self._file(inst.id), json.dumps(asdict(inst), indent=2).encode())
 
+    def write_new(self, inst: Instance) -> bool:
+        """Write the record only if there is none yet (atomically). The forking parent uses this: the child broker may have
+        already recorded ``running`` by the time the parent gets here, and the parent must not overwrite that with
+        ``starting`` (that race left apps stuck in "starting" under load). Returns whether it wrote."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.dir, 0o700)
+        tmp = self.dir / f".{inst.id}.{secrets.token_hex(3)}.tmp"
+        tmp.write_bytes(json.dumps(asdict(inst), indent=2).encode())
+        try:
+            os.link(tmp, self._file(inst.id))                 # fails if the child's record is already there
+            return True
+        except FileExistsError:
+            return False
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def get(self, instance_id: str) -> Instance:
         try:
             d = json.loads(self._file(instance_id).read_text())

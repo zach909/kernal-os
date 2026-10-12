@@ -22,6 +22,7 @@ listing reveals names the owner installed, and switching is an ``attach``
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import time
@@ -58,7 +59,14 @@ def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
         if prompter.confirm(f"{name} asks for network access. Allow?"):
             authority.authorize("app.network", name).close()
             allow_net = True
-    return SandboxPolicy(allow_network=allow_net,
+    devices: list[str] = []
+    if m.devices:                                    # hardware: named, asked for at every launch, never remembered
+        import glob
+        nodes = sorted({n for pat in m.devices for n in glob.glob(pat)})
+        if nodes and prompter.confirm(f"{name} asks to use: {', '.join(nodes)}. Allow?"):
+            authority.authorize("app.device", name).close()
+            devices = nodes
+    return SandboxPolicy(allow_network=allow_net, device_paths=devices,
                          weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
 
 
@@ -185,6 +193,25 @@ class SystemBridge:
             if action == "close":
                 inst = close_instance(self.paths, authority, req["id"])
                 result(True, f"closed {inst.id}", id=inst.id)
+                return None
+            if action == "quantum":
+                from . import qdev, qjob
+                if req["op"] == "devices":
+                    devs = qdev.with_drivers(qdev.detect(), self.paths)
+                    reply({"cmd": "quantum", "devices": [{**d.as_dict(), "name": clean_text(d.name, 120)} for d in devs]})
+                    return None
+                driver = req["driver"]
+                if not driver:                                   # pick the driver for the named device, else the emulator
+                    devs = qdev.with_drivers(qdev.detect(), self.paths)
+                    d = next((x for x in devs if x.id == req["device"] and x.drivers), None) or next((x for x in devs if x.drivers), None)
+                    driver = d.drivers[0] if d else ""
+                if not driver:
+                    return result(False, "no quantum driver is installed")
+                try:
+                    res = qjob.run_job(self.paths, authority, driver, {k: req.get(k) for k in ("program", "shots", "seed", "device")})
+                except qjob.JobError as e:
+                    return result(False, str(e))
+                reply({"cmd": "quantum", "result": json.loads(clean_text(json.dumps(res), 20000))})
                 return None
             if action == "autoupdate":
                 from .autoupdate import AutoUpdate

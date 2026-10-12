@@ -76,6 +76,7 @@ ACTIONS: dict[str, str] = {
     "backup.push": "push a backup to your private GitHub",
     "admin.boot": "boot the administrator keyboard",
     "sudo.open": "remember your password for a while (sudo window)",
+    "app.device": "give an app access to a hardware device",
     "mod.enable": "make a system mod part of your desktop",
     "mod.disable": "remove a system mod from your desktop",
     "policy.change": "change which layers ask for your password",
@@ -92,7 +93,7 @@ LAYER_OF: dict[str, str] = {
     "device.desktop": "interface",
     "app.install": "app", "app.update": "app", "app.update.all": "app", "app.remove": "app", "app.run": "app",
     "app.graphical": "app", "app.open": "app", "app.close": "app", "app.permit": "app", "app.revoke": "app",
-    "app.network": "app",
+    "app.network": "app", "app.device": "app",
     "file.view": "command", "file.write": "command", "file.change": "command", "code.run": "command",
     "backup.create": "command", "backup.push": "command", "backup.remote": "command",
     "process.signal": "command", "process.renice": "command", "net.check": "command", "scan.watch": "command",
@@ -103,7 +104,7 @@ LAYER_OF: dict[str, str] = {
 }
 # Never remembered by a sudo window, whatever layers it covers: these change who or what is trusted, or
 # send your data out. They ask every time.
-NEVER_REMEMBERED = frozenset({"session.login", "auth.change", "app.permit", "app.revoke", "app.network",
+NEVER_REMEMBERED = frozenset({"session.login", "auth.change", "app.permit", "app.revoke", "app.network", "app.device",
                               "sources.change", "backup.push", "backup.remote", "updates.install",
                               "admin.boot", "sudo.open", "policy.change", "cell.start", "cell.stop",
                               "mod.enable", "mod.disable"})

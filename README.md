@@ -224,6 +224,53 @@ The sidebar's **Notifications** tab shows what apps post (`notify`, rate-limited
 pinning needs no password, but opening it goes through the usual gates (a file asks for your password; a web address opens in the `browser` app, which has no
 network until you allow it and runs no scripts). The Super key or the KOS menu opens the launcher.
 
+### Multiples: seats, desktops, instances, displays
+
+Nothing in the interface assumes there is one of something. **Several mice and keyboards at once:** every mouse/keyboard pair is its own *seat* with its own
+pointer, focused window, drag and text box (the i-th keyboard and i-th mouse make seat i; seat 0 is drawn by the pointer app, the others by the OS in the seat's
+colour). **Several desktops:** four workspaces - windows belong to one, the interface is on all, **Ctrl-1 to Ctrl-4** switch, and numbered chips in the top panel
+show and switch them (asking for a window on another desktop goes there). **Several instances:** any number of an app can be open (`new`), opened in the
+background (minimized, no focus), and an app you started with `kos open` in a terminal is adopted into the desktop with no password. **Several displays:** each
+framebuffer is a display; they sit side by side as one wide screen with the panel, dock and sidebar on the first. *Honest limits:* seats and displays are written
+for real hardware and verified only with scripted devices and headless outputs; there is still one password prompt at a time (it appears on the first display), one
+sudo window per process, and the seat/pointer model has no per-seat password.
+
+### Self-healing
+
+If an interface app stops, the desktop **restarts it** (after 1, 3, 8 s, with a notification). An app whose process is gone needs a fresh start, which asks for
+your password (or is covered by a sudo window) - it never prompts silently; a mod that keeps failing is replaced by the built-in app for its slot. `kos heal`
+(also `f` in the Health app) looks at the state on disk: corrupt preference files are **moved aside, never deleted**, and defaults return (the password policy falls back
+to the strict setting); dead instance records and stale RAM scratch are cleaned; a missing or seal-failing **built-in** app is reinstalled from the copy shipped with KOS
+(password); a mod that no longer fits its slot is switched off. An app that is not built in and fails its seal is reported and left alone. A race that could leave a
+freshly started app stuck as "starting" (found by the benchmark under load) was fixed with an atomic create-if-absent.
+
+### Auto-update
+
+The Updates app (`kos autoupdate`) knows when an update is **due**, tells you in a notification, and updates every app from your sources with one click and one
+password. **Auto mode** runs a due update by itself *only* while you have a sudo window open that covers apps and commands - KOS never interrupts you with a
+prompt on its own, and truly unattended installs cannot exist because every install is sealed with a key derived from your password. **KOS itself** is
+fast-forwarded only with you (always asks). **The OS - kernel, drivers, firmware, packages** - is listed by kind (kernel, drivers, security, other) with the
+exact root command, because KOS holds no root and cannot install them. An update that asks for new permissions is held back for review.
+
+### Quantum and photonic hardware
+
+*What is real:* `kos quantum devices` finds what the machine shows - `/dev/qpu*`, `/dev/quantum*`, `/dev/qrng*`, `/dev/photonic*`, sysfs entries, hardware random sources
+that identify as quantum, and PCI ids you list in `/etc/kos/quantum-devices.json` - and says plainly when there is none. A **driver** is an ordinary app with
+`"driver": "quantum"` and `"devices": ["/dev/qpu*"]`: at launch KOS names the nodes, asks, and after your password (every time, never remembered) opens
+**exactly those nodes** to that app in the usual sandbox - no network, no files, nothing else in `/dev` (verified with real Landlock). Jobs use one protocol
+(OpenQASM in, counts out), so an app does not care which device. *What is not:* **no vendor driver is included and no real quantum device was available to test** -
+there is no standard Linux interface for quantum computers, photonic processors, "quantum RAM" or Majorana devices, so each needs its maker's driver written
+against this protocol. `examples/drivers/qsim` is a state-vector **emulator** that speaks the same protocol so the path can be tested; it is labelled an emulator
+everywhere. The Quantum app and `kos quantum run circuit.qasm` use it.
+
+### Speed
+
+`kos desktop bench` measures it. On the 1280x720 headless run here (a shared cloud VM): starting all 14 interface apps with one password takes about 1.3 s and
+they have drawn 0.17 s later; a cached frame is 0.3 ms; a repaint after the clock, the search box, the top panel or the dock changes is about 20 ms; the first frame
+is about 0.3 s. Two changes did most of it: a panel's glass cache now depends only on the layers that can actually reach it (typing in search had been re-blurring
+every panel: 570 ms -> 22 ms), and shadows touch each pixel once (7x faster). Text drawing skips empty pixels. Remaining cost is pure-Python pixel work; a damage-rectangle
+pass and native blur would be the next step (see `docs/IDEAS.md`).
+
 **Naming and assets:** KOS uses its own names (KOS Blue `#0078D4`, the Super key, the launcher). It follows conventions common to desktop
 environments - a top panel, a dock, tabs, a launcher - but copies no one's logos, icons, fonts, sounds or artwork: every icon and the wallpaper
 are drawn by code, and fonts are the system's own libre faces (Inter and the Liberation family are OFL/open licensed; the kit only *installs* them
