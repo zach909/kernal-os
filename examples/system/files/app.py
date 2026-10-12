@@ -40,6 +40,8 @@ def main():
             go(st["path"])
         elif cmd == "apps":
             st["open"] = ev["open"]
+        elif cmd == "launch" and ev.get("command") == "open-path" and ev.get("line"):
+            go(ev["line"])                          # a pinned folder
         elif cmd == "listing":
             st.update(path=ev["path"], entries=ev["entries"], sel=0, note="")
         elif cmd == "text":

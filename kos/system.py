@@ -69,16 +69,16 @@ def list_apps(paths: Paths) -> list[dict]:
     permits = PermitStore(paths)
     out = []
     for a in AppStore(paths).installed()[:MAX_LISTED]:
-        desc, modes, commands = "", ["tui"], []
+        desc, modes, commands, slot = "", ["tui"], [], ""
         try:
             m = KApp.from_file(paths.apps / f"{a.name}.kapp").manifest
-            desc, modes = m.description, list(m.modes)
+            desc, modes, slot = m.description, list(m.modes), m.slot
             commands = [{"id": c.id, "title": clean_text(c.title, 70), "keywords": list(c.keywords)}
                         for c in m.commands]
         except (KAppError, OSError):
             pass
         out.append({"name": a.name, "version": a.version,
-                    "description": clean_text(desc, 200), "modes": modes, "commands": commands,
+                    "description": clean_text(desc, 200), "modes": modes, "commands": commands, "slot": slot,
                     "permitted": permits.is_permitted(a.name)})
     return out
 
@@ -120,7 +120,7 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     if release:
         release()                          # e.g. close the TTY before forking the broker
     paths.ensure()
-    cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime == "npm")
+    cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime in ("npm", "bundle"))
     loader.apply_to_policy(policy, app, cache_dir)
     registry = Registry(paths)
     registry.prune()
@@ -130,7 +130,9 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     log_path=str(paths.logs / f"{inst_id}.log"), started=time.time(),
                     system="system" in app.manifest.permissions,
                     ticks="ticks" in app.manifest.permissions,
-                    shell="shell" in app.manifest.permissions)
+                    shell="shell" in app.manifest.permissions,
+                    pointer="pointer" in app.manifest.permissions,
+                    animate="animate" in app.manifest.permissions)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
@@ -183,6 +185,36 @@ class SystemBridge:
             if action == "close":
                 inst = close_instance(self.paths, authority, req["id"])
                 result(True, f"closed {inst.id}", id=inst.id)
+                return None
+            if action == "mods":
+                from .mods import Mods, ModError
+                mods = Mods(self.paths)
+                try:
+                    if req["op"] == "enable":
+                        with authority.authorize("mod.enable", req["name"]):
+                            mods.enable(req["name"])
+                            PermitStore(self.paths).grant(req["name"])
+                    elif req["op"] == "disable":
+                        with authority.authorize("mod.disable", req["name"]):
+                            mods.disable(req["name"])
+                except ModError as e:
+                    return result(False, str(e))
+                reply({"cmd": "mods", "mods": mods.installed(), "note": "restart the desktop to use the change" if req["op"] != "list" else ""})
+                return None
+            if action == "sudo":
+                from .auth import sudo_status
+                if req["op"] == "open":
+                    authority.sudo_open(req.get("minutes", 5), tuple(req.get("layers", ("interface", "app", "command"))))
+                elif req["op"] == "close":
+                    authority.sudo_close()
+                reply({"cmd": "sudo", **sudo_status(self.paths)})
+                return None
+            if action == "policy":
+                from .auth import Policy
+                if req["op"] == "set":
+                    authority.authorize("policy.change", f"interface={req['interface']}").close()
+                    Policy(self.paths).set_interface(req["interface"])
+                reply({"cmd": "policy", "interface": Policy(self.paths).interface()})
                 return None
             if action == "info":
                 reply({"cmd": "info", "admin": sysinfo.admin_line(self.paths),

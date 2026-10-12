@@ -1,6 +1,6 @@
 'use strict';
 // The dock: pinned apps, then anything else that is running, centered at the bottom on glass.
-// A dot under an icon means the app is open (Windows Blue when it is the active one). Click to
+// A dot under an icon means the app is open (KOS Blue when it is the active one). Click to
 // open it, or to bring its window forward. The dock asks the OS to size it to its icons; the OS
 // keeps it centered.
 const path = require('path');
@@ -9,7 +9,7 @@ const dir = path.dirname(process.env.KOS_SDK_JS);
 const G = require(path.join(dir, 'gfx.js'));
 const K = require(path.join(dir, 'kit.js'));
 const ACCENT = '#0078d4';
-const PINNED = ['files', 'terminal', 'editor', 'app-library', 'settings', 'security'];
+const PINNED = ['files', 'terminal', 'editor', 'browser', 'settings', 'security'];
 
 (async () => {
   const app = new App();
@@ -32,6 +32,7 @@ const PINNED = ['files', 'terminal', 'editor', 'app-library', 'settings', 'secur
       const x = g.pad + i * (g.icon + g.gap), hot = i === st.hover, wins = st.windows.filter((w) => w.name === it.name);
       const lift = hot ? 3 * g.u : 0, y = Math.round((H - g.icon) / 2) - 2 * g.u - lift;
       G.icon(c, x, y, g.icon, it.name, { hot });
+      c.hit(x - g.gap / 2, 0, g.icon + g.gap, H, it.name.replace(/-/g, ' ').replace(/^./, (m) => m.toUpperCase()));
       if (wins.length) {
         const active = wins.some((w) => w.focused);
         G.circle(c, x + Math.round(g.icon / 2), H - 4 * g.u, Math.round(1.6 * g.u) + (active ? 1 : 0), active ? ACCENT : '#ffffff');

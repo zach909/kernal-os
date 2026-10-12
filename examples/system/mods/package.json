@@ -1,0 +1,7 @@
+{
+  "name": "mods",
+  "version": "1.0.0",
+  "private": true,
+  "description": "System mods.",
+  "scripts": { "start": "node app.js" }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "neon-wallpaper",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": [],
+  "slot": "wallpaper",
+  "description": "A dusk-sky wallpaper with a banded sun, mountains and a perspective grid, drawn entirely by code."
+}

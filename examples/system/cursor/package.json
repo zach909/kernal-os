@@ -1,0 +1,7 @@
+{
+  "name": "cursor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The mouse pointer.",
+  "scripts": { "start": "node app.js" }
+}

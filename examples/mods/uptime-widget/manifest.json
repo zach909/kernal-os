@@ -1,0 +1,10 @@
+{
+  "name": "uptime-widget",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["ticks", "system"],
+  "slot": "widget",
+  "description": "A widget showing how long the machine has been up and its load."
+}

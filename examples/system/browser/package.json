@@ -1,0 +1,7 @@
+{
+  "name": "browser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A text-mode web browser.",
+  "scripts": { "start": "node app.js" }
+}

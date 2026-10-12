@@ -83,6 +83,9 @@ def main():
             app.request_apps()
         elif cmd == "apps":
             st["open"] = ev["open"]
+        elif cmd == "launch" and ev.get("command") == "open-file" and ev.get("line"):
+            st["note"] = "opening - type your password in the OS prompt"      # a pinned file
+            app.request_view(ev["line"])
         elif cmd == "text" and ev["action"] == "view":
             load(ev["lines"], ev["title"], bool(ev.get("lossy")))
         elif cmd == "text" and ev["action"] == "save":

@@ -43,7 +43,7 @@ _US = {
 }
 _NAMED = {1: "escape", 14: "backspace", 15: "tab", 28: "enter", 96: "enter",
           102: "home", 103: "up", 104: "pageup", 105: "left", 106: "right",
-          107: "end", 108: "down", 109: "pagedown", 111: "delete"}
+          107: "end", 108: "down", 109: "pagedown", 111: "delete", 125: "super", 126: "super"}
 _SHIFT = {42, 54}
 _CTRL = {29, 97}
 

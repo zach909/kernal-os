@@ -1,0 +1,12 @@
+{
+  "name": "launcher",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system", "shell"],
+  "description": "The launcher (the Super key): every app in one panel, with the same search as the desktop - apps and the commands they offer.",
+  "commands": [
+    {"id": "show", "title": "Show all apps", "keywords": ["launcher", "start", "menu", "apps", "all"]}
+  ]
+}

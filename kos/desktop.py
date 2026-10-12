@@ -24,8 +24,8 @@ from typing import Callable
 from .kapp import KAppError
 from .registry import RegistryError
 
-SYSTEM_APPS = ("wallpaper", "icons", "search", "widgets", "widget-clock", "widget-calendar",
-               "widget-network", "widget-system", "menubar", "dock", "taskbar", "app-library", "files", "editor", "backup", "settings", "security",
+SYSTEM_APPS = ("wallpaper", "pins", "search", "sidebar", "launcher", "widgets", "widget-clock", "widget-calendar",
+               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "browser", "app-library", "files", "editor", "backup", "settings", "security",
                "terminal", "processes", "memory", "filesystem", "devices", "network", "isolation",
                "health", "resources", "updates")
 DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library
@@ -76,9 +76,12 @@ def boot_core(paths, authority, *, mode: str = "graphical", devices: tuple = ("m
     from .store import AppStore
     from .system import open_background
 
+    from .mods import core_names
+    installed = {a.name for a in AppStore(paths).installed()}
+    wanted = core_names(paths, CORE, installed)               # the built-in core, each slot swapped for its enabled mod
     running = {i.name: i for i in Registry(paths).list() if i.status == "running" and i.mode == mode}
-    need = [n for n in CORE if n not in running]
-    missing = [n for n in need if n not in {a.name for a in AppStore(paths).installed()}]
+    need = [n for n in wanted if n not in running]
+    missing = [n for n in need if n not in installed]
     if missing:
         raise KAppError(f"{', '.join(missing)} not installed (run: kos desktop install)")
     action = "app.graphical" if mode == "graphical" else "app.open"
@@ -91,7 +94,22 @@ def boot_core(paths, authority, *, mode: str = "graphical", devices: tuple = ("m
             running[name] = open_background(paths, authority, name, mode, grant=grant)
         for grant in grants[len(need):]:
             grant.close()
-    return running
+    return {n: running[n] for n in wanted if n in running}
+
+
+def slot_of(paths, name: str) -> str:
+    """The interface slot an installed app fills: a mod's declared slot, else its own name."""
+    from .kapp import KApp
+    try:
+        return KApp.from_file(paths.apps / f"{name}.kapp").manifest.slot or name
+    except Exception:
+        return name
+
+
+def attach_core(paths, shell, core: dict) -> None:
+    """Add each running interface app to the shell in the slot it fills."""
+    for inst in core.values():
+        shell.add_core(inst, slot=slot_of(paths, inst.name))
 
 
 def make_shell(paths, authority, backend, devices, **kw):

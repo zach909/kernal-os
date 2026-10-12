@@ -22,6 +22,7 @@ class Canvas {
   clear(color) { this.ops.push(['clear', color]); return this; }
   rect(x, y, w, h, color) { this.ops.push(['rect', Math.round(x), Math.round(y), Math.round(w), Math.round(h), color]); return this; }
   line(x0, y0, x1, y1, color) { this.ops.push(['line', Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1), color]); return this; }
+  hit(x, y, w, h, label) { this.ops.push(['hit', Math.round(x), Math.round(y), Math.round(w), Math.round(h), String(label)]); return this; }
   stext(x, y, s, color, px = 14, face = 0) { this.ops.push(['stext', Math.round(x), Math.round(y), String(s), color, Math.round(px), face]); return this; }
   text(x, y, s, color, scale = 1) { this.ops.push(['text', Math.round(x), Math.round(y), String(s), color, scale]); return this; }
 }
@@ -38,6 +39,8 @@ class App {
     this.scale = 1;
     this.insets = [0, 0, 0, 0];
     this.font = {};
+    this.look = 'normal';
+    this.options = {};
     this.devices = new Set();
   }
 
@@ -64,6 +67,13 @@ class App {
         this.scale = ev.scale || this.scale;
         this.insets = ev.insets || this.insets;
         this.font = ev.font || this.font;
+        this.look = ev.look || this.look;
+        this.options = ev.options || this.options;
+        try { require('./gfx.js').setLook(this.look); } catch { /* an app may not use the drawing kit */ }
+      } else if (ev.cmd === 'look') {
+        this.look = ev.look || this.look;
+        this.options = ev.options || this.options;
+        try { require('./gfx.js').setLook(this.look); } catch { /* ditto */ }
       } else if (ev.cmd === 'device' && ev.state === 'attached') {
         this.devices.add(ev.device);
       } else if (ev.cmd === 'quit') {
@@ -103,6 +113,19 @@ class App {
   requestRenice(pid, nice) { this.send({ cmd: 'request', action: 'renice', pid, nice }); }
   requestFsChange(op, p, extra = {}) { this.send({ cmd: 'request', action: 'fschange', op, path: p, ...extra }); }
   requestUpdates(op, extra = {}) { this.send({ cmd: 'request', action: 'updates', op, ...extra }); }
+  requestAnimate(on) { this.send({ cmd: 'request', action: 'animate', on: !!on }); }
+  requestLook(opts = {}) { this.send({ cmd: 'request', action: 'look', op: Object.keys(opts).length ? 'set' : 'get', ...opts }); }
+  requestToggle(app) { this.send({ cmd: 'request', action: 'toggle', app }); }
+  requestNotify(title, body = '') { this.send({ cmd: 'request', action: 'notify', op: 'post', title, body }); }
+  requestNotifyClear() { this.send({ cmd: 'request', action: 'notify', op: 'clear' }); }
+  requestNotifyDismiss(id) { this.send({ cmd: 'request', action: 'notify', op: 'dismiss', id }); }
+  requestKeys(on) { this.send({ cmd: 'request', action: 'keys', on: !!on }); }
+  requestTab(name) { this.send({ cmd: 'request', action: 'tab', name }); }
+  requestLinks(op = 'list', fields = {}) { this.send({ cmd: 'request', action: 'links', op, ...fields }); }
+  requestOpenLink(id) { this.send({ cmd: 'request', action: 'openlink', id }); }
+  requestMods(op = 'list', name = '') { this.send({ cmd: 'request', action: 'mods', op, ...(op !== 'list' ? { name } : {}) }); }
+  requestPolicy(op = 'get', iface = '') { this.send({ cmd: 'request', action: 'policy', op, ...(op === 'set' ? { interface: iface } : {}) }); }
+  requestSudo(op = 'status', minutes = 5, layers = ['interface', 'app', 'command']) { this.send({ cmd: 'request', action: 'sudo', op, ...(op === 'open' ? { minutes, layers } : {}) }); }
   requestResize(w = 0, h = 0) { this.send({ cmd: 'request', action: 'resize', ...(w ? { w: Math.round(w) } : {}), ...(h ? { h: Math.round(h) } : {}) }); }
   requestLayout(order, hidden) { this.send({ cmd: 'request', action: 'layout', order, hidden }); }
   requestNetCheck() { this.send({ cmd: 'request', action: 'netcheck' }); }

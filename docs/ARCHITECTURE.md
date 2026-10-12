@@ -103,6 +103,33 @@ state of every file it touches in a baseline that later runs never overwrite, so
 times you applied. It never uses root outside the package step, never replaces your window manager, and refuses
 on Wayland. It could not be exercised against a live X server in the development environment.
 
+## Password layers and the sudo window (`kos/auth.py`)
+Every action belongs to one of four layers (`LAYER_OF`): interface, app, command, kernel. `Authority.authorize` first asks `_shortcut`: the interface layer
+may be set to "off" (`Policy`, a kernel-layer change; those grants carry no key, so nothing can be sealed with them), and a live **sudo window** may cover
+the interface/app/command layers. The window is a module-level object holding the master key in locked memory (`SecretBytes`) with a monotonic deadline:
+in-process only, never written, bounded to 60 minutes, closed by `sudo off`. `NEVER_REMEMBERED` (permissions, password change, sources, pushes, KOS updates,
+mods, cells, the policy itself, the window) always prompts, and the kernel layer cannot be named in a window. Gap: inside a window, a permitted app with the
+`system` permission can trigger remembered actions without a prompt; the prompt is still the OS's own, and every use is audited as `granted-sudo`.
+
+## Looks, controls, the pointer and effects (`kos/looks.py`, `kos/shell.py`)
+Apps declare controls with invisible `hit` ops; `Shell.controls()` gathers them with the window frames the OS draws, and `activate()` presses one by sending
+the click an equivalent pointer would. That one list drives the terminal look, Tab/Enter in every look, and the `[Label]` text look. The pointer and the click
+effects are apps in overlay layers: the shell moves their small layers (centered on the pointer or the click), never routes them input, sends them `cursor`
+and `click` events (permission `pointer`) and, while they ask for it (permission `animate`), 24 `anim` events a second. The composed base frame is cached by
+a signature of every layer's revision/rect/visibility, so overlays and the pointer repaint a copy of a cached frame; the glass of each layer is cached as before.
+The 3D tilt shears that frame (rows and 16 px strips). Gap: no per-pixel perspective; layers still repaint their content on every base rebuild.
+
+## Foreign programs: the bundle runtime (`kos/convert.py`, `kos/hostrun.py`)
+`kos convert` turns a `.deb` or an AppImage into a `runtime: "bundle"` app: a program tree. `loader._plan_bundle` unpacks it read-only into RAM, writes a tiny
+`package.json` whose `start` script launches `kos/hostrun.py` (a Python adapter, inside the sandbox) via `npm run start`, and the adapter starts the program as
+its child - the child inherits Landlock, the empty network namespace and no_new_privs. AppImages additionally get their private scratch directory marked
+executable (`exec_scratch`) because their runtime unpacks there; the sandbox now also allows symlinks in scratch. The converter never executes anything,
+drops setuid bits, resolves symlinks inside the package only, ignores maintainer scripts, scans the result and refuses a flagged one.
+
+## System mods (`kos/mods.py`)
+Slots, ceilings and the enabled set live in `<state>/mods.json`. `desktop.boot_core` asks `mods.core_names` which app to run for each slot; the shell tracks
+`Layer.slot`, so everything that used to look up "dock" or "search" by app name works for a mod filling that slot. A widget mod is a new widget slot.
+
 ## Built-in apps, backups, off-site (`kos/sysinfo.py`, `kos/backup.py`, `kos/offsite.py`)
 More `request`s on the same bridge: `info`, `ls`, `view` (password), `scan`,
 `optimize`/`settle` (password), `permit`/`revoke` (password), `line` (the line

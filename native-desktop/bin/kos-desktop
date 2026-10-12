@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kos-desktop - apply, preview, reload, revert the KOS native desktop (macOS-style layout, Windows Blue accent).
+# kos-desktop - apply, preview, reload, revert the KOS native desktop (top panel, floating dock, KOS Blue accent).
 #
 #   kos-desktop status               what is installed and running
 #   kos-desktop preview [SECONDS]    try it for a while (default 30) WITHOUT changing any of your files

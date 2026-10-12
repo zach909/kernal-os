@@ -43,10 +43,15 @@ MAX_RATIO = 200
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 NPM_ENTRY_RE = re.compile(r"^(?:npx:[A-Za-z0-9._-]{1,60}|[A-Za-z0-9:_-]{1,40})$")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
-RUNTIMES = {"python", "native", "npm"}
+RUNTIMES = {"python", "native", "npm", "bundle"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network", "system", "ticks", "shell"}
-_MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description", "commands"}
+PERMISSIONS = {"network", "system", "ticks", "shell", "pointer", "animate"}
+# Interface slots a "mod" can fill (kos/mods.py decides what each may ask for).
+SLOTS = {"wallpaper", "menubar", "dock", "pins", "search", "widgets", "cursor", "effects", "sidebar", "launcher",
+         "pins", "widget"}
+BUNDLE_ENTRY_RE = re.compile(r"^[A-Za-z0-9._+-][A-Za-z0-9._+/-]{0,199}$")
+_MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description", "commands",
+                  "args", "slot", "exec_scratch"}
 COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,60}$")
 MAX_COMMANDS = 24
 
@@ -74,6 +79,9 @@ class Manifest:
     permissions: tuple[str, ...] = ()
     description: str = ""
     commands: tuple[Command, ...] = ()
+    args: tuple[str, ...] = ()          # bundle: arguments the program is started with
+    slot: str = ""                      # mod: the interface slot this app fills
+    exec_scratch: bool = False          # bundle: the program unpacks code into its scratch dir and runs it (AppImage)
 
     @classmethod
     def parse(cls, raw: bytes) -> "Manifest":
@@ -110,8 +118,21 @@ class Manifest:
         if d["runtime"] == "python" and not re.match(
                 r"^[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?$", d["entry"]):
             raise KAppError("python entry must look like 'module' or 'module:function'")
+        args = d.get("args", [])
+        if (not isinstance(args, list) or len(args) > 8
+                or not all(isinstance(a, str) and len(a) <= 128 and a.isprintable() for a in args)):
+            raise KAppError("args must be up to 8 short printable strings")
+        slot = d.get("slot", "")
+        if slot and slot not in SLOTS:
+            raise KAppError(f"slot must be one of {sorted(SLOTS)}")
+        xs = d.get("exec_scratch", False)
+        if not isinstance(xs, bool) or (xs and d["runtime"] != "bundle"):
+            raise KAppError("exec_scratch is only for bundle apps")
+        if d["runtime"] == "bundle" and (not BUNDLE_ENTRY_RE.match(d["entry"]) or ".." in d["entry"].split("/")):
+            raise KAppError("a bundle entry is a path inside the archive")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
-                   modes=modes, permissions=perms, description=desc, commands=_commands(d.get("commands", [])))
+                   modes=modes, permissions=perms, description=desc, commands=_commands(d.get("commands", [])),
+                   args=tuple(args), slot=slot, exec_scratch=xs)
 
 
 def _commands(raw) -> tuple[Command, ...]:
@@ -210,6 +231,10 @@ class KApp:
 
     def names(self) -> list[str]:
         return sorted(self._names)
+
+    def mode_of(self, name: str) -> int:
+        """The permission bits the archive recorded for a file (executable or not)."""
+        return (self._zip.getinfo(name).external_attr >> 16) & 0o777
 
     def read(self, name: str, limit: int = MAX_UNCOMPRESSED) -> bytes:
         _check_member_name(name)

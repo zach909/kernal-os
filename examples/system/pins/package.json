@@ -1,0 +1,7 @@
+{
+  "name": "pins",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop pins.",
+  "scripts": { "start": "node app.js" }
+}

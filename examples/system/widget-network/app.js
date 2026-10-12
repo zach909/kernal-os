@@ -19,6 +19,7 @@ const K = require(path.join(dir, 'kit.js'));
     G.stext(c, app, 34 * u, 3 * u, link ? `${link.name}   ${link.ipv4}` : 'Not connected', '#ffffff', 8 * u, 1);
     G.stext(c, app, 34 * u, 15 * u, `Down ${K.bytes(st.rx)}/s    Up ${K.bytes(st.tx)}/s`, '#cfe3ff', 6 * u + 1);
     btn = { x: 8 * u, y: H - 17 * u, w: 56 * u, h: 13 * u };
+    c.hit(btn.x, btn.y, btn.w, btn.h, 'Check the internet');
     G.roundRect(c, btn.x, btn.y, btn.w, btn.h, Math.round(btn.h / 2), st.hover ? '#2b88d8' : G.ACCENT);
     G.stextCentered(c, app, btn.x + btn.w / 2, btn.y + Math.round((btn.h - 6 * u * 1.2) / 2), 'Check', '#ffffff', 6 * u + 1, 1);
     G.stext(c, app, btn.x + btn.w + 8 * u, btn.y + 3 * u, (st.inet || 'Not checked').slice(0, Math.floor((W - btn.w - 24 * u) / (3.4 * u))), st.inet.startsWith('No i') ? '#ffb0a0' : '#dbe7f5', 6 * u + 1);

@@ -1,15 +1,15 @@
 # KOS native desktop
 
-The macOS-style layout, with Windows Blue (`#0078D4`) as the accent, running **natively on your own X11
+The top-panel-and-floating-dock layout, with KOS Blue (`#0078D4`) as the accent, running **natively on your own X11
 session** - no virtual desktop, no container, no nested shell. It configures real programs that talk to your
 real display server and your real root filesystem's fonts, icons and settings.
 
 | Piece | Program | What it does |
 |---|---|---|
-| Top panel | **polybar** | KOS menu, active window title, CPU/memory, network, audio, clock; Windows Blue underline on the clock |
+| Top panel | **polybar** | KOS menu, active window title, CPU/memory, network, audio, clock; KOS Blue underline on the clock |
 | Floating dock | **plank** | centered at the bottom, rounded glass, zoom on hover, auto-hides when a window needs the space (`hide-mode='intelligent'`) |
 | Glass / corners / shadows | **picom** | blur behind translucent surfaces, 12px rounded corners, soft shadows, short fades |
-| Launcher | **rofi** | search box with a Windows Blue border and selection |
+| Launcher | **rofi** | search box with a KOS Blue border and selection |
 | Icons | **Papirus** | the icon pack (GTK is told to use `Papirus-Dark`) |
 | Font | **Inter** | clean modern sans-serif; fontconfig makes it the default `sans-serif` with light hinting |
 | Accent in GTK apps | `gtk.css` | `#0078D4` for selection, focus, links (GTK 3 and GTK 4 / libadwaita) |

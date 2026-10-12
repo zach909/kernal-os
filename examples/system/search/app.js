@@ -17,7 +17,7 @@ const CODE = /[()=\[\]{};]|^(print|import|def|class|for|while|let|const|var|echo
   const st = { apps: [], query: '', sel: 0, active: false, note: '', asked: 0 };
   const items = () => {
     const out = [];
-    for (const a of st.apps.filter((x) => !SHELL.has(x.name))) {
+    for (const a of st.apps.filter((x) => !SHELL.has(x.name) && !x.slot)) {
       out.push({ kind: 'app', name: a.name, app: a.name, sub: a.description, words: [a.description, ...a.commands.flatMap((c) => [c.title, ...c.keywords])], boost: 3 });
       for (const c of a.commands) out.push({ kind: 'command', name: c.title, app: a.name, id: c.id, sub: `in ${a.name}`, words: [c.id, ...c.keywords, a.name] });
     }
@@ -44,6 +44,7 @@ const CODE = /[()=\[\]{};]|^(print|import|def|class|for|while|let|const|var|echo
     const px = 8 * u, ty = Math.round((26 * u - px * 1.2) / 2) + 1;
     G.roundRect(c, 0, 0, W, 26 * u + 2, 13 * u, st.active || st.query ? ACCENT : '#aab4c4');
     G.roundRect(c, 1, 1, W - 2, 26 * u, 13 * u - 1, '#14171c');
+    c.hit(0, 0, W, 26 * u + 2, 'Search');
     G.ring(c, 14 * u, 12 * u, 4 * u, '#cfe3ff'); c.line(17 * u, 15 * u, 21 * u, 19 * u, '#cfe3ff');           // magnifier
     const room = W - 44 * u;
     let q = st.query;
@@ -56,6 +57,7 @@ const CODE = /[()=\[\]{};]|^(print|import|def|class|for|while|let|const|var|echo
       res.forEach((r, i) => {
         const y = py + 4 * u + i * rowH();
         if (i === st.sel) G.roundRect(c, 4 * u, y, W - 8 * u, rowH() - 2 * u, 7 * u, ACCENT);
+        c.hit(4 * u, y, W - 8 * u, rowH() - 2 * u, r.name);
         G.icon(c, 10 * u, y + 2 * u, 18 * u, r.app);
         const name = r.name, sub = (r.kind === 'app' ? 'App' : r.kind === 'command' ? 'Command' : 'Run') + ' - ' + String(r.sub || '');
         c.stext(36 * u, y + 2 * u, name, '#ffffff', 7 * u + 1, 1);

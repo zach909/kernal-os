@@ -1,0 +1,15 @@
+{
+  "name": "appearance",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system", "shell"],
+  "description": "Appearance: choose the look (normal, 3D, text, terminal) and how the pointer, tilt and click bubbles behave.",
+  "commands": [
+    {"id": "look-3d", "title": "Switch to the 3D look", "keywords": ["3d", "depth", "tilt", "bubbles"]},
+    {"id": "look-normal", "title": "Switch to the normal look", "keywords": ["normal", "default", "flat"]},
+    {"id": "look-text", "title": "Switch to the text look", "keywords": ["text", "ascii", "console"]},
+    {"id": "look-terminal", "title": "Switch to the terminal look (a list of every button)", "keywords": ["terminal", "keyboard", "buttons", "list"]}
+  ]
+}

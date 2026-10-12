@@ -1,0 +1,7 @@
+{
+  "name": "appearance",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Appearance settings.",
+  "scripts": { "start": "node app.js" }
+}

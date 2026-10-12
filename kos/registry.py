@@ -42,6 +42,8 @@ class Instance:
     system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
     ticks: bool = False       # manifest has 'ticks': the OS sends it a tick event every second
     shell: bool = False       # manifest has 'shell': may resize its own layer / arrange the widgets
+    pointer: bool = False     # manifest has 'pointer': is told where the pointer is and where clicks land
+    animate: bool = False     # manifest has 'animate': may ask for ~24 animation ticks a second while it needs them
 
 
 def _alive(pid: int) -> bool:

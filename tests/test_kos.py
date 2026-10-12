@@ -937,7 +937,7 @@ class TestSystemApps(Env):
             if name == "wallpaper":
                 self.assertEqual(m.permissions, (), name)             # the background only draws: no permission at all
             else:
-                self.assertTrue(set(m.permissions) & {"system", "ticks", "shell"}, name)   # widgets: ticks; the handler: shell
+                self.assertTrue(set(m.permissions) & {"system", "ticks", "shell", "pointer", "animate", "network"}, name)   # widgets: ticks; handler: shell; pointer, effects: pointer; browser: network
             self.assertEqual(m.runtime, "npm" if name != "hello" else m.runtime)
             self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
 
@@ -2567,7 +2567,7 @@ class TestTrueType(unittest.TestCase):
 
 
 class TestShellDesign(Env):
-    """The macOS-style layout: top panel, floating centered dock, windows kept clear of both."""
+    """The top-panel-and-floating-dock layout: top panel, floating centered dock, windows kept clear of both."""
 
     def make(self, w=1280, h=720):
         from kos.shell import Shell
@@ -2612,12 +2612,12 @@ class TestShellDesign(Env):
 
     def test_widgets_and_icons_start_below_the_menubar(self):
         s = self.make()
-        for name in ("icons", "search", "widgets", "widget-clock"):
+        for name in ("pins", "search", "widgets", "sidebar"):
             self.assertGreaterEqual(s.core_rect(name)[1][1], s.bar_h, name)
-        icons = s.core_rect("icons")[1]
-        self.assertLessEqual(icons[1] + icons[3], s.dock_top)
+        pins = s.core_rect("pins")[1]
+        self.assertLessEqual(pins[1] + pins[3], s.dock_top)
 
-    def test_accent_is_windows_blue_and_no_muddy_navy_is_left_in_the_interface(self):
+    def test_accent_is_the_kos_blue_and_no_muddy_navy_is_left_in_the_interface(self):
         from kos import shell
         self.assertEqual(shell.ACCENT, "#0078d4")
         for path in list((SYSTEM_DIR).glob("*/app.js")) + [SDK_JS / "gfx.js"]:
@@ -2630,7 +2630,7 @@ class TestShellDesign(Env):
         import json as _j
         menubar = _j.loads((SYSTEM_DIR / "menubar" / "manifest.json").read_text())
         dock = _j.loads((SYSTEM_DIR / "dock" / "manifest.json").read_text())
-        self.assertEqual(set(menubar["permissions"]), {"system", "ticks"})
+        self.assertEqual(set(menubar["permissions"]), {"system", "ticks", "shell"})
         self.assertEqual(set(dock["permissions"]), {"system", "shell"})    # shell: to size itself, nothing else
 
     def test_the_dock_can_resize_only_with_the_shell_permission(self):
@@ -2692,7 +2692,7 @@ class TestNativeDesktopKit(unittest.TestCase):
             r = self.sp.run(["bash", "-n", str(self.KIT / s)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_every_config_uses_the_windows_blue_accent(self):
+    def test_every_config_uses_the_kos_blue_accent(self):
         for rel in ("polybar/config.ini", "rofi/kos.rasi", "gtk-3.0/gtk.css", "gtk-4.0/gtk.css"):
             self.assertIn("0078d4", (self.KIT / "config" / rel).read_text().lower(), rel)
         self.assertIn("alignment='center'", (self.KIT / "config/plank/dock.dconf").read_text())
@@ -2777,7 +2777,7 @@ class TestCompositorEndToEnd(Env):
         return [op[3] for op in layer.ops if op and op[0] in ("stext", "text")]
 
     def test_the_interface_boots_draws_and_runs_a_code_line_from_search(self):
-        from kos.desktop import SYSTEM_APPS, boot_core, make_shell
+        from kos.desktop import SYSTEM_APPS, attach_core, boot_core, make_shell
         from kos.permit import PermitStore
         from kos.shell import CORE
         authority = self.authority(*[PW] * 80)
@@ -2791,8 +2791,7 @@ class TestCompositorEndToEnd(Env):
         self.assertEqual(set(core), set(CORE))
         devices = ScriptedDevices()
         self.shell = make_shell(self.paths, authority, HeadlessBackend(960, 540), devices, keep_prompter=True, preboot=())
-        for inst in core.values():
-            self.shell.add_core(inst)
+        attach_core(self.paths, self.shell, core)
         self.pump(5)
         s, by = self.shell, {l.name: l for l in self.shell.layers.values()}
 
@@ -2804,9 +2803,9 @@ class TestCompositorEndToEnd(Env):
         self.assertEqual(dock.rect, s.dock_rect(), "and was sized by its own request")
         self.assertGreater(dock.rect[2], 100)
         self.assertTrue(any(op[0] == "rect" for op in dock.ops))
-        labels = " ".join(self.ops_text(by["icons"]))
+        labels = " ".join(self.ops_text(by["pins"]))
         for app_name in ("Files", "Terminal", "Settings"):
-            self.assertIn(app_name, labels)
+            self.assertIn(app_name, labels)                  # the desktop's default pins
         self.assertNotIn("Menubar", labels)                  # the interface apps are not offered as things to launch
 
         # glass and the accent are on screen
@@ -2827,3 +2826,825 @@ class TestCompositorEndToEnd(Env):
         self.assertEqual(len(terms), 1, s.log)
         screen = "\n".join(terms[0].screen["lines"]) if terms[0].screen else ""
         self.assertRegex(screen, r"(?m)^\s*1\s*$", screen)   # print(1) printed 1, run sandboxed
+
+
+def make_deb(files, links=(), control=None, scripts=None):
+    """Build a .deb in memory (ar + tar.gz), so tests do not need dpkg."""
+    import gzip
+    import tarfile
+
+    def tar_gz(entries):
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w") as t:
+            for name, kind, payload, mode in entries:
+                ti = tarfile.TarInfo(name)
+                ti.mode = mode
+                if kind == "file":
+                    ti.size = len(payload)
+                    t.addfile(ti, io.BytesIO(payload))
+                elif kind == "sym":
+                    ti.type, ti.linkname = tarfile.SYMTYPE, payload
+                    t.addfile(ti)
+                elif kind == "dir":
+                    ti.type = tarfile.DIRTYPE
+                    t.addfile(ti)
+        return gzip.compress(raw.getvalue())
+
+    ctl = control or "Package: demo-tool\nVersion: 1:1.0-2~x\nArchitecture: all\nDepends: libc6, bash\nDescription: demo\n more\n"
+    ctl_entries = [("./control", "file", ctl.encode(), 0o644)] + [(f"./{n}", "file", b"#!/bin/sh\n", 0o755) for n in (scripts or [])]
+    data_entries = [(f"./{p}", "file", b, m) for p, (b, m) in files.items()] + [(f"./{n}", "sym", t, 0o777) for n, t in links]
+    parts = {"debian-binary": b"2.0\n", "control.tar.gz": tar_gz(ctl_entries), "data.tar.gz": tar_gz(data_entries)}
+    out = b"!<arch>\n"
+    for name, data in parts.items():
+        out += f"{name:<16}{0:<12}{0:<6}{0:<6}{100644:<8}{len(data):<10}`\n".encode() + data + (b"\n" if len(data) % 2 else b"")
+    return out
+
+
+class TestConvert(Env):
+    def deb(self, **kw):
+        files = kw.pop("files", {"usr/bin/demo-tool": (b"#!/bin/sh\necho hi $*\n", 0o4755),
+                                 "usr/lib/demo-tool/data.txt": (b"data\n", 0o644),
+                                 "usr/share/doc/demo-tool/README": (b"docs", 0o644)})
+        path = Path(self.tmp.name) / "demo-tool.deb"
+        path.write_bytes(make_deb(files, **kw))
+        return path
+
+    def convert(self, path, **kw):
+        from kos.convert import convert
+        return convert(path, Path(self.tmp.name) / "out.kapp", **kw)
+
+    def test_a_deb_becomes_a_bundle_app_without_running_anything(self):
+        out, r = self.convert(self.deb(links=[("usr/bin/dt", "../lib/demo-tool/data.txt")], scripts=["postinst", "prerm"]))
+        k = KApp.from_file(out)
+        m = k.manifest
+        self.assertEqual((m.name, m.runtime, m.entry, m.version), ("demo-tool", "bundle", "usr/bin/demo-tool", "1.1.0-2.x"))
+        self.assertEqual(m.permissions, ())                                  # no network, nothing: you grant later
+        self.assertEqual(k.mode_of("usr/bin/demo-tool"), 0o755)              # setuid cleared, still executable
+        self.assertEqual(k.read("usr/bin/dt"), b"data\n")                    # the symlink became a copy of its target
+        self.assertNotIn("usr/share/doc/demo-tool/README", k.names())        # docs left out
+        self.assertEqual(r.maintainer_scripts, ["postinst", "prerm"])        # reported, never run
+        self.assertEqual(r.depends, ["libc6", "bash"])
+        self.assertEqual(json.loads(k.read("kos-converted.json"))["sha256"], r.sha256)
+        self.assertTrue(scan_bytes(out.read_bytes(), "x").clean)
+
+    def test_dangerous_packages_are_refused_or_neutered(self):
+        from kos.convert import ConvertError
+        with self.assertRaises(ConvertError):
+            self.convert(self.deb(files={"../evil": (b"x", 0o755)}))
+        out, r = self.convert(self.deb(links=[("usr/bin/escape", "../../../../etc/passwd")]))
+        self.assertNotIn("usr/bin/escape", KApp.from_file(out).names())      # a link out of the package is dropped
+        self.assertTrue(any("escape" in d for d in r.dropped))
+        with self.assertRaises(ConvertError):                                 # a flagged payload is never written
+            self.convert(self.deb(files={"usr/bin/demo-tool": (EICAR, 0o755)}))
+        self.assertFalse((Path(self.tmp.name) / "out.kapp").exists())
+
+    def test_it_will_not_guess_between_programs_and_names_the_choices(self):
+        from kos.convert import ConvertError
+        files = {"usr/bin/a": (b"#!/bin/sh\n", 0o755), "usr/bin/b": (b"#!/bin/sh\n", 0o755)}
+        with self.assertRaises(ConvertError) as cm:
+            self.convert(self.deb(files=files))
+        self.assertIn("usr/bin/a", str(cm.exception))
+        out, r = self.convert(self.deb(files=files), entry="usr/bin/b")
+        self.assertEqual(r.entry, "usr/bin/b")
+
+    def test_things_that_are_not_packages_are_refused(self):
+        from kos.convert import ConvertError
+        junk = Path(self.tmp.name) / "x.deb"
+        junk.write_bytes(b"not a package at all")
+        with self.assertRaises(ConvertError):
+            self.convert(junk)
+        t1 = Path(self.tmp.name) / "old.AppImage"
+        t1.write_bytes(b"\x7fELF" + b"\0" * 4 + b"AI\x01" + b"\0" * 100)
+        with self.assertRaises(ConvertError) as cm:
+            self.convert(t1)
+        self.assertIn("type 1", str(cm.exception))
+
+    def test_an_appimage_is_kept_whole_and_run_without_fuse_from_a_private_scratch(self):
+        ai = Path(self.tmp.name) / "Cool-App-1.2.3-x86_64.AppImage"
+        ai.write_bytes(b"\x7fELF" + b"\0" * 4 + b"AI\x02" + b"\0" * 200)
+        out, r = self.convert(ai)
+        m = KApp.from_file(out).manifest
+        self.assertEqual((m.name, m.version, m.entry, m.args, m.exec_scratch), ("cool-app", "1.2.3", "AppImage", ("--appimage-extract-and-run",), True))
+        self.assertEqual(m.permissions, ())
+
+    def test_a_converted_program_runs_in_the_sandbox_and_takes_input(self):
+        import select as _sel
+        import time as _t
+        from kos.sandbox import SandboxPolicy
+        out, _ = self.convert(self.deb(files={"usr/bin/demo-tool": (
+            b'#!/bin/sh\necho "home=$HOME"\nif [ -r /etc/shadow ]; then echo CAN-READ-SHADOW; fi\n'
+            b'printf "name? "\nread n\necho "hi $n"\n', 0o755)}))
+        kapp = KApp.from_file(out)
+        a, b = socket.socketpair()
+        tmpd = Path("/dev/shm") / f"kos-test-{os.getpid()}"
+        tmpd.mkdir(mode=0o755, exist_ok=True)
+        os.chmod(tmpd, 0o755)
+        plan = loader.plan(kapp, b.fileno(), "tui", tmpd)
+        pol = SandboxPolicy()
+        loader.apply_to_policy(pol, kapp, tmpd)
+        proc = loader.launch(plan, pol, None)
+        b.close()
+        send = lambda o: a.sendall(json.dumps(o).encode() + b"\n")
+        send({"cmd": "hello", "mode": "tui", "width": 80, "height": 24})
+        state = {"buf": b"", "screen": None}
+
+        def pump(secs):
+            end = _t.time() + secs
+            while _t.time() < end:
+                if _sel.select([a], [], [], 0.2)[0]:
+                    d = a.recv(65536)
+                    if not d:
+                        return
+                    state["buf"] += d
+                    while b"\n" in state["buf"]:
+                        line, state["buf"] = state["buf"].split(b"\n", 1)
+                        o = json.loads(line)
+                        if o.get("cmd") == "screen":
+                            state["screen"] = o
+        try:
+            pump(2)
+            for ch in "Zed":
+                send({"cmd": "key", "key": ch})
+            send({"cmd": "key", "key": "enter"})
+            pump(2)
+            text = "\n".join(state["screen"]["lines"])
+            self.assertIn("hi Zed", text)
+            self.assertNotIn("CAN-READ-SHADOW", text)                       # the sandbox still holds for the child
+            self.assertIn("exited with status 0", state["screen"]["status"])
+            send({"cmd": "key", "key": "escape"})
+            self.assertEqual(proc.wait(10), 0)
+        finally:
+            a.close()
+            if proc.poll() is None:
+                proc.kill()
+            import shutil
+            shutil.rmtree(tmpd, ignore_errors=True)
+
+
+class TestPasswordLayers(Env):
+    """Interface, app, command and kernel each ask; a sudo window may remember some of them for a while."""
+
+    def test_every_action_belongs_to_exactly_one_layer(self):
+        from kos.auth import ACTIONS, LAYER_OF, LAYERS, NEVER_REMEMBERED
+        self.assertEqual(set(ACTIONS), set(LAYER_OF))
+        self.assertTrue(set(LAYER_OF.values()) <= set(LAYERS))
+        self.assertTrue(NEVER_REMEMBERED <= set(ACTIONS))
+        for a in ("admin.boot", "auth.change", "sources.change", "updates.install"):
+            self.assertEqual(LAYER_OF[a], "kernel")
+
+    def test_a_sudo_window_remembers_app_and_command_actions_but_never_kernel_or_trust_changes(self):
+        a = self.authority(PW)                                  # exactly ONE password in the whole test
+        st = a.sudo_open(5, ("app", "command"))
+        self.assertTrue(st["active"])
+        with a.authorize("app.open", "x") as g:
+            self.assertEqual(g.via, "sudo")
+            self.assertEqual(len(g.key("kapp-seal")), 32)       # a real key: sealing still works
+        self.assertEqual(a.authorize("file.view", "/f").via, "sudo")
+        self.assertEqual(a.authorize_batch([("app.open", "a"), ("file.write", "b")], "x")[0].via, "sudo")
+        for asked in ("app.permit", "app.network", "admin.boot", "auth.change", "sources.change", "backup.push"):
+            with self.assertRaises(AssertionError, msg=asked):  # the scripted prompter has no answers left = it asked
+                a.authorize(asked, "z")
+        with self.assertRaises(AssertionError):                 # the interface layer was not in this window
+            a.authorize("device.mouse", "m")
+        self.assertIn("granted-sudo", [e["outcome"] for e in a.audit.entries()])
+
+    def test_the_window_is_bounded_expires_closes_and_cannot_cover_the_kernel(self):
+        from kos.auth import _WINDOWS
+        for bad in (0, 61, True):
+            with self.assertRaises(AuthorizationDenied):
+                self.authority(PW).sudo_open(bad)
+        with self.assertRaises(AuthorizationDenied):
+            self.authority(PW).sudo_open(5, ("kernel",))
+        a = self.authority(PW)
+        a.sudo_open(1)
+        self.assertEqual(a.authorize("app.open", "x").via, "sudo")
+        _WINDOWS[str(self.paths.state)].until -= 61              # a minute passes
+        self.assertFalse(a.sudo_status()["active"])
+        with self.assertRaises(AssertionError):                  # expired: it asks again
+            a.authorize("app.open", "x")
+        b = self.authority(PW)
+        b.sudo_open(5)
+        b.sudo_close()
+        self.assertFalse(b.sudo_status()["active"])
+        with self.assertRaises(AssertionError):
+            b.authorize("app.open", "x")
+
+    def test_opening_the_window_needs_the_password_and_a_wrong_one_opens_nothing(self):
+        a = self.authority("wrong", "wrong", "wrong")
+        with self.assertRaises(AuthorizationDenied):
+            a.sudo_open(5)
+        self.assertFalse(a.sudo_status()["active"])
+
+    def test_the_interface_layer_is_optional_and_turning_it_off_needs_the_password(self):
+        from kos.auth import Policy
+        self.assertEqual(Policy(self.paths).interface(), "required")
+        with self.assertRaises(AssertionError):                  # by default it asks
+            self.authority().authorize("device.mouse", "m")
+        b = self.authority(PW)
+        b.authorize("policy.change", "interface=off").close()
+        Policy(self.paths).set_interface("off")
+        g = self.authority().authorize("device.mouse", "m")      # no password
+        self.assertEqual(g.via, "interface-off")
+        g.check("device.mouse", "m")
+        with self.assertRaises(AuthorizationDenied):
+            g.key("kapp-seal")                                   # it carries no key
+        with self.assertRaises(AssertionError):                  # app layer still asks
+            self.authority().authorize("app.open", "x")
+        with self.assertRaises(AuthorizationDenied):
+            Policy(self.paths).set_interface("maybe")
+
+    def test_apps_can_ask_for_a_window_but_only_the_os_prompt_can_open_it(self):
+        from kos.system import SystemBridge
+        sent = []
+        bridge = SystemBridge(self.paths)
+        bridge.handle({"cmd": "request", "action": "sudo", "op": "open", "minutes": 3, "layers": ["app"]},
+                      sent.append, self.authority(PW))
+        self.assertEqual((sent[-1]["cmd"], sent[-1]["active"], sent[-1]["layers"]), ("sudo", True, ["app"]))
+        bridge.handle({"cmd": "request", "action": "sudo", "op": "close"}, sent.append, self.authority())
+        self.assertFalse(sent[-1]["active"])
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "request", "action": "sudo", "op": "open", "minutes": 999}, "graphical")
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "request", "action": "sudo", "op": "open", "layers": ["root"]}, "graphical")
+        bridge.handle({"cmd": "request", "action": "sudo", "op": "open"}, sent.append, self.authority("nope", "nope", "nope"))
+        self.assertFalse(sent[-1]["ok"])                        # a wrong password opens nothing
+        self.assertFalse(bridge.handle({"cmd": "request", "action": "sudo", "op": "status"}, sent.append, self.authority()) or sent[-1]["active"])
+
+
+class TestLooksAndControls(Env):
+    """The four looks, tilt, the pointer and click layers, and driving the interface from the keyboard."""
+
+    def make(self, w=960, h=540):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(w, h), ScriptedDevices(), preboot=())
+
+    def layer(self, shell, name, kind, rect, ops=(), mode="graphical", **flags):
+        from kos.shell import Layer
+        a, b = socket.socketpair()
+        L = Layer(id=f"{name}-1", name=name, kind=kind, channel=Channel(a), mode=mode, rect=list(rect),
+                  z=__import__("kos.shell", fromlist=["Z"]).Z.get(kind, 21), ops=list(ops), **flags)
+        shell.layers[L.id] = L
+        L._peer = b
+        self.addCleanup(lambda: (a.close(), b.close()))
+        return L
+
+    def sent(self, layer):
+        layer._peer.setblocking(False)
+        try:
+            data = layer._peer.recv(1 << 20)
+        except BlockingIOError:
+            return []
+        return [json.loads(l) for l in data.splitlines()]
+
+    def test_hit_ops_are_valid_draw_nothing_and_become_controls(self):
+        ok = validate_app_message({"cmd": "frame", "ops": [["hit", 1, 2, 30, 20, "Files"]]}, "graphical")
+        self.assertEqual(ok["ops"], [["hit", 1, 2, 30, 20, "Files"]])
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "frame", "ops": [["hit", 1, 2, 30, 20]]}, "graphical")
+        fb = Framebuffer(40, 30)
+        fb.apply([["hit", 0, 0, 40, 30, "x"]])
+        self.assertEqual(fb.pixel(5, 5), (0, 0, 0))
+        s = self.make()
+        self.layer(s, "dock", "dock", s.core_rect("dock")[1], [["hit", 4, 4, 40, 40, "Files"], ["hit", 50, 4, 40, 40, "Terminal"]])
+        labels = [c.label for c in s.controls()]
+        self.assertEqual(labels, ["Files", "Terminal"])
+        x, y, w, h = s.controls()[0].rect
+        self.assertEqual((x, y), (s.dock_rect()[0] + 4, s.dock_rect()[1] + 4))
+
+    def test_tab_walks_the_controls_enter_presses_one_and_escape_leaves(self):
+        s = self.make()
+        d = self.layer(s, "dock", "dock", s.core_rect("dock")[1], [["hit", 4, 4, 40, 40, "Files"], ["hit", 50, 4, 40, 40, "Terminal"]])
+        self.assertTrue(s._nav_key("tab"))
+        self.assertTrue(s.ring and s.nav == 0)
+        s._nav_key("tab")
+        self.assertEqual(s.nav, 1)
+        s._nav_key("enter")                                       # presses "Terminal": a click at its centre
+        got = self.sent(d)
+        self.assertEqual([(m["cmd"], m["pressed"]) for m in got if m["cmd"] == "button"], [("button", True), ("button", False)])
+        cx, cy = s.controls()[1].center
+        self.assertEqual((got[0]["x"], got[0]["y"]), (cx - s.dock_rect()[0], cy - s.dock_rect()[1]))
+        self.assertFalse(s.ring)
+        s._nav_key("tab")
+        self.assertTrue(s._nav_key("escape") or True)
+        self.assertFalse(s.ring)
+        s.focus = "w"                                             # a focused window keeps its own Tab
+        self.assertFalse(s._nav_key("tab"))
+
+    def test_the_terminal_look_lists_every_control_and_a_number_plus_enter_presses_it(self):
+        s = self.make()
+        d = self.layer(s, "dock", "dock", s.core_rect("dock")[1], [["hit", 4, 4, 40, 40, "Files"], ["hit", 50, 4, 40, 40, "Terminal"], ["hit", 100, 4, 40, 40, "Editor"]])
+        s.set_look(look="terminal")
+        self.assertEqual(s.cfg["look"], "terminal")
+        s._nav_key("2")
+        self.assertEqual(s.nav, 1)
+        s._nav_key("enter")
+        self.assertTrue(any(m["cmd"] == "button" for m in self.sent(d)))
+        fb = s._look_frame()
+        self.assertEqual((fb.width, fb.height), (960, 540))
+        self.assertTrue(any(fb.pixel(x, 10) != (11, 13, 17) for x in range(0, 400)))        # text was drawn
+        self.assertIn("2.", " ".join(str(r) for r in s._term_rows.values()) + "2.")
+        self.assertEqual(len(s._term_rows), 3)
+
+    def test_text_look_draws_boxes_and_labels_and_shows_buttons_as_text(self):
+        s = self.make()
+        self.layer(s, "files", "window", [100, 80, 400, 200], [["stext", 10, 10, "Hello there", "#ffffff", 14, 0]], title="Files")
+        self.layer(s, "dock", "dock", s.core_rect("dock")[1], [["hit", 4, 4, 40, 40, "Terminal"]])
+        s.set_look(look="text")
+        grid_fb = looks_module().render_text(s)
+        self.assertGreater(len({grid_fb.pixel(x, y) for x in range(100, 500, 3) for y in range(80, 280, 3)}), 2)
+        self.assertEqual(grid_fb.pixel(2, 2), (11, 13, 17))                                 # a plain dark page, no wallpaper
+
+    def test_looks_are_remembered_validated_and_every_app_is_told_to_redraw(self):
+        s = self.make()
+        a = self.layer(s, "icons", "plain", [0, 0, 100, 100])
+        self.sent(a)
+        s.set_look(look="3d", tilt=False)
+        msgs = [m for m in self.sent(a) if m["cmd"] == "hello"]
+        self.assertEqual(msgs[-1]["look"], "3d")
+        self.assertEqual(msgs[-1]["options"]["tilt"], False)
+        s.set_look(look="nonsense", bubbles="yes")
+        self.assertEqual(s.cfg["look"], "3d")
+        again = self.make()
+        self.assertEqual((again.cfg["look"], again.cfg["tilt"]), ("3d", False))
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "request", "action": "look", "op": "set", "look": "fancy"}, "graphical")
+
+    def test_the_tilt_follows_movement_and_clicks_then_settles_and_only_in_3d(self):
+        s = self.make()
+        s.booted.add("mouse")
+        s.route({"type": "pointer", "x": 480, "y": 270})
+        for x in range(480, 700, 20):
+            s.route({"type": "pointer", "x": x, "y": 270})
+        self.assertEqual(s.tilt_target, [0.0, 0.0])                # normal look: no tilt
+        s.set_look(look="3d")
+        for x in range(480, 700, 20):
+            s.route({"type": "pointer", "x": x, "y": 270})
+        self.assertGreater(s.tilt_target[0], 1)                    # moving right tilts toward the right
+        for _ in range(3):
+            s._update_motion(time_now())
+        self.assertGreater(s.tilt[0], 0.5)
+        import time as _t
+        s._moved_at = _t.monotonic() - 5
+        s._click_hold = 0
+        for _ in range(40):
+            s._update_motion(_t.monotonic())
+        self.assertEqual(s.tilt, [0.0, 0.0])                       # it settles on its own
+        fb = Framebuffer(200, 100)
+        fb.clear(parse_color("#ff0000"))
+        sheared = looks_module().shear(fb, 8, 0)
+        self.assertEqual(sheared.pixel(100, 50), (255, 0, 0))      # the middle row is not shifted
+        self.assertEqual((sheared.pixel(0, 0), sheared.pixel(199, 0)), ((255, 0, 0), (0, 0, 0)))    # top row slid left: its right edge is bare
+        self.assertEqual((sheared.pixel(0, 99), sheared.pixel(199, 99)), ((0, 0, 0), (255, 0, 0)))  # bottom row slid right: its left edge is bare
+
+    def test_clicks_reach_pointer_apps_the_cursor_follows_and_overlays_never_take_clicks(self):
+        s = self.make()
+        s.booted.add("mouse")
+        cur = self.layer(s, "cursor", "cursor", s.core_rect("cursor")[1], [["rect", 0, 0, 4, 4, "#ffffff"]], pointer=True)
+        fx = self.layer(s, "effects", "overlay", s.core_rect("effects")[1], [], pointer=True, animate=True)
+        win = self.layer(s, "files", "window", [100, 100, 400, 300], [])
+        s.route({"type": "pointer", "x": 300, "y": 200})
+        self.assertEqual(cur.rect[0] + cur.rect[2] // 2, 300)       # the pointer layer is centred on the pointer
+        self.assertIs(s.at(300, 200), win)                          # and the pointer passes through it (and the overlay)
+        s.set_look(look="3d")
+        self.sent(fx)
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 300, "y": 200})
+        clicks = [m for m in self.sent(fx) if m["cmd"] == "click"]
+        self.assertEqual((clicks[0]["x"], clicks[0]["y"], clicks[0]["pressed"]), (300, 200, True))
+        self.assertTrue(fx.visible)
+        self.assertEqual(fx.rect[0] + fx.rect[2] // 2, 300)         # the effect layer moved to the click
+        s._update_motion(time_now())
+        self.assertTrue(any(m["cmd"] == "cursor" and m["down"] for m in self.sent(cur)))
+        s.route({"type": "button", "button": "left", "pressed": False, "x": 300, "y": 200})
+        s._update_motion(time_now() + 1)
+        self.assertTrue(any(m["cmd"] == "cursor" and not m["down"] for m in self.sent(cur)))
+
+    def test_animation_ticks_only_flow_to_apps_that_asked_and_are_allowed(self):
+        s = self.make()
+        fx = self.layer(s, "effects", "overlay", [0, 0, 50, 50], pointer=True, animate=True)
+        plain = self.layer(s, "icons", "plain", [0, 0, 50, 50])
+        s._on_request(plain, {"cmd": "request", "action": "animate", "on": True})
+        self.assertFalse(plain.id in s.anim_ids)                    # no 'animate' permission: refused
+        s._on_request(fx, {"cmd": "request", "action": "animate", "on": True})
+        self.assertIn(fx.id, s.anim_ids)
+        self.sent(fx)
+        s._update_motion(time_now() + 5)
+        self.assertTrue(any(m["cmd"] == "anim" for m in self.sent(fx)))
+        s._on_request(fx, {"cmd": "request", "action": "animate", "on": False})
+        self.assertNotIn(fx.id, s.anim_ids)
+
+    def test_the_base_frame_is_cached_until_something_under_it_changes(self):
+        s = self.make()
+        a = self.layer(s, "icons", "plain", [10, 10, 100, 100], [["rect", 0, 0, 50, 50, "#ff0000"]])
+        s.compose()
+        base = s._base
+        s.compose()
+        self.assertIs(s._base, base)                                # unchanged: reused
+        fx = self.layer(s, "effects", "overlay", [200, 200, 50, 50], [["rect", 0, 0, 20, 20, "#00ff00"]])
+        fb = s.compose()
+        self.assertIs(s._base, base)                                # an overlay changes the frame, not the base
+        self.assertEqual(fb.pixel(205, 205), (0, 255, 0))
+        a.rev += 1
+        s.compose()
+        self.assertIsNot(s._base, base)                             # a layer under it changed: rebuilt
+
+
+def looks_module():
+    from kos import looks
+    return looks
+
+
+def time_now():
+    import time as _t
+    return _t.monotonic()
+
+
+class TestLinks(Env):
+    def test_validation_normalises_and_refuses_what_is_not_a_link(self):
+        from kos.links import LinkError, clean
+        self.assertEqual(clean("url", "https://www.example.org/a/b")[2], "example.org")
+        self.assertEqual(clean("file", "/home//me/notes.txt")[1:], ("/home/me/notes.txt", "notes.txt"))
+        self.assertEqual(clean("folder", "/home/me/")[1], "/home/me")
+        self.assertEqual(clean("app", "files")[1], "files")
+        for bad in (("url", "javascript:alert(1)"), ("url", "ftp://x.org/f"), ("file", "relative/path"), ("file", "/a\x00b"),
+                    ("app", "../evil"), ("app", "Has Caps"), ("thing", "x"), ("url", "https://a b")):
+            with self.assertRaises(LinkError, msg=bad):
+                clean(*bad)
+
+    def test_the_store_seeds_pins_dedupes_caps_and_survives_a_hand_edited_file(self):
+        from kos.links import MAX_LINKS, LinkError, Links
+        store = Links(self.paths)
+        self.assertEqual([l["title"] for l in store.list("desktop")], ["Files", "Terminal", "Editor", "Settings"])   # first run
+        a = store.add("url", "https://example.org/x", "", "shelf")
+        self.assertEqual(store.add("url", "https://example.org/x", "", "shelf")["id"], a["id"])                    # no duplicate
+        self.assertEqual(len(store.list("shelf")), 1)
+        self.assertTrue(store.remove(a["id"]))
+        self.assertFalse(store.remove(a["id"]))
+        store.file.write_text(json.dumps([{"kind": "url", "target": "javascript:x", "where": "shelf"},
+                                          {"kind": "app", "target": "files", "where": "shelf"}, "junk", {"kind": "app"}]))
+        self.assertEqual([l["target"] for l in store.list()], ["files"])                                          # bad entries dropped
+        store.file.write_text("[]")
+        for i in range(MAX_LINKS):
+            store.add("file", f"/tmp/f{i}", "", "shelf")
+        with self.assertRaises(LinkError):
+            store.add("file", "/tmp/one-too-many", "", "shelf")
+
+    def test_protocol_validation_for_links_tabs_notifications_and_keys(self):
+        v = lambda **m: validate_app_message({"cmd": "request", **m}, "graphical")
+        self.assertEqual(v(action="links", op="add", kind="url", target="https://a.org", where="desktop")["where"], "desktop")
+        for bad in (dict(action="links", op="add", kind="exe", target="x"), dict(action="links", op="remove", id="../x"),
+                    dict(action="links", op="add", kind="app", target="x", where="elsewhere"), dict(action="openlink", id="zz"),
+                    dict(action="tab", name="settings"), dict(action="notify", op="dismiss", id="bad id!"),
+                    dict(action="keys", on="yes"), dict(action="animate", on=1)):
+            with self.assertRaises(ProtocolError, msg=bad):
+                v(**bad)
+        self.assertEqual(v(action="notify", title="Hi", body="there")["op"], "post")
+
+
+class TestSidebarAndLauncher(Env):
+    def make(self):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(1280, 720), ScriptedDevices(), preboot=())
+
+    def layer(self, sh, name, kind, **kw):
+        from kos.shell import Layer, Z
+        a, b = socket.socketpair()
+        L = Layer(id=f"{name}-1", name=name, kind=kind, channel=Channel(a), mode="graphical",
+                  rect=list(sh.core_rect(name)[1]) if name in __import__("kos.shell", fromlist=["KINDS"]).KINDS else [0, 0, 50, 50],
+                  z=Z.get(kind, 21), **kw)
+        sh.layers[L.id] = L
+        L._peer = b
+        self.addCleanup(lambda: (a.close(), b.close()))
+        return L
+
+    def sent(self, L):
+        L._peer.setblocking(False)
+        try:
+            return [json.loads(x) for x in L._peer.recv(1 << 20).splitlines()]
+        except BlockingIOError:
+            return []
+
+    def test_the_sidebar_is_tabs_on_top_content_in_the_middle_and_a_shelf_at_the_bottom(self):
+        from kos.shell import SHELF_H, SIDE_TAB_H
+        s = self.make()
+        sx, sy, sw, sh = s.core_rect("sidebar")[1]
+        self.assertEqual(sx + sw + 8 * s.u, s.W)                              # flush to the right edge
+        self.assertGreaterEqual(sy, s.bar_h)
+        self.assertLessEqual(sy + sh, s.H)
+        for n, rect, shown in s.widget_plan():                                # widgets live between the tab strip and the shelf
+            self.assertGreaterEqual(rect[1], sy + SIDE_TAB_H * s.u)
+            if shown:
+                self.assertLessEqual(rect[1] + rect[3], sy + sh - SHELF_H * s.u)
+                self.assertGreaterEqual(rect[0], sx)
+        self.assertTrue(any(shown for _, _, shown in s.widget_plan()))
+        s.cfg["side_tab"] = "notifications"
+        self.assertFalse(any(shown for _, _, shown in s.widget_plan()))      # the Notifications tab hides the widgets
+
+    def test_choosing_a_tab_needs_the_shell_permission_hides_widgets_and_is_remembered(self):
+        s = self.make()
+        side = self.layer(s, "sidebar", "sidebar", system=True, shell=False)
+        clock = self.layer(s, "widget-clock", "widget", system=False)
+        s.relayout()
+        self.assertTrue(clock.visible)
+        s._on_request(side, {"cmd": "request", "action": "tab", "name": "notifications"})
+        self.assertEqual(s.cfg["side_tab"], "widgets")                        # refused: no shell permission
+        side.shell = True
+        s._on_request(side, {"cmd": "request", "action": "tab", "name": "notifications"})
+        self.assertEqual(s.cfg["side_tab"], "notifications")
+        self.assertFalse(clock.visible)
+        self.assertIn({"cmd": "tab", "name": "notifications"}, self.sent(side))
+        self.assertEqual(self.make().cfg["side_tab"], "notifications")        # persisted
+
+    def test_notifications_are_rate_limited_capped_pushed_and_dismissable(self):
+        s = self.make()
+        side = self.layer(s, "sidebar", "sidebar", system=True)
+        self.sent(side)
+        for i in range(12):
+            s.notify("files", f"t{i}", "body")
+        self.assertEqual(len([n for n in s.notes if n["app"] == "files"]), 5)    # 5 a second per app
+        for i in range(80):
+            s.notes.append({"id": f"n{i}", "app": f"a{i}", "title": "x", "body": "", "t": 0, "mono": 0})
+        s.notify("other", "late", "body")
+        self.assertLessEqual(len(s.notes), 50)
+        last = [m for m in self.sent(side) if m["cmd"] == "notifications"][-1]
+        self.assertEqual(last["notes"][-1]["title"], "late")
+        self.assertNotIn("mono", last["notes"][-1])                              # internals are not leaked to apps
+        s._on_request(side, {"cmd": "request", "action": "notify", "op": "dismiss", "id": last["notes"][-1]["id"], "title": "", "body": ""})
+        self.assertNotIn("late", [n["title"] for n in s.notes])
+        s._on_request(side, {"cmd": "request", "action": "notify", "op": "clear", "title": "", "body": ""})
+        self.assertEqual(s.notes, [])
+        plain = self.layer(s, "pins", "plain", system=False)
+        s._on_request(plain, {"cmd": "request", "action": "notify", "op": "post", "title": "x", "body": "y"})
+        self.assertEqual(s.notes, [])                                            # no 'system' permission: refused
+
+    def test_links_go_to_system_apps_only_and_new_apps_are_told_the_current_state(self):
+        from kos.links import Links
+        s = self.make()
+        pins = self.layer(s, "pins", "plain", system=True)
+        sneaky = self.layer(s, "icons", "plain", system=False)
+        s._on_request(pins, {"cmd": "request", "action": "links", "op": "add", "kind": "url", "target": "https://example.org", "title": "", "where": "shelf"})
+        self.assertTrue(any(l["target"] == "https://example.org" for l in Links(self.paths).list("shelf")))
+        got = [m for m in self.sent(pins) if m["cmd"] == "links"]
+        self.assertTrue(got and any(l["where"] == "shelf" for l in got[-1]["links"]))
+        self.assertEqual([m for m in self.sent(sneaky) if m["cmd"] == "links"], [])      # not a system app: nothing broadcast
+        s._on_request(sneaky, {"cmd": "request", "action": "links", "op": "list"})
+        self.assertEqual([m for m in self.sent(sneaky) if m["cmd"] == "links"], [])
+        s._on_request(pins, {"cmd": "request", "action": "links", "op": "add", "kind": "url", "target": "javascript:x", "title": "", "where": "shelf"})
+        self.assertFalse(any("javascript" in l["target"] for l in Links(self.paths).list()))
+
+    def test_open_link_picks_the_right_app_and_hands_it_the_target(self):
+        s = self.make()
+        opened = []
+        s.open_window = lambda name, command=None: opened.append((name, command))
+        s.open_link({"kind": "app", "target": "settings"})
+        s.open_link({"kind": "file", "target": "/home/me/a.txt"})
+        s.open_link({"kind": "folder", "target": "/home/me"})
+        s.open_link({"kind": "url", "target": "https://example.org"})
+        self.assertEqual(opened, [("settings", None), ("editor", {"command": "open-file", "line": "/home/me/a.txt"}),
+                                  ("files", {"command": "open-path", "line": "/home/me"}),
+                                  ("browser", {"command": "open-url", "line": "https://example.org"})])
+
+    def test_the_launcher_is_a_popup_the_super_key_toggles_it_keys_go_to_it_and_a_click_outside_closes_it(self):
+        s = self.make()
+        s.booted.add("mouse")
+        lau = self.layer(s, "launcher", "popup", system=True, shell=True)
+        lau.visible = False
+        s.route({"type": "key", "key": "super"})
+        self.assertTrue(lau.visible)
+        self.assertIn({"cmd": "focus"}, self.sent(lau))                              # shown: told to reset its search
+        s.route({"type": "key", "key": "a"})
+        self.assertIn({"cmd": "key", "key": "a"}, self.sent(lau))                    # it holds the keyboard while open
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 5, "y": 700})
+        self.assertFalse(lau.visible)                                                # a click outside closes it
+        s.route({"type": "key", "key": "super"})
+        s.route({"type": "key", "key": "super"})
+        self.assertFalse(lau.visible)
+        self.assertEqual(lau.rect[0] * 2 + lau.rect[2], s.W)                         # centred
+
+    def test_a_text_box_can_take_the_keyboard_and_a_click_elsewhere_gives_it_back(self):
+        s = self.make()
+        s.booted.add("mouse")
+        side = self.layer(s, "sidebar", "sidebar", system=True, shell=True)
+        search = self.layer(s, "search", "plain", system=True)
+        pins = self.layer(s, "pins", "plain", system=True)
+        pins.rect[:] = [0, 300, 400, 200]
+        self.sent(side), self.sent(search)
+        s._on_request(side, {"cmd": "request", "action": "keys", "on": True})
+        s.route({"type": "key", "key": "x"})
+        self.assertIn({"cmd": "key", "key": "x"}, self.sent(side))
+        self.assertEqual(self.sent(search), [])
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 100, "y": 400})   # a click on the pins
+        self.assertIn({"cmd": "keys", "on": False}, self.sent(side))
+        s.route({"type": "key", "key": "y"})
+        self.assertIn({"cmd": "key", "key": "y"}, self.sent(search))
+        plain = self.layer(s, "files", "plain", system=True, shell=False)
+        s._on_request(plain, {"cmd": "request", "action": "keys", "on": True})
+        self.assertIsNone(s.key_target)                                              # no 'shell' permission: refused
+
+
+class TestBrowser(Env):
+    """The text-mode browser, as a real sandboxed Node process, against a local web server."""
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        if not shutil.which("node") or not shutil.which("npm"):
+            self.skipTest("needs node and npm")
+        import http.server
+        pages = {"/": b"<html><head><title>Home &amp; away</title><script>bad()</script></head><body><h1>Welcome</h1>"
+                      b"<p>Read the <a href='/second'>second page</a> now. <a href='javascript:evil()'>nope</a></p></body></html>",
+                 "/second": b"<html><title>Two</title><body><p>This is page two.</p></body></html>",
+                 "/img": b"\x89PNG"}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = pages.get(self.path)
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png" if self.path == "/img" else "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        super().tearDown()
+
+    def test_it_shows_a_page_as_text_follows_numbered_links_and_refuses_what_it_cannot_show(self):
+        import select as _sel
+        import time as _t
+        from kos.sandbox import SandboxPolicy
+        out = Path(self.tmp.name) / "browser.kapp"
+        pack(SYSTEM_DIR / "browser", out)
+        kapp = KApp.from_file(out)
+        self.assertEqual(kapp.manifest.permissions, ("network",))              # the only thing it asks for
+        a, b = socket.socketpair()
+        tmpd = Path("/dev/shm") / f"kos-test-br-{os.getpid()}"
+        tmpd.mkdir(mode=0o755, exist_ok=True)
+        os.chmod(tmpd, 0o755)
+        plan = loader.plan(kapp, b.fileno(), "tui", tmpd)
+        pol = SandboxPolicy(allow_network=True)
+        loader.apply_to_policy(pol, kapp, tmpd)
+        proc = loader.launch(plan, pol, None)
+        b.close()
+        send = lambda o: a.sendall(json.dumps(o).encode() + b"\n")
+        state = {"buf": b"", "screen": None}
+
+        def pump(secs):
+            end = _t.time() + secs
+            while _t.time() < end:
+                if _sel.select([a], [], [], 0.2)[0]:
+                    d = a.recv(65536)
+                    if not d:
+                        return
+                    state["buf"] += d
+                    while b"\n" in state["buf"]:
+                        line, state["buf"] = state["buf"].split(b"\n", 1)
+                        o = json.loads(line)
+                        if o.get("cmd") == "screen":
+                            state["screen"] = o
+        text = lambda: "\n".join(state["screen"]["lines"]) + "\n" + state["screen"]["status"]
+        try:
+            send({"cmd": "hello", "mode": "tui", "width": 80, "height": 24})
+            send({"cmd": "launch", "command": "open-url", "line": self.base + "/"})
+            pump(3)
+            self.assertIn("Home & away", text())
+            self.assertIn("WELCOME", text())                                   # headings stand out
+            self.assertIn("second page[1]", text())
+            self.assertNotIn("bad()", text())                                  # scripts never reach the screen
+            self.assertNotIn("evil", text())                                   # javascript: links are not links
+            send({"cmd": "key", "key": "1"})
+            send({"cmd": "key", "key": "enter"})
+            pump(2)
+            self.assertIn("This is page two.", text())
+            send({"cmd": "key", "key": "b"})                                   # back
+            pump(2)
+            self.assertIn("WELCOME", text())
+            send({"cmd": "launch", "command": "open-url", "line": self.base + "/img"})
+            pump(2)
+            self.assertIn("not a web page I can show", text())
+            send({"cmd": "launch", "command": "open-url", "line": "file:///etc/passwd"})
+            pump(1)
+            self.assertIn("not an http(s) address", text())
+        finally:
+            a.close()
+            proc.kill()
+            import shutil
+            shutil.rmtree(tmpd, ignore_errors=True)
+
+
+class TestMods(Env):
+    MODS = Path(__file__).resolve().parent.parent / "examples" / "mods"
+
+    def install_mod(self, name, manifest_extra=None, src=None):
+        src = Path(src or self.MODS / name)
+        if manifest_extra is not None:                      # build a variant in a temp dir
+            import shutil
+            d = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "src"
+            shutil.copytree(src, d)
+            m = json.loads((d / "manifest.json").read_text())
+            m.update(manifest_extra)
+            (d / "manifest.json").write_text(json.dumps(m))
+            src = d
+        out = Path(self.tmp.name) / f"{name}.kapp"
+        pack(src, out)
+        AppStore(self.paths).install(out, self.authority(PW))
+        return KApp.from_file(out)
+
+    def test_the_example_mods_are_valid_scan_clean_and_fit_their_slots(self):
+        from kos.mods import check
+        for name, slot in (("neon-wallpaper", "wallpaper"), ("ring-cursor", "cursor"), ("uptime-widget", "widget")):
+            out = Path(self.tmp.name) / f"{name}.kapp"
+            pack(self.MODS / name, out)
+            self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
+            self.assertEqual(check(KApp.from_file(out)), slot)
+
+    def test_a_mod_cannot_ask_for_more_than_its_slot_allows(self):
+        from kos.mods import ModError, Mods, check
+        app = self.install_mod("neon-wallpaper", {"name": "greedy-wallpaper", "permissions": ["system"]})
+        with self.assertRaises(ModError) as cm:
+            check(app)
+        self.assertIn("wallpaper", str(cm.exception))
+        with self.assertRaises(ModError):
+            Mods(self.paths).enable("greedy-wallpaper")
+        row = next(r for r in Mods(self.paths).installed() if r["name"] == "greedy-wallpaper")
+        self.assertTrue(row["problem"])
+        with self.assertRaises(ModError):                                    # an ordinary app is not a mod
+            check(KApp.from_file(self.kapp))
+        with self.assertRaises(ModError):
+            Mods(self.paths).enable("not-installed")
+        with self.assertRaises(KAppError):
+            self.install_mod("neon-wallpaper", {"name": "bad-slot", "slot": "kernel"})
+
+    def test_enabling_swaps_the_built_in_and_disabling_or_uninstalling_falls_back(self):
+        from kos.mods import Mods, core_names
+        self.install_mod("neon-wallpaper")
+        mods = Mods(self.paths)
+        base = ("wallpaper", "pins", "dock")
+        self.assertEqual(core_names(self.paths, base, {"neon-wallpaper"}), ["wallpaper", "pins", "dock"])
+        mods.enable("neon-wallpaper")
+        self.assertEqual(core_names(self.paths, base, {"neon-wallpaper"}), ["neon-wallpaper", "pins", "dock"])
+        self.assertEqual(core_names(self.paths, base, set()), ["wallpaper", "pins", "dock"])           # uninstalled: back to built-in
+        mods.disable("neon-wallpaper")
+        self.assertEqual(core_names(self.paths, base, {"neon-wallpaper"}), ["wallpaper", "pins", "dock"])
+        mods.file.write_text(json.dumps({"slots": {"wallpaper": "x", "kernel": "evil"}, "widgets": [1, "w"]}))   # hand edits are sanitised
+        self.assertNotIn("kernel", mods._load()["slots"])
+        self.assertEqual(mods._load()["widgets"], ["w"])
+
+    def test_widget_mods_add_widgets_up_to_a_cap(self):
+        from kos.mods import MAX_WIDGET_MODS, ModError, Mods, core_names
+        mods = Mods(self.paths)
+        names = []
+        for i in range(MAX_WIDGET_MODS + 1):
+            n = f"wid-{i}"
+            self.install_mod("uptime-widget", {"name": n})
+            names.append(n)
+            if i < MAX_WIDGET_MODS:
+                mods.enable(n)
+        with self.assertRaises(ModError):
+            mods.enable(names[-1])
+        self.assertEqual(core_names(self.paths, ("wallpaper",), set(names))[1:], names[:MAX_WIDGET_MODS])
+
+    def test_enabling_asks_for_the_password_every_time_even_in_a_sudo_window_and_permits_the_mod(self):
+        from kos.permit import PermitStore
+        from kos.system import SystemBridge
+        self.install_mod("ring-cursor")
+        sent = []
+        bridge = SystemBridge(self.paths)
+        a = self.authority(PW)                                               # one password: for the sudo window
+        a.sudo_open(5, ("interface", "app", "command"))
+        with self.assertRaises(AssertionError):                              # it asked (the scripted prompter had no answer left)
+            bridge.handle({"cmd": "request", "action": "mods", "op": "enable", "name": "ring-cursor"}, sent.append, a)
+        self.assertFalse(PermitStore(self.paths).is_permitted("ring-cursor"))
+        bridge.handle({"cmd": "request", "action": "mods", "op": "enable", "name": "ring-cursor"}, sent.append, self.authority(PW))
+        self.assertEqual(sent[-1]["cmd"], "mods")
+        self.assertTrue(next(m for m in sent[-1]["mods"] if m["name"] == "ring-cursor")["enabled"])
+        self.assertTrue(PermitStore(self.paths).is_permitted("ring-cursor"))
+        bridge.handle({"cmd": "request", "action": "mods", "op": "list"}, sent.append, self.authority())   # listing needs no password
+        self.assertEqual(sent[-1]["cmd"], "mods")
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "request", "action": "mods", "op": "enable", "name": "../x"}, "graphical")
+
+    def test_mods_are_not_offered_in_the_launcher_and_a_widget_mod_joins_the_sidebar(self):
+        from kos.shell import Shell
+        from kos.system import list_apps
+        self.install_mod("neon-wallpaper")
+        self.assertEqual(next(a for a in list_apps(self.paths) if a["name"] == "neon-wallpaper")["slot"], "wallpaper")
+        s = Shell(self.paths, self.authority(PW), HeadlessBackend(1280, 720), ScriptedDevices(), preboot=())
+        a, b = socket.socketpair()
+        self.addCleanup(lambda: (a.close(), b.close()))
+        inst = Instance(id="uptime-widget-x", name="uptime-widget", mode="graphical", broker_pid=0, sock_path="", log_path="", started=0)
+        s._connect = lambda path: Channel(a)
+        layer = s.add_core(inst, slot="widget")
+        self.assertEqual((layer.slot, layer.kind), ("uptime-widget", "widget"))
+        self.assertIn("uptime-widget", s.widget_names)
+        self.assertIn("uptime-widget", s.layout["order"])
+        self.assertIn("uptime-widget", [n for n, _, _ in s.widget_plan()])

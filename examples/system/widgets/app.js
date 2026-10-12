@@ -16,7 +16,8 @@ const SHORT = { 'widget-clock': 'CLK', 'widget-calendar': 'CAL', 'widget-network
     const c = new Canvas(), u = app.scale, H = app.height, w = bw();
     const px = 6 * u + 2;
     st.widgets.forEach((wd, i) => {
-      const x = i * w, label = wd.title || wd.name, hot = st.hover === i;
+      const x = i * w, label = (wd.title || wd.name).split(' ')[0], hot = st.hover === i;
+      c.hit(x + 2 * u, 1, w - 4 * u, H - 2, `${wd.visible ? 'Hide' : 'Show'} ${wd.title || wd.name}`);
       G.roundRect(c, x + 2 * u, 1, w - 4 * u, H - 2, Math.round((H - 2) / 2), wd.visible ? (hot ? '#2b88d8' : G.ACCENT) : (hot ? '#6b7280' : '#4b525e'));
       const tx = x + Math.round((w - app.textWidth(label, px, 1)) / 2) - (i > 0 ? 3 * u : 0), ty = Math.round((H - px * 1.2) / 2);
       c.stext(tx + 1, ty + 1, label, '#000000', px, 1); c.stext(tx, ty, label, wd.visible ? '#ffffff' : '#c3c9d3', px, 1);

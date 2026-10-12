@@ -4,6 +4,10 @@
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
     kos install APP.kapp            install (the zip is stored as-is, sealed)
+    kos mod list|enable NAME|disable NAME   system mods: apps that replace a part of the interface
+    kos sudo on [MINUTES]|off       remember the password for a while (in this process only; kernel layer never)
+    kos policy [required|off]       whether the interface layer asks (app, command, kernel always do)
+    kos convert FILE                a .deb or an AppImage -> .kapp (nothing is run; it runs sandboxed once installed)
     kos update APP.kapp             update to a newer version (no downgrades)
     kos view FILE                   view a file (password first)
     kos remove NAME
@@ -130,6 +134,95 @@ def cmd_install(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_convert(args, paths: Paths) -> int:
+    """`kos convert FILE`: a .deb or an AppImage becomes a .kapp (nothing is executed)."""
+    from .convert import convert
+    out, r = convert(Path(args.file), Path(args.out) if args.out else None, name=args.name, entry=args.entry)
+    print(f"converted {r.source} ({r.kind}) -> {out}")
+    print(f"  app {r.name} {r.version}, runs {r.entry}, {r.files} file(s); sha256 of the source {r.sha256[:16]}...")
+    if r.depends:
+        print(f"  declared dependencies (listed, not installed): {', '.join(r.depends[:12])}")
+    if r.maintainer_scripts:
+        print(f"  maintainer scripts NOT run: {', '.join(r.maintainer_scripts)}")
+    if r.dropped:
+        print(f"  left out: {len(r.dropped)} item(s) (docs, man pages, links outside the package, ...)")
+    for n in r.notes:
+        print(f"  note: {n}")
+    print(f"install it with: kos install {out}")
+    return 0
+
+
+def cmd_sudo(args, paths: Paths) -> int:
+    """`kos sudo on [MINUTES] [--layers a,b]` | `off` | `status`: remember the password for a while.
+    The window lives in memory of THIS process (the line shell, the desktop), never on disk."""
+    from .auth import sudo_status
+    if args.sudo_cmd == "status":
+        st = sudo_status(paths)
+        print(f"sudo window: open, {st['left']}s left, layers: {', '.join(st['layers'])}" if st["active"]
+              else "sudo window: closed (every layer asks)")
+        return 0
+    authority, prompter = _authority(paths)
+    try:
+        if args.sudo_cmd == "off":
+            authority.sudo_close()
+            print("sudo window closed")
+            return 0
+        layers = tuple(x for x in args.layers.split(",") if x)
+        st = authority.sudo_open(args.minutes, layers)
+        print(f"sudo window open for {st['left'] // 60} min on: {', '.join(st['layers'])}. "
+              "Kernel-layer and trust-changing actions still ask every time.")
+        if not sys.stdin.isatty() or os.environ.get("KOS_SUDO_ONESHOT"):
+            print("(this process ends now, so the window ends with it: use it inside the line shell or the desktop)")
+        return 0
+    finally:
+        prompter.close()
+
+
+def cmd_policy(args, paths: Paths) -> int:
+    """`kos policy [interface required|off]`: which layers ask. The interface layer is optional."""
+    from .auth import Policy
+    if args.value:
+        authority, prompter = _authority(paths)
+        try:
+            authority.authorize("policy.change", f"interface={args.value}").close()
+        finally:
+            prompter.close()
+        Policy(paths).set_interface(args.value)
+    print(f"interface layer: {Policy(paths).interface()}   (app, command and kernel layers always ask)")
+    return 0
+
+
+def cmd_mod(args, paths: Paths) -> int:
+    """`kos mod list|enable NAME|disable NAME`: system mods - apps that fill a part of the interface."""
+    from .mods import Mods
+    from .permit import PermitStore
+    mods = Mods(paths)
+    if args.mod_cmd == "list":
+        rows = mods.installed()
+        if not rows:
+            print("no mods installed (kos install a .kapp whose manifest has a \"slot\")")
+        for r in rows:
+            state = "ENABLED" if r["enabled"] else ("blocked: " + r["problem"] if r["problem"] else "off")
+            print(f"{r['name']:<20} {r['slot']:<10} {r['version']:<8} asks: {', '.join(r['permissions']) or 'nothing':<20} {state}")
+        return 0
+    if not args.name:
+        eprint("which mod?")
+        return 2
+    authority, prompter = _authority(paths)
+    try:
+        with authority.authorize(f"mod.{args.mod_cmd}", args.name):
+            if args.mod_cmd == "enable":
+                info = mods.enable(args.name)
+                PermitStore(paths).grant(args.name)
+                print(f"{args.name} now fills the {info['slot']} slot. Restart the desktop to use it.")
+            else:
+                mods.disable(args.name)
+                print(f"{args.name} disabled; the built-in app is back. Restart the desktop.")
+    finally:
+        prompter.close()
+    return 0
+
+
 def cmd_update(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
     if args.file == "all":
@@ -215,7 +308,7 @@ def cmd_run(args, paths: Paths) -> int:
         send_app(sock, app, mode)
         proc = None
     else:
-        cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime == "npm")
+        cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime in ("npm", "bundle"))
         loader.apply_to_policy(policy, app, cache_dir)
         sock, child = socket.socketpair()
         proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir), policy, log_path)
@@ -341,7 +434,7 @@ def cmd_boot(args, paths: Paths) -> int:
 
 
 def _boot_shell(args, paths: Paths) -> int:
-    from .desktop import boot_core, make_shell
+    from .desktop import attach_core, boot_core, make_shell
     from .devices import EvdevDevices, TerminalDevices
     from .display import FbdevBackend, TerminalBackend
     from .term import RawTerminal
@@ -359,8 +452,7 @@ def _boot_shell(args, paths: Paths) -> int:
             devices = TerminalDevices(term, cell_to_pixels=True)
         shell = make_shell(paths, authority, backend, devices)
         try:
-            for inst in core.values():
-                shell.add_core(inst)
+            attach_core(paths, shell, core)
             shell.run()
         finally:
             devices.close()
@@ -373,7 +465,7 @@ def _shot(args, paths: Paths) -> int:
     into search, and save what it looks like. Useful for pictures and for testing."""
     import time as _t
     from . import png
-    from .desktop import boot_core, make_shell
+    from .desktop import attach_core, boot_core, make_shell
     from .devices import ScriptedDevices
     from .display import HeadlessBackend
 
@@ -383,19 +475,42 @@ def _shot(args, paths: Paths) -> int:
     backend, devices = HeadlessBackend(int(w), int(h)), ScriptedDevices()
     shell = make_shell(paths, authority, backend, devices, keep_prompter=True, preboot=())
     try:
-        for inst in core.values():
-            shell.add_core(inst)
+        attach_core(paths, shell, core)
         for name in [n for n in (args.open or "").split(",") if n]:
             shell.open_window(name)
         end = _t.monotonic() + args.wait
         while _t.monotonic() < end:
             shell.pump(0.1)                                  # let the apps draw; paint only once, at the end
+        if args.look:
+            shell.set_look(look=args.look)
+        if args.demo_notes:
+            for title, body in (("Update available", "Files 1.1 is ready to install from your sources."),
+                                ("Backup finished", "Documents were backed up and scanned: 214 files, nothing flagged."),
+                                ("Sudo window closed", "Every layer asks for your password again.")):
+                shell.notify("demo", title, body)
+            shell.cfg["side_tab"] = "notifications"
+            shell.relayout()
         for ch in args.search or "":
             devices.push({"type": "key", "key": ch})
         end = _t.monotonic() + 1.5
         while _t.monotonic() < end:
             shell.pump(0.1)
-        png.save(shell.compose(), args.out)
+        for k in (args.keys or "").split(","):
+            if k:
+                devices.push({"type": "key", "key": k})
+        if args.point or args.click:
+            shell.booted.add("mouse")
+            px, _, py = (args.click or args.point).partition(",")
+            devices.push({"type": "pointer", "x": int(px), "y": int(py)})
+            if args.click:
+                devices.push({"type": "button", "button": "left", "pressed": True, "x": int(px), "y": int(py)})
+        end = _t.monotonic() + (0.5 if args.click else 0.4)
+        while _t.monotonic() < end:
+            shell.pump(0.05)
+            shell._update_motion(_t.monotonic())
+        shell.render()
+        fb = shell.backend.frames[-1] if getattr(shell.backend, "frames", None) else shell.compose()
+        png.save(fb, args.out)
     finally:
         shell.close()
         prompter.close()
@@ -960,6 +1075,20 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("pack", help="build a .kapp from a directory")
     s.add_argument("dir")
     s.add_argument("-o", "--output", required=True)
+    s = sub.add_parser("convert", help="turn a .deb or an AppImage into a .kapp (nothing is run)")
+    s.add_argument("file")
+    s.add_argument("-o", "--out")
+    s.add_argument("--name", help="app name (default: from the package)")
+    s.add_argument("--entry", help="for a .deb: which program to run, a path inside the package")
+    s = sub.add_parser("mod", help="system mods: mod list | enable NAME | disable NAME")
+    s.add_argument("mod_cmd", nargs="?", choices=["list", "enable", "disable"], default="list")
+    s.add_argument("name", nargs="?")
+    s = sub.add_parser("sudo", help="remember the password for a while: sudo on [MINUTES] | off | status")
+    s.add_argument("sudo_cmd", nargs="?", choices=["on", "off", "status"], default="status")
+    s.add_argument("minutes", nargs="?", type=int, default=5)
+    s.add_argument("--layers", default="interface,app,command", help="comma list of: interface, app, command")
+    s = sub.add_parser("policy", help="which layers ask for the password: policy [required|off]  (interface layer only)")
+    s.add_argument("value", nargs="?", choices=["required", "off"])
     s = sub.add_parser("install", help="install a .kapp")
     s.add_argument("file")
     s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
@@ -993,6 +1122,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--open", help="shot: comma-separated apps to open as windows")
     s.add_argument("--search", help="shot: text to type into the desktop search")
     s.add_argument("--wait", type=float, default=2.5, help="shot: seconds to let apps draw")
+    s.add_argument("--look", choices=["normal", "3d", "text", "terminal"], help="shot: the look to render in")
+    s.add_argument("--point", help="shot: move the pointer to X,Y")
+    s.add_argument("--click", help="shot: click at X,Y (the shot is taken a moment later, mid-effect)")
+    s.add_argument("--keys", help="shot: comma-separated key names to press, e.g. tab,tab")
+    s.add_argument("--demo-notes", action="store_true", help="shot: post three sample notifications and show that tab")
     s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
     s.add_argument("path")
     s = sub.add_parser("cat", help="view a file, including one inside a zip")
@@ -1064,7 +1198,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
-            "install": cmd_install, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
+            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,

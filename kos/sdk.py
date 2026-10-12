@@ -49,6 +49,11 @@ class Canvas:
         self.ops.append(["text", int(x), int(y), s, color, int(scale)])
         return self
 
+    def hit(self, x: int, y: int, w: int, h: int, label: str) -> "Canvas":
+        """Declare a clickable control (draws nothing): it can then be listed, tabbed to and pressed from the keyboard."""
+        self.ops.append(["hit", int(x), int(y), int(w), int(h), str(label)])
+        return self
+
     def stext(self, x: int, y: int, s: str, color: str, px: int = 14, face: int = 0) -> "Canvas":
         """Smooth proportional text; face 0 sans, 1 bold, 2 mono."""
         self.ops.append(["stext", int(x), int(y), s, color, int(px), int(face)])
@@ -66,6 +71,8 @@ class App:
         self.height = 24
         self.scale = 1
         self.font: dict = {}
+        self.look = "normal"                   # normal | 3d | text | terminal (the OS may change it at any time)
+        self.options: dict = {}
         self.insets = [0, 0, 0, 0]
         self.devices: set[str] = set()
 
@@ -85,6 +92,11 @@ class App:
                 self.height = ev.get("height", self.height)
                 self.scale = ev.get("scale", self.scale)
                 self.font = ev.get("font", self.font)
+                self.look = ev.get("look", self.look)
+                self.options = ev.get("options", self.options)
+            elif cmd == "look":
+                self.look = ev.get("look", self.look)
+                self.options = ev.get("options", self.options)
                 self.insets = ev.get("insets", self.insets)
             elif cmd == "device" and ev.get("state") == "attached":
                 self.devices.add(ev.get("device", ""))

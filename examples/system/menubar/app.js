@@ -12,7 +12,7 @@ const two = (n) => String(n).padStart(2, '0');
 
 (async () => {
   const app = new App();
-  const st = { windows: [], desktop: '', apps: [], local: null, online: null, cpu: 0, mem: 0, prev: null, n: 0, hover: -1, items: [] };
+  const st = { sudo: { active: false, left: 0 }, windows: [], desktop: '', apps: [], local: null, online: null, cpu: 0, mem: 0, prev: null, n: 0, hover: -1, items: [] };
   const focused = () => st.windows.find((w) => w.focused);
   const draw = () => {
     const c = new Canvas(), u = app.scale, W = app.width, H = app.height, px = 7 * u + 1, ty = Math.round((H - px * 1.2) / 2);
@@ -24,10 +24,11 @@ const two = (n) => String(n).padStart(2, '0');
       if (hot) G.roundRect(c, x - 5 * u, 2 * u, w + 10 * u, H - 4 * u, 3 * u, ACCENT);
       c.stext(x + 1, ty + 1, s, '#000000', px, face);
       c.stext(x, ty, s, color, px, face);
+      if (action) c.hit(x - 5 * u, 2 * u, w + 10 * u, H - 4 * u, s);
       st.items.push({ x: x - 5 * u, w: w + 10 * u, action });
       x += w + 16 * u;
     };
-    label('KOS', 1, () => st.desktop && app.requestFocus(st.desktop));
+    label('KOS', 1, () => app.requestToggle('launcher'));     // the KOS menu opens the launcher
     const f = focused(), meta = f && st.apps.find((a) => a.name === f.name);
     label(f ? f.name.replace(/(^|-)(\w)/g, (m, a, b) => (a ? ' ' : '') + b.toUpperCase()) : 'Desktop', 1, null);
     if (meta) for (const cmd of meta.commands.slice(0, 4)) label(cmd.title, 0, () => app.requestOpen(meta.name, 'graphical', cmd.id), '#dfe8f5');
@@ -35,6 +36,12 @@ const two = (n) => String(n).padStart(2, '0');
     let r = W - 10 * u;
     const l = st.local, clock = l ? `${DAYS[l.weekday]} ${l.day} ${MONTHS[l.month - 1]}   ${two(l.hour)}:${two(l.minute)}` : '';
     r -= tw(clock, 1); c.stext(r + 1, ty + 1, clock, '#000000', px, 1); c.stext(r, ty, clock, '#ffffff', px, 1);
+    if (st.sudo.active) {                                     // a sudo window is open: the password is being remembered
+      const t = `sudo ${Math.floor(st.sudo.left / 60)}:${String(st.sudo.left % 60).padStart(2, '0')}`, w = tw(t, 1, px - 1) + 14 * u;
+      r -= w + 6 * u;
+      G.roundRect(c, r, 3 * u, w, H - 6 * u, Math.round((H - 6 * u) / 2), ACCENT);
+      c.stext(r + 7 * u, ty + 1, t, '#ffffff', px - 1, 1);
+    }
     r -= 26 * u;
     for (let i = 0; i < 4; i++) {
       const bh = (i + 1) * 2 * u + 2 * u;
@@ -47,11 +54,13 @@ const two = (n) => String(n).padStart(2, '0');
   };
   const at = (x) => st.items.findIndex((it) => it.action && x >= it.x && x < it.x + it.w);
   for await (const ev of app.events()) {
-    if (ev.cmd === 'hello') { app.requestApps(); app.requestSys('resources'); app.requestSys('network'); }
+    if (ev.cmd === 'hello') { app.requestSudo('status'); app.requestApps(); app.requestSys('resources'); app.requestSys('network'); }
     else if (ev.cmd === 'apps') st.apps = ev.installed;
+    else if (ev.cmd === 'sudo') st.sudo = ev;
     else if (ev.cmd === 'windows') { st.windows = ev.windows; st.desktop = ev.desktop; }
     else if (ev.cmd === 'tick') {
       st.local = ev.local; st.n++;
+      if (st.sudo.active || st.n % 5 === 0) app.requestSudo('status');
       if (st.n % 2 === 0) app.requestSys('resources');
       if (st.n % 15 === 1) app.requestSys('network');
     } else if (ev.cmd === 'sys' && ev.kind === 'resources') {

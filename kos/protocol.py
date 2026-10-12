@@ -39,6 +39,8 @@ app -> OS
         op = ["clear", color] | ["rect", x, y, w, h, color]
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
            | ["stext", x, y, str, color, px, face?]     smooth text, face 0 sans / 1 bold / 2 mono
+           | ["hit", x, y, w, h, label]                 draws nothing: declares a clickable control, so the
+                                                       interface can be listed, tabbed through, or shown as text
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
@@ -59,6 +61,18 @@ app -> OS
     {"cmd": "request", "action": "sys", "kind": KIND, "arg": str?}   read-only OS facts (see osinfo.KINDS)
     {"cmd": "request", "action": "signal", "pid": N, "sig": "TERM"|"KILL"|"STOP"|"CONT"}   (password)
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
+    {"cmd": "request", "action": "animate", "on": bool}      (animate permission) ask for / stop ~24 'anim' events a second
+    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|text|terminal, "cursor_direction"|"tilt"|"bubbles": bool}   (shell permission to set)
+    {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
+    {"cmd": "request", "action": "openlink", "id": ID}      open a pinned link (the OS looks up what it points to)
+    {"cmd": "request", "action": "tab", "name": "notifications"|"widgets"}   (shell permission) the sidebar's tab
+    {"cmd": "request", "action": "toggle", "app": NAME}      (shell permission) show or hide an interface app's layer
+    {"cmd": "request", "action": "notify", "op": "post"|"clear"|"dismiss", "title": str, "body": str, "id"}   notifications (posting is rate-limited)
+    {"cmd": "request", "action": "keys", "on": bool}         (shell permission) take the keyboard for a text box until a click elsewhere
+    {"cmd": "request", "action": "mods", "op": "list"|"enable"|"disable", "name": APP}   system mods (password to change)
+    {"cmd": "request", "action": "sudo", "op": "status"|"open"|"close", "minutes": 1..60, "layers": [..]}
+                                                       remember the password for a while (password to open)
+    {"cmd": "request", "action": "policy", "op": "get"|"set", "interface": "required"|"off"}   (password to set)
     {"cmd": "request", "action": "fschange", "op": "mkdir"|"trash"|"rename"|"chmod", "path": P, ...}   (admin keyboard + password)
     {"cmd": "request", "action": "netcheck"}                   test the internet (password)
     {"cmd": "request", "action": "resize", "w": N?, "h": N?}   (shell permission) change my own layer's size
@@ -134,6 +148,8 @@ def _op(op: Any) -> list:
         face = _int(op[6], 0, 2) if len(op) == 7 else 0
         return ["stext", _int(op[1]), _int(op[2]), clean_text(op[3], 256), _color(op[4]),
                 _int(op[5], 6, 120) if len(op) >= 6 else 14, face]
+    if kind == "hit" and len(op) == 6:
+        return ["hit", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), clean_text(op[5], 60)]
     raise ProtocolError(f"bad draw op {kind!r}")
 
 
@@ -257,6 +273,110 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "push", "backup": b}
     if action in ("save", "backup", "restore"):
         return _file_request(action, msg)
+    if action == "animate":
+        on = msg.get("on")
+        if not isinstance(on, bool):
+            raise ProtocolError("animate.on must be true or false")
+        return {"cmd": "request", "action": "animate", "on": on}
+    if action == "look":
+        op = msg.get("op", "get")
+        if op not in ("get", "set"):
+            raise ProtocolError("look.op must be get or set")
+        out = {"cmd": "request", "action": "look", "op": op}
+        if op == "set":
+            if "look" in msg:
+                if msg["look"] not in ("normal", "3d", "text", "terminal"):
+                    raise ProtocolError("look.look must be normal, 3d, text or terminal")
+                out["look"] = msg["look"]
+            for k in ("cursor_direction", "tilt", "bubbles"):
+                if k in msg:
+                    if not isinstance(msg[k], bool):
+                        raise ProtocolError(f"look.{k} must be true or false")
+                    out[k] = msg[k]
+        return out
+    if action == "links":
+        op = msg.get("op", "list")
+        if op not in ("list", "add", "remove"):
+            raise ProtocolError("links.op must be list, add or remove")
+        out = {"cmd": "request", "action": "links", "op": op}
+        if op == "add":
+            if msg.get("kind") not in ("app", "file", "folder", "url"):
+                raise ProtocolError("links.kind must be app, file, folder or url")
+            if msg.get("where", "shelf") not in ("shelf", "desktop"):
+                raise ProtocolError("links.where must be shelf or desktop")
+            out.update(kind=msg["kind"], target=clean_text(msg.get("target", ""), 1024),
+                       title=clean_text(msg.get("title", ""), 40), where=msg.get("where", "shelf"))
+        if op == "remove":
+            lid = msg.get("id")
+            if not isinstance(lid, str) or not re.match(r"^[0-9a-f]{10}$", lid):
+                raise ProtocolError("links.id must be a link id")
+            out["id"] = lid
+        return out
+    if action == "openlink":
+        lid = msg.get("id")
+        if not isinstance(lid, str) or not re.match(r"^[0-9a-f]{10}$", lid):
+            raise ProtocolError("openlink.id must be a link id")
+        return {"cmd": "request", "action": "openlink", "id": lid}
+    if action == "tab":
+        if msg.get("name") not in ("notifications", "widgets"):
+            raise ProtocolError("tab.name must be notifications or widgets")
+        return {"cmd": "request", "action": "tab", "name": msg["name"]}
+    if action == "toggle":
+        app = msg.get("app")
+        if not isinstance(app, str) or not _APP_NAME_RE.match(app):
+            raise ProtocolError("toggle.app must be an app name")
+        return {"cmd": "request", "action": "toggle", "app": app}
+    if action == "notify":
+        op = msg.get("op", "post")
+        if op not in ("post", "clear", "dismiss"):
+            raise ProtocolError("notify.op must be post, clear or dismiss")
+        out = {"cmd": "request", "action": "notify", "op": op, "title": clean_text(msg.get("title", ""), 60),
+               "body": clean_text(msg.get("body", ""), 200)}
+        if op == "dismiss":
+            nid = msg.get("id")
+            if not isinstance(nid, str) or not re.match(r"^n[0-9a-z-]{1,30}$", nid):
+                raise ProtocolError("notify.id must be a notification id")
+            out["id"] = nid
+        return out
+    if action == "keys":
+        on = msg.get("on")
+        if not isinstance(on, bool):
+            raise ProtocolError("keys.on must be true or false")
+        return {"cmd": "request", "action": "keys", "on": on}
+    if action == "mods":
+        op = msg.get("op", "list")
+        if op not in ("list", "enable", "disable"):
+            raise ProtocolError("mods.op must be list, enable or disable")
+        out = {"cmd": "request", "action": "mods", "op": op}
+        if op != "list":
+            name = msg.get("name")
+            if not isinstance(name, str) or not _APP_NAME_RE.match(name):
+                raise ProtocolError("mods.name must be an app name")
+            out["name"] = name
+        return out
+    if action == "sudo":
+        op = msg.get("op", "status")
+        if op not in ("status", "open", "close"):
+            raise ProtocolError("sudo.op must be status, open or close")
+        out = {"cmd": "request", "action": "sudo", "op": op}
+        if op == "open":
+            out["minutes"] = _int(msg.get("minutes", 5), 1, 60)
+            layers = msg.get("layers", ["interface", "app", "command"])
+            if (not isinstance(layers, list) or not layers or len(layers) > 4
+                    or not all(l in ("interface", "app", "command", "kernel") for l in layers)):
+                raise ProtocolError("sudo.layers must name layers")
+            out["layers"] = layers
+        return out
+    if action == "policy":
+        op = msg.get("op", "get")
+        if op not in ("get", "set"):
+            raise ProtocolError("policy.op must be get or set")
+        out = {"cmd": "request", "action": "policy", "op": op}
+        if op == "set":
+            if msg.get("interface") not in ("required", "off"):
+                raise ProtocolError("policy.interface must be required or off")
+            out["interface"] = msg["interface"]
+        return out
     raise ProtocolError(f"unknown request {action!r}")
 
 

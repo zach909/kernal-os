@@ -1,9 +1,0 @@
-{
-  "name": "icons",
-  "version": "1.0",
-  "runtime": "npm",
-  "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system"],
-  "description": "The app icons: every installed app as a glossy icon you can open."
-}

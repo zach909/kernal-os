@@ -1,0 +1,12 @@
+{
+  "name": "browser",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["tui"],
+  "permissions": ["network"],
+  "description": "A text-mode web browser (Node, started by npm): pages as readable text with numbered links. No scripts run.",
+  "commands": [
+    {"id": "open", "title": "Open a web page", "keywords": ["web", "browser", "internet", "url", "website", "http"]}
+  ]
+}

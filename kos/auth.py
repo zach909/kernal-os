@@ -75,7 +75,41 @@ ACTIONS: dict[str, str] = {
     "backup.remote": "set the off-site backup repository",
     "backup.push": "push a backup to your private GitHub",
     "admin.boot": "boot the administrator keyboard",
+    "sudo.open": "remember your password for a while (sudo window)",
+    "mod.enable": "make a system mod part of your desktop",
+    "mod.disable": "remove a system mod from your desktop",
+    "policy.change": "change which layers ask for your password",
 }
+
+# The four layers that each ask for the password. Interface: starting the desktop and its devices (this
+# layer can be turned off). App: starting, stopping, installing, permitting apps. Command: what a running
+# app asks the OS to do (read or write files, run code, signal processes, back up, check the network).
+# Kernel: what changes the system itself (the administrator keyboard, the password, where software comes
+# from, KOS itself, kernel cells, the policy). Every layer asks by default.
+LAYERS = ("interface", "app", "command", "kernel")
+LAYER_OF: dict[str, str] = {
+    "session.login": "kernel", "device.mouse": "interface", "device.keyboard": "interface",
+    "device.desktop": "interface",
+    "app.install": "app", "app.update": "app", "app.update.all": "app", "app.remove": "app", "app.run": "app",
+    "app.graphical": "app", "app.open": "app", "app.close": "app", "app.permit": "app", "app.revoke": "app",
+    "app.network": "app",
+    "file.view": "command", "file.write": "command", "file.change": "command", "code.run": "command",
+    "backup.create": "command", "backup.push": "command", "backup.remote": "command",
+    "process.signal": "command", "process.renice": "command", "net.check": "command", "scan.watch": "command",
+    "disk.optimize": "command", "updates.check": "command",
+    "auth.change": "kernel", "admin.boot": "kernel", "sources.change": "kernel", "updates.install": "kernel",
+    "cell.start": "kernel", "cell.stop": "kernel", "sudo.open": "kernel", "policy.change": "kernel",
+    "mod.enable": "kernel", "mod.disable": "kernel",
+}
+# Never remembered by a sudo window, whatever layers it covers: these change who or what is trusted, or
+# send your data out. They ask every time.
+NEVER_REMEMBERED = frozenset({"session.login", "auth.change", "app.permit", "app.revoke", "app.network",
+                              "sources.change", "backup.push", "backup.remote", "updates.install",
+                              "admin.boot", "sudo.open", "policy.change", "cell.start", "cell.stop",
+                              "mod.enable", "mod.disable"})
+KEYLESS = frozenset({"device.mouse", "device.keyboard", "device.desktop"})   # use no key: nothing is sealed
+SUDO_DEFAULT_MINUTES, SUDO_MAX_MINUTES = 5, 60
+SUDO_DEFAULT_LAYERS = ("interface", "app", "command")      # the kernel layer is never remembered
 
 
 class AuthError(Exception):
@@ -254,12 +288,15 @@ class AuditLog:
 class Grant:
     """Proof that the owner typed the password for one specific action."""
 
-    def __init__(self, action: str, target: str, master: SecretBytes):
+    def __init__(self, action: str, target: str, master: Optional[SecretBytes], *, via: str = "password"):
         self.action = action
         self.target = target
         self._master = master
+        self.via = via                     # password | sudo | interface-off
 
     def check(self, action: str, target: str) -> None:
+        if self._master is None and self.via == "interface-off" and (action, target) == (self.action, self.target):
+            return
         if not self._master:
             raise AuthorizationDenied("grant already closed")
         if (action, target) != (self.action, self.target):
@@ -267,12 +304,15 @@ class Grant:
                 f"grant is for {self.action}:{self.target}, not {action}:{target}")
 
     def key(self, label: str) -> bytes:
+        if self._master is None:
+            raise AuthorizationDenied("this grant carries no key (the interface layer is set to not ask)")
         if not self._master:
             raise AuthorizationDenied("grant already closed")
         return subkey(self._master, label)
 
     def close(self) -> None:
-        self._master.wipe()
+        if self._master is not None:
+            self._master.wipe()
 
     def __enter__(self) -> "Grant":
         return self
@@ -284,7 +324,7 @@ class Grant:
 class Authority:
     MAX_ATTEMPTS = 3
 
-    def authorize_batch(self, items: list[tuple[str, str]], label: str) -> list[Grant]:
+    def _prompt_batch(self, items: list[tuple[str, str]], label: str) -> list[Grant]:
         """One password, several grants - for starting something made of parts (the
         desktop and each of its built-in apps and devices). The prompt names the whole
         batch; every (action, target) is audited separately and gets its own grant."""
@@ -330,7 +370,7 @@ class Authority:
             self._throttle = Throttle(self.paths, base=self.store.throttle_base())
         return self._throttle
 
-    def authorize(self, action: str, target: str = "") -> Grant:
+    def _prompt_one(self, action: str, target: str = "") -> Grant:
         if action not in ACTIONS:
             raise AuthorizationDenied(f"unknown action {action!r}")
         if not self.store.exists():
@@ -352,3 +392,106 @@ class Authority:
             self.prompter.info("Wrong password.")
         self.audit.record(action, target, "denied")
         raise AuthorizationDenied(f"not authorized to {label}")
+
+    # ---- the layers: what asks, what may be remembered, what may be turned off ---------------------
+    def _shortcut(self, action: str, target: str) -> Optional[Grant]:
+        """A grant without a prompt, if the owner's own settings allow it: the interface layer set to
+        not ask, or a live sudo window covering this action's layer. Never for NEVER_REMEMBERED."""
+        if action not in ACTIONS:
+            raise AuthorizationDenied(f"unknown action {action!r}")
+        layer = LAYER_OF.get(action, "kernel")
+        if action in KEYLESS and Policy(self.paths).interface() == "off":
+            self.audit.record(action, target, "granted-interface-off")
+            return Grant(action, target, None, via="interface-off")
+        win = _WINDOWS.get(str(self.paths.state))
+        if win and win.live() and layer in win.layers and action not in NEVER_REMEMBERED:
+            self.audit.record(action, target, "granted-sudo")
+            return Grant(action, target, SecretBytes(bytes(win.master.raw)), via="sudo")
+        return None
+
+    def authorize(self, action: str, target: str = "") -> Grant:
+        return self._shortcut(action, target) or self._prompt_one(action, target)
+
+    def authorize_batch(self, items: list[tuple[str, str]], label: str) -> list[Grant]:
+        got = [self._shortcut(a, t) for a, t in items]
+        need = [(i, it) for i, (g, it) in enumerate(zip(got, items)) if g is None]
+        if need:
+            for (i, _), g in zip(need, self._prompt_batch([it for _, it in need], label)):
+                got[i] = g
+        return got
+
+    def sudo_open(self, minutes: int = SUDO_DEFAULT_MINUTES, layers: tuple[str, ...] = SUDO_DEFAULT_LAYERS) -> dict:
+        """Ask for the password once and remember it - in this process's locked memory only, never on disk -
+        for ``minutes`` (at most 60) for the given layers. The kernel layer is never remembered, and
+        NEVER_REMEMBERED actions still ask."""
+        layers = tuple(dict.fromkeys(layers))
+        if not layers or not set(layers) <= set(LAYERS):
+            raise AuthorizationDenied(f"layers must be a subset of {LAYERS}")
+        if "kernel" in layers:
+            raise AuthorizationDenied("the kernel layer is never remembered")
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or not 1 <= minutes <= SUDO_MAX_MINUTES:
+            raise AuthorizationDenied(f"a sudo window lasts 1 to {SUDO_MAX_MINUTES} minutes")
+        with self._prompt_one("sudo.open", f"{minutes} min: {', '.join(layers)}") as g:
+            sudo_close(self.paths)
+            _WINDOWS[str(self.paths.state)] = _SudoWindow(SecretBytes(bytes(g._master.raw)), minutes, set(layers))
+        return sudo_status(self.paths)
+
+    def sudo_close(self) -> None:
+        sudo_close(self.paths)
+
+    def sudo_status(self) -> dict:
+        return sudo_status(self.paths)
+
+
+class Policy:
+    """Which layers ask for the password. Only the interface layer can be turned off (it is optional by
+    design); app, command and kernel always ask. Changing it is itself a kernel-layer action."""
+
+    def __init__(self, paths: Paths):
+        self.file = paths.state / "policy.json"
+
+    def interface(self) -> str:
+        try:
+            v = json.loads(self.file.read_text()).get("interface", "required")
+        except (OSError, ValueError, AttributeError):
+            return "required"
+        return v if v in ("required", "off") else "required"
+
+    def set_interface(self, value: str) -> None:
+        if value not in ("required", "off"):
+            raise AuthorizationDenied("the interface layer is 'required' or 'off'")
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(self.file, json.dumps({"interface": value}).encode())
+
+
+class _SudoWindow:
+    def __init__(self, master: SecretBytes, minutes: int, layers: set[str]):
+        self.master, self.layers = master, layers
+        self.started = time.monotonic()                      # monotonic: moving the clock cannot extend it
+        self.until = self.started + minutes * 60
+
+    def live(self) -> bool:
+        if time.monotonic() < self.until and self.master:
+            return True
+        self.master.wipe()
+        return False
+
+    def left(self) -> int:
+        return max(0, int(self.until - time.monotonic()))
+
+
+_WINDOWS: dict[str, _SudoWindow] = {}
+
+
+def sudo_status(paths: Paths) -> dict:
+    win = _WINDOWS.get(str(paths.state))
+    if win and win.live():
+        return {"active": True, "left": win.left(), "layers": sorted(win.layers)}
+    _WINDOWS.pop(str(paths.state), None)
+    return {"active": False, "left": 0, "layers": []}
+
+
+def sudo_close(paths: Paths) -> None:
+    win = _WINDOWS.pop(str(paths.state), None)
+    if win:
+        win.master.wipe()

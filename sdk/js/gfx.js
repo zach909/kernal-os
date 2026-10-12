@@ -89,10 +89,16 @@ function button(c, x, y, w, h, label, { scale = 1, base = ACCENT, state = 'norma
 
 /** An app icon, drawn by code: a glossy tile in the app's own colour with a pictogram. */
 function icon(c, x, y, size, name, { hot = false } = {}) {
-  const base = hue(name), r = Math.round(size / 4.5);
-  roundRect(c, x + 2, y + 4, size, size, r, darken(base, 0.78));
-  roundGradient(c, x, y, size, size, r, lighten(base, hot ? 0.45 : 0.3), darken(base, 0.35));
-  roundGradient(c, x + 2, y + 2, size - 4, Math.floor(size / 2.2), Math.max(2, r - 2), lighten(base, 0.6), lighten(base, 0.2));
+  const base = hue(name), r = Math.round(size / 4.5), deep = look === '3d';
+  if (deep) {                                                                                       // 3D: a thick, glossy tile with a long shadow
+    roundRect(c, x + 3, y + 8, size, size, r, darken(base, 0.82));
+    roundRect(c, x + 1, y + 5, size, size, r, darken(base, 0.6));
+    roundGradient(c, x, y, size, size, r, lighten(base, hot ? 0.55 : 0.4), darken(base, 0.4));
+    roundGradient(c, x + 2, y + 2, size - 4, Math.floor(size / 2.2), Math.max(2, r - 2), lighten(base, 0.75), lighten(base, 0.25));
+  } else {                                                                                          // normal: a clean tile
+    roundRect(c, x + 1, y + 3, size, size, r, darken(base, 0.8));
+    roundGradient(c, x, y, size, size, r, lighten(base, hot ? 0.35 : 0.22), darken(base, 0.18));
+  }
   const g = lighten(base, 0.9), d = darken(base, 0.6), s = size, cx = x + s / 2, cy = y + s / 2, u = s / 10;
   const R = (a, b, w, h, col) => c.rect(Math.round(x + a * u), Math.round(y + b * u), Math.max(1, Math.round(w * u)), Math.max(1, Math.round(h * u)), col);
   const P = {
@@ -121,12 +127,15 @@ function icon(c, x, y, size, name, { hot = false } = {}) {
 }
 
 
-const ACCENT = '#0078d4';        // Windows Blue
+const ACCENT = '#0078d4';        // KOS Blue
+let look = 'normal';
+/** Apps call this with `app.look` before drawing: icons and buttons get deeper in the 3D look. */
+function setLook(l) { look = l; }
 
 /** The default wallpaper: a bright blue sky and three sweeping layered waves, all from code. */
 function wallpaper(c, w, h) {
   const band = Math.max(2, Math.round(h / 180));
-  for (let y = 0; y < h; y += band) c.rect(0, y, w, band, mix('#38b6ff', '#0a6fd0', Math.min(1, y / h)));      // sky: light to Windows Blue
+  for (let y = 0; y < h; y += band) c.rect(0, y, w, band, mix('#38b6ff', '#0a6fd0', Math.min(1, y / h)));      // sky: light to KOS Blue
   const step = Math.max(2, Math.round(w / 360));
   const wave = (base, amp, k, phase, top, bottom, edge) => {
     for (let x = 0; x < w; x += step) {
@@ -141,4 +150,4 @@ function wallpaper(c, w, h) {
   wave(0.80, 0.045, 0.0063, 4.1, '#0078d4', '#05468f', '#4fb3ff');
 }
 
-module.exports = { rgb, color, mix, lighten, darken, hue, gradV, roundRect, roundGradient, circle, ring, text, stext, stextCentered, textWidth, textCentered, button, icon, wallpaper, ACCENT };
+module.exports = { setLook, rgb, color, mix, lighten, darken, hue, gradV, roundRect, roundGradient, circle, ring, text, stext, stextCentered, textWidth, textCentered, button, icon, wallpaper, ACCENT };

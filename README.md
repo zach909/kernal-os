@@ -149,22 +149,85 @@ see is a *separate sandboxed app* that only draws flat shapes and text:
 | Interface app | Role |
 |---|---|
 | `wallpaper` | the background (sky and layered waves, drawn from code - there are no image files) |
-| `menubar` | the **top panel**: KOS menu, the active app's name and the commands it offers (click one to run it), CPU/memory, network, date and clock |
-| `dock` | the **floating dock**, centered at the bottom: pinned apps, then whatever else is running; a dot marks open apps (Windows Blue when active) |
-| `icons` | every installed app as an icon; click to open |
+| `menubar` | the **top panel**: the KOS menu (opens the launcher), the active app's name and the commands it offers (click one to run it), CPU/memory, network, a sudo indicator, date and clock |
+| `dock` | the **floating dock**, centered at the bottom: pinned apps, then whatever else is running; a dot marks open apps (KOS Blue when active) |
+| `sidebar` | the **right-hand panel**: a segmented tab (Notifications / Widgets), the notification list, and a **shelf** of pinned links at the bottom |
+| `pins` | the backdrop's pins: apps, files, folders and web addresses you pinned (the `+` tile pins one: a path, a web address or an app name) |
+| `launcher` | the **Super key** panel: every app, plus the same search as the desktop - apps *and* the commands they offer |
 | `search` | type anywhere: finds apps **and the commands they offer**; any other line is a command too - `print(1)` runs sandboxed and prints 1 |
-| `widgets` + `widget-clock/calendar/network/system` | the widget handler (show/hide/reorder, remembered) and the widgets |
+| `widgets` + `widget-*` | the widget handler (show/hide/reorder, remembered) and the widgets, stacked in the sidebar's Widgets tab (the ones that do not fit are hidden) |
+| `cursor` | the **mouse pointer**: an arrow drawn by code that can turn to point the way you move, and presses down when you click |
+| `effects` | click effects: in the 3D look, a ring and small bubbles pop off every click |
+| `appearance`, `passwords`, `mods`, `browser`, `converter` | settings for the look, the password layers, system mods, a text-mode web browser, the `.deb`/AppImage converter |
 
 Apps never touch the screen. The OS adds the glass (blur, tint, sheen, bevel, soft shadow, rounded corners) around
 their shapes, draws the window frames itself, and asks for your password in its own overlay that no app can see or
 cover. Opening anything is a *request*; the right mouse button shows the desktop.
 
-**Look:** a minimalist top panel and a floating bottom dock (macOS-style), Windows Blue **`#0078D4`** for active and
+**Look:** a minimalist top panel and a floating bottom dock (a top panel and a floating dock), KOS Blue **`#0078D4`** for active and
 selected states, neutral dark glass instead of navy, and smooth proportional type. Smooth type is the OS's own
 pure-Python TrueType rasterizer (`kos/ttf.py`, exact-coverage anti-aliasing) using a system font; apps send
 `["stext", x, y, text, color, px, face]` and the OS draws it, so apps never need a font file. Not yet converted:
 the app windows' *content* is still the older text-mode pages (now drawn in a smooth monospace font), and a few
 widget details still use the pixel font.
+
+### Four looks, one set of controls
+
+`Appearance` (or `kos desktop shot --look`) switches the whole interface between four looks; the choice is remembered.
+
+* **normal** - glass, pills, smooth type.
+* **3d** - deeper bevels and shadows, a 3D pointer that presses down, bubbles on click, and the **whole screen tilts** a little toward the
+  direction you move or click (options for each). The tilt is a cheap shear done with row and strip copies - an approximation of perspective, not a 3D transform.
+* **text** - everything is built from text: windows are boxes, labels are characters, buttons are `[Label]`.
+* **terminal** - no pictures: a numbered list of **every button on screen**; Up/Down or a number picks one, Enter presses it, or click the line.
+
+All of this works because apps *declare* their controls with invisible `hit` ops (`["hit", x, y, w, h, "Files"]`); the OS gathers them (plus the window
+frames it draws itself) into one list. In **every** look, **Tab** (when no window is focused) walks that list with a focus ring and **Enter** presses the
+control - the keyboard-only way around the interface. An app with no `hit` ops still shows its text in the text look but is not reachable from the keyboard.
+
+### Every layer asks for your password
+
+Four layers each ask: **interface** (starting the desktop and its devices - *optional*, `kos policy interface off`), **apps** (open, close, install, update,
+permit), **commands** (what a running app asks the OS to do: files, code, processes, backups) and the **kernel** (the admin keyboard, your password, software
+sources, KOS itself, system mods). `kos sudo on 10` (or the Passwords app) opens a **sudo window**: you type the password once and the interface, app and
+command layers are remembered for up to 60 minutes - in the memory of that process only, never on disk, gone when it ends or you run `kos sudo off`. The kernel
+layer is never remembered, and neither is anything that changes who or what is trusted or sends your data out (permissions, the password, sources, pushes,
+mods, KOS updates): those ask every time, window or not. The honest cost: while a window is open, an app you permitted can ask for remembered actions
+without a prompt - so keep windows short, and the menubar shows a sudo chip with a countdown while one is open.
+
+### System mods
+
+A **mod** is an app that fills one part of the interface - `wallpaper`, `menubar`, `dock`, `pins`, `search`, `sidebar`, `launcher`, `cursor`, `effects`, or an
+extra `widget` - by naming that `"slot"` in its manifest. `kos install` it like any app, then `kos mod enable NAME` (or the Mods app): the desktop runs it
+instead of the built-in one at the next start. Each slot has a **ceiling** on what a mod may ask for (a wallpaper: nothing; a cursor: the pointer and
+animation ticks; a dock: what the built-in dock has), enabling is a kernel-layer action that always asks, the built-in app is never deleted, and a mod that
+is uninstalled just falls back. Examples in `examples/mods/`: a synthwave wallpaper, a ring pointer, an uptime widget.
+
+### Convert a `.deb` or an AppImage
+
+```
+kos convert tool.deb            # or Some-App-1.2-x86_64.AppImage        (nothing is run)
+kos install tool.kapp           # scanned, sealed, then it runs sandboxed like any app
+```
+
+Conversion reads the package as data: a `.deb`'s files are rewritten as a `.kapp` (setuid bits cleared, symlinks replaced by copies of what they point at inside the
+package, docs left out, **maintainer scripts never run** - they are listed), and an AppImage is kept whole and run with `--appimage-extract-and-run` (no FUSE)
+from a private RAM scratch directory. Either becomes a `bundle` app: a program tree unpacked read-only into RAM and started - like every app - with `npm run start`,
+under the usual sandbox (no network unless you grant it). Output becomes a text page and your keys go to its stdin. **Limits, plainly:** it needs pipes, not a
+terminal, so line-oriented programs work and full-screen curses ones do not; a program that wants a graphical display has none (KOS is not an X server) and says
+so; dependencies are listed, not installed. A real AppImage (`appimagetool`) was run this way, inside the sandbox, to verify it.
+
+### Sidebar, pins, launcher, notifications
+
+The sidebar's **Notifications** tab shows what apps post (`notify`, rate-limited) and what the OS reports (for example, an app that could not be opened); its
+**Shelf** and the desktop **pins** share one list of links (`kos/links.py`). A link is only a name for something - an app, a file, a folder or a web address - so
+pinning needs no password, but opening it goes through the usual gates (a file asks for your password; a web address opens in the `browser` app, which has no
+network until you allow it and runs no scripts). The Super key or the KOS menu opens the launcher.
+
+**Naming and assets:** KOS uses its own names (KOS Blue `#0078D4`, the Super key, the launcher). It follows conventions common to desktop
+environments - a top panel, a dock, tabs, a launcher - but copies no one's logos, icons, fonts, sounds or artwork: every icon and the wallpaper
+are drawn by code, and fonts are the system's own libre faces (Inter and the Liberation family are OFL/open licensed; the kit only *installs* them
+through your package manager, it does not ship them). No trademarked product names are used for features.
 
 **Real desktop on your own machine:** `native-desktop/` is a separate kit that gives a normal Linux X11 session
 the same layout - polybar (top panel), plank (floating dock), picom (blur, rounded corners), rofi, Papirus icons,

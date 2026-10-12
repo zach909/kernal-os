@@ -1,4 +1,4 @@
-/* KOS native desktop - launcher (rofi). Windows Blue marks the selection. */
+/* KOS native desktop - launcher (rofi). KOS Blue marks the selection. */
 * {
     bg:        #12151bf0;
     bg-alt:    #1b1f27;

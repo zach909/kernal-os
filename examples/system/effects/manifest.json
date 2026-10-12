@@ -1,0 +1,9 @@
+{
+  "name": "effects",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["pointer", "animate"],
+  "description": "Visual effects: in the 3D look, a bubble pops off wherever you click."
+}

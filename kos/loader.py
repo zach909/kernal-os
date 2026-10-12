@@ -110,7 +110,10 @@ def unpack(app: KApp, dest: Path) -> None:
         target = dest / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(app.read(name))
-        os.chmod(target, 0o555 if name.endswith((".sh", ".js", ".py")) or "/bin/" in name else 0o444)
+        if app.manifest.runtime == "bundle":                 # a program tree keeps which files are executable
+            os.chmod(target, 0o555 if app.mode_of(name) & 0o111 else 0o444)
+        else:
+            os.chmod(target, 0o555 if name.endswith((".sh", ".js", ".py")) or "/bin/" in name else 0o444)
     for root, dirs, _ in os.walk(dest, topdown=False):
         for d in dirs:
             os.chmod(os.path.join(root, d), 0o555)
@@ -123,6 +126,9 @@ def sandbox_dirs(app: KApp, cache_dir: Optional[Path]) -> tuple[list[str], list[
         return [], []
     if app.manifest.runtime == "npm":
         return [str(Path(cache_dir) / "scratch")], [str(Path(cache_dir) / "app"), npm_tools()[3]]
+    if app.manifest.runtime == "bundle":
+        scratch = str(Path(cache_dir) / "scratch")
+        return [scratch], [str(Path(cache_dir) / "app")] + ([scratch] if app.manifest.exec_scratch else [])
     return [str(cache_dir)], []
 
 
@@ -132,6 +138,17 @@ def apply_to_policy(policy: SandboxPolicy, app: KApp, cache_dir: Optional[Path])
     policy.read_paths = [*policy.read_paths, *ro]
     if app.manifest.runtime == "npm":
         policy.max_memory = max(policy.max_memory, 64 << 30)   # V8 reserves address space it does not use
+    if app.manifest.runtime == "bundle":
+        policy.max_memory = max(policy.max_memory, 16 << 30)
+
+
+def _npm_env(scratch: Path) -> dict:
+    return {"npm_config_offline": "true", "npm_config_update_notifier": "false",
+            "npm_config_audit": "false", "npm_config_fund": "false", "npm_config_progress": "false",
+            "npm_config_loglevel": "error", "npm_config_cache": str(scratch / "npm-cache"),
+            "npm_config_logs_dir": str(scratch / "npm-logs"),
+            "npm_config_userconfig": str(scratch / "user.npmrc"),      # distinct, empty: npm refuses
+            "npm_config_globalconfig": str(scratch / "global.npmrc")}  # to load one file twice
 
 
 def _plan_npm(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path]) -> LaunchPlan:
@@ -152,12 +169,7 @@ def _plan_npm(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path]) 
         for p in (scratch, *scratch.iterdir()):
             os.chown(p, 65534, 65534)
     sdk_js = os.path.join(SDK_DIR, "sdk", "js", "index.js")
-    npm_env = {"npm_config_offline": "true", "npm_config_update_notifier": "false",
-               "npm_config_audit": "false", "npm_config_fund": "false", "npm_config_progress": "false",
-               "npm_config_loglevel": "error", "npm_config_cache": str(scratch / "npm-cache"),
-               "npm_config_logs_dir": str(scratch / "npm-logs"),
-               "npm_config_userconfig": str(scratch / "user.npmrc"),      # distinct, empty: npm refuses
-               "npm_config_globalconfig": str(scratch / "global.npmrc")}  # to load one file twice
+    npm_env = _npm_env(scratch)
     env = {
         "KOS_CHANNEL_FD": "0", "KOS_APP": m.name, "KOS_MODE": mode,
         "KOS_APP_DIR": str(app_dir), "KOS_CACHE_DIR": str(scratch), "KOS_SDK_DIR": SDK_DIR,
@@ -175,10 +187,56 @@ def _plan_npm(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path]) 
                       temp_dir=temp)
 
 
+_HOST_BOOT_SH = ("import sys\nsdk = sys.argv[1]\ndel sys.argv[1:2]\nsys.path[:0] = [sdk]\n"
+                 "from kos.hostrun import main\nsys.exit(main())\n")
+
+
+def _plan_bundle(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path]) -> LaunchPlan:
+    """A foreign program tree (from a .deb or an AppImage). Like every app it starts with ``npm run start``:
+    the tree is unpacked read-only into RAM, a tiny generated package.json's ``start`` script launches the
+    adapter (kos/hostrun.py) inside the sandbox, and the adapter starts the program as its child (the child
+    inherits the sandbox). The program's output becomes a text page; keys go to its stdin."""
+    import json
+    m = app.manifest
+    node, npm_cli, _npx, prefix = npm_tools()
+    temp = None
+    if cache_dir is None:
+        shm = "/dev/shm" if os.access("/dev/shm", os.W_OK) else None
+        temp = cache_dir = Path(tempfile.mkdtemp(prefix="kos-run-", dir=shm))
+    base = Path(cache_dir)
+    app_dir, scratch, host = base / "app", base / "scratch", base / "host"
+    scratch.mkdir(mode=0o700, exist_ok=True)
+    unpack(app, app_dir)
+    host.mkdir(exist_ok=True)
+    (host / "package.json").write_text(json.dumps({
+        "name": "kos-host", "version": "1.0.0", "private": True,
+        "scripts": {"start": '"$KOS_PYTHON" -I -S -B -c "$KOS_HOST_BOOT" "$KOS_SDK_DIR"'}}))
+    os.chmod(host / "package.json", 0o444)
+    os.chmod(host, 0o555)
+    for rc in ("user.npmrc", "global.npmrc"):
+        (scratch / rc).write_text("")
+    if os.geteuid() == 0:                       # dev/test as root: the app runs as 'nobody'
+        os.chmod(base, 0o755)
+        for p in (scratch, *scratch.iterdir()):
+            os.chown(p, 65534, 65534)
+    env = {"KOS_CHANNEL_FD": "0", "KOS_APP": m.name, "KOS_MODE": mode, "KOS_SDK_DIR": SDK_DIR,
+           "KOS_PYTHON": os.path.realpath(sys.executable), "KOS_HOST_BOOT": _HOST_BOOT_SH,
+           "KOS_APP_DIR": str(app_dir), "KOS_ENTRY": m.entry, "KOS_ARGS": json.dumps(list(m.args)),
+           "KOS_CACHE_DIR": str(scratch), "KOS_EXEC_SCRATCH": "1" if m.exec_scratch else "",
+           "HOME": str(scratch), "TMPDIR": str(scratch), "LANG": "C.UTF-8",
+           "PATH": f"{os.path.dirname(node)}:/usr/bin:/bin", "OPENSSL_CONF": os.devnull,
+           **_npm_env(scratch)}
+    ro = [str(app_dir), str(host), prefix] + ([str(scratch)] if m.exec_scratch else [])
+    return LaunchPlan(argv=[node, npm_cli, "run", "start"], executable=node, env=env, pass_fds=[],
+                      cwd=str(host), stdin_fd=channel_fd, rw_dirs=[str(scratch)], ro_dirs=ro, temp_dir=temp)
+
+
 def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None) -> LaunchPlan:
     m = app.manifest
     if m.runtime == "npm":
         return _plan_npm(app, channel_fd, mode, cache_dir)
+    if m.runtime == "bundle":
+        return _plan_bundle(app, channel_fd, mode, cache_dir)
     kapp_fd = sealed_memfd(m.name, app.data)
     owned = [kapp_fd]
     env = {

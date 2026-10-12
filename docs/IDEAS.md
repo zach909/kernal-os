@@ -80,6 +80,10 @@ land instead of getting lost in chat.
   widgets and icon labels; the window *contents* of the other apps are still text pages (drawn in a smooth monospace).
   Moving them to native graphical layouts with proportional type is the next visual step. Kerning, hinting and
   OpenType (CFF) outlines are missing from `kos/ttf.py`.
+- **The 3D stack.** The look of the whole interface as layered cards in space: the graphical interface in front, the terminal view visible beneath it when
+  you look down, and the button-by-button view behind. Today the four looks are switched, and the tilt only shears the front frame.
+- **Workspaces, multiple pointers/keyboards, extra displays, background instances.** Layers have no workspace, the shell has one pointer and one focus, and
+  one framebuffer; opening an app attaches to an already-running instance instead of starting another.
 - **Dock polish.** Hover magnification beyond a small lift, labels on hover, drag-to-reorder pinned apps, and
   auto-hide (the layer exists to hide, but nothing triggers it yet).
 - **Verify `native-desktop/` on a live X11 session.** It was written without an X server: config syntax for polybar,

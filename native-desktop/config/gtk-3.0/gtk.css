@@ -1,4 +1,4 @@
-/* KOS: Windows Blue selection and focus on top of whatever GTK theme is in use. */
+/* KOS: KOS Blue selection and focus on top of whatever GTK theme is in use. */
 @define-color accent_color #0078d4;
 @define-color accent_bg_color #0078d4;
 @define-color accent_fg_color #ffffff;

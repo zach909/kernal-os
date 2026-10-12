@@ -1,0 +1,10 @@
+{
+  "name": "ring-cursor",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["pointer"],
+  "slot": "cursor",
+  "description": "A pointer that is a ring with a dot, which fills in while a button is held."
+}

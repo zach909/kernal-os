@@ -4,7 +4,7 @@
 
 const HOME = 'taskbar';
 // The apps that make up the interface itself: they are not offered as things to launch.
-const SHELL = new Set(['wallpaper', 'icons', 'search', 'widgets', 'widget-clock', 'widget-calendar', 'widget-network', 'widget-system', 'menubar', 'dock', 'taskbar']);
+const SHELL = new Set(['wallpaper', 'pins', 'search', 'sidebar', 'launcher', 'widgets', 'widget-clock', 'widget-calendar', 'widget-network', 'widget-system', 'menubar', 'dock', 'effects', 'cursor', 'taskbar']);
 
 const bytes = (n) => {
   const u = ['B', 'K', 'M', 'G', 'T', 'P'];
@@ -123,4 +123,17 @@ function rank(items, query, limit = 12) {
   return scored.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
 }
 
-module.exports = { rank, HOME, SHELL, bytes, kb, pct, dur, fit, pad, rpad, bar, spark, History, Nav, Cursor, Rate };
+/** Guess what a typed pin is: an http(s) address, a path (a trailing / means a folder), or an app name. */
+function parseLink(text, apps = []) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  if (/^https?:\/\/\S{3,}$/i.test(t)) return { kind: 'url', target: t };
+  if (/^www\.\S+\.\S+$/i.test(t)) return { kind: 'url', target: `https://${t}` };
+  if (t.startsWith('/')) return { kind: t.endsWith('/') && t.length > 1 ? 'folder' : (/\.[A-Za-z0-9]{1,6}$/.test(t) ? 'file' : 'folder'), target: t };
+  if (apps.some((a) => a.name === t.toLowerCase())) return { kind: 'app', target: t.toLowerCase() };
+  return null;
+}
+/** The app whose icon stands for a kind of link. */
+const LINK_ICON = { app: null, file: 'editor', folder: 'files', url: 'browser' };
+
+module.exports = { parseLink, LINK_ICON, rank, HOME, SHELL, bytes, kb, pct, dur, fit, pad, rpad, bar, spark, History, Nav, Cursor, Rate };

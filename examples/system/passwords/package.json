@@ -1,0 +1,7 @@
+{
+  "name": "passwords",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Password layers and the sudo window.",
+  "scripts": { "start": "node app.js" }
+}

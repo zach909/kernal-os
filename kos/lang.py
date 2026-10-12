@@ -211,6 +211,28 @@ _LEXICON: dict[str, dict[str, str]] = {
         "zh": "撤销 撤銷 禁止",
         "ja": "取り消す",
     },
+    "sudo": {
+        "en": "sudo elevate",
+        "es": "elevar eleva",
+        "fr": "élever eleve",
+        "de": "erhöhe erhoehe",
+        "pt": "elevar eleve",
+        "it": "eleva elevare",
+        "ru": "повысить",
+        "zh": "提权 提權",
+        "ja": "昇格",
+    },
+    "convert": {
+        "en": "convert",
+        "es": "convierte convertir",
+        "fr": "convertis convertir",
+        "de": "konvertiere konvertieren umwandeln",
+        "pt": "converta converter",
+        "it": "converti convertire",
+        "ru": "конвертировать преобразовать",
+        "zh": "转换 轉換",
+        "ja": "変換",
+    },
     "desktop": {
         "en": "desktop taskbar home",
         "es": "escritorio",
@@ -600,6 +622,8 @@ Every line you type is a command. Say what you want, in your own language:
   write FILE TEXT      write a file (needs the admin keyboard; scanned + disk optimized)
   optimize             reclaim disk space
   desktop              the taskbar (right mouse = App Library)
+  sudo on 10           remember my password for 10 minutes (app + command layers; kernel never)   sudo off
+  convert FILE         turn a .deb or an AppImage into an app (nothing is run)
   permit hello         let an app run at all   revoke hello   take that away
   admin                the elevated administrator keyboard
   help / exit

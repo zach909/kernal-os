@@ -1,0 +1,9 @@
+{
+  "name": "cursor",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["pointer", "animate"],
+  "description": "The mouse pointer: an arrow drawn by code that can point where you are moving, and looks 3D and presses down when you click."
+}

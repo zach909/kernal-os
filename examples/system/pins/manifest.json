@@ -1,0 +1,9 @@
+{
+  "name": "pins",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["system", "shell"],
+  "description": "The desktop's pins: apps, files, folders and web links you pinned to the backdrop."
+}

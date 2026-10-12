@@ -117,6 +117,7 @@ class Framebuffer:
                 self.text(op[1], op[2], op[3], parse_color(op[4]), op[5])
             elif kind == "stext":
                 self.stext(op[1], op[2], op[3], op[4], op[5], op[6])
+            # "hit" declares a control and draws nothing
 
 
 _CURSOR = [

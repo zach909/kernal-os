@@ -47,6 +47,7 @@ FS_READ_FILE = 1 << 2
 FS_READ_DIR = 1 << 3
 FS_MAKE_DIR = 1 << 7
 FS_MAKE_REG = 1 << 8
+FS_MAKE_SYM = 1 << 12
 FS_REFER = 1 << 13        # ABI 2
 FS_TRUNCATE = 1 << 14     # ABI 3
 FS_IOCTL_DEV = 1 << 15    # ABI 5
@@ -192,7 +193,7 @@ class SandboxPolicy:
             for p in self.rw_files:
                 self._add_rule(ruleset, p, (FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE) & handled)
             rw_dir_rights = (FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE | FS_READ_DIR
-                            | FS_MAKE_REG | FS_MAKE_DIR) & handled
+                            | FS_MAKE_REG | FS_MAKE_DIR | FS_MAKE_SYM) & handled
             for p in self.rw_dirs:
                 self._add_rule(ruleset, p, rw_dir_rights)
             _syscall(SYS_landlock_restrict_self, ctypes.c_int(ruleset), ctypes.c_uint32(0))
