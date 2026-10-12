@@ -25,7 +25,7 @@ from .kapp import KAppError
 from .registry import RegistryError
 
 SYSTEM_APPS = ("wallpaper", "pins", "search", "sidebar", "launcher", "widgets", "widget-clock", "widget-calendar",
-               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "browser", "app-library", "files", "editor", "backup", "settings", "security",
+               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "autoupdate", "browser", "app-library", "files", "editor", "backup", "settings", "security",
                "terminal", "processes", "memory", "filesystem", "devices", "network", "isolation",
                "health", "resources", "updates")
 DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library
@@ -76,7 +76,9 @@ def boot_core(paths, authority, *, mode: str = "graphical", devices: tuple = ("m
     from .store import AppStore
     from .system import open_background
 
+    from .heal import quick
     from .mods import core_names
+    quick(paths)                                              # corrupt preference files aside, dead records dropped: no password needed
     installed = {a.name for a in AppStore(paths).installed()}
     wanted = core_names(paths, CORE, installed)               # the built-in core, each slot swapped for its enabled mod
     running = {i.name: i for i in Registry(paths).list() if i.status == "running" and i.mode == mode}
@@ -131,17 +133,30 @@ def make_shell(paths, authority, backend, devices, **kw):
 
     holder: dict = {}
 
-    def opener(name: str, mode: str):
+    def opener(name: str, mode: str, new: bool = False, taken: frozenset = frozenset()):
+        """An instance to show in a window. Unless a fresh one is wanted (``new``), an already-running instance that no
+        window shows yet - say one you started with ``kos open`` in a terminal - is adopted, with no password."""
         from .registry import Registry
-        for i in Registry(paths).list():                    # already running (e.g. opened earlier): attach, no password
-            if i.name == name and i.mode == mode and i.status == "running":
-                return i
+        if not new:
+            for i in Registry(paths).list():
+                if i.name == name and i.status == "running" and i.id not in taken and i.mode in ("graphical", "tui"):
+                    return i
         return open_background(paths, holder["shell"].authority, name, mode)
 
     def closer(instance_id: str) -> None:
         close_instance(paths, holder["shell"].authority, instance_id)
 
-    shell = Shell(paths, authority, backend, devices, opener=opener, closer=closer,
+    def restarter(name: str):
+        """Start an interface app again (an instance that is still running is reused with no password; a dead one
+        needs a new start, which asks - or is covered by a sudo window)."""
+        from .registry import Registry
+        taken = set(holder["shell"].layers)
+        for i in Registry(paths).list():
+            if i.name == name and i.status == "running" and i.id not in taken and i.mode == "graphical":
+                return i
+        return open_background(paths, holder["shell"].authority, name, "graphical")
+
+    shell = Shell(paths, authority, backend, devices, opener=opener, closer=closer, restarter=restarter,
                   modes_of=modes_of, commands_of=commands_of, **kw)
     holder["shell"] = shell
     return shell

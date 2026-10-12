@@ -152,7 +152,7 @@ def render_text(shell) -> Framebuffer:
     cw, ch = 6 * u, 12 * u
     cols, rows = shell.W // cw, shell.H // ch
     grid = Grid(cols, rows)
-    layers = sorted((l for l in shell.layers.values() if l.visible and l.kind not in ("wallpaper", "cursor", "overlay")),
+    layers = sorted((l for l in shell.layers.values() if shell.shown(l) and l.kind not in ("wallpaper", "cursor", "overlay")),
                     key=lambda l: l.z)
     for layer in layers:
         x, y, w, h = layer.rect

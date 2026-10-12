@@ -188,16 +188,27 @@ class EvdevDevices:
 
     kind = "evdev"
 
+    MAX_SEATS = 4
+
     def __init__(self, width: int, height: int):
-        self.tr = EvdevTranslator(width, height)
+        """Every keyboard and every mouse is its own device with its own state; the i-th keyboard and the i-th
+        mouse make seat i, and every event carries its seat, so several people (or several hands) can work at once.
+        Written for real hardware and not exercised on any here."""
+        self.w, self.h = width, height
         self._fds: list[int] = []
+        self._tr: dict[int, EvdevTranslator] = {}
+        self._seat: dict[int, int] = {}
         kbds = find_evdev("keyboard")
         if not kbds:
             raise DeviceError("no keyboard found")
-        for path in kbds:
-            self._open(path)
+        for i, path in enumerate(kbds):
+            self._open(path, min(i, self.MAX_SEATS - 1))
 
-    def _open(self, path: str) -> None:
+    @property
+    def seats(self) -> int:
+        return len(set(self._seat.values()))
+
+    def _open(self, path: str, seat: int = 0) -> None:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
         try:
             fcntl.ioctl(fd, EVIOCGRAB, 1)
@@ -205,6 +216,8 @@ class EvdevDevices:
             os.close(fd)
             raise DeviceError(f"{path} is already grabbed by someone else - refusing")
         self._fds.append(fd)
+        self._tr[fd] = EvdevTranslator(self.w, self.h)
+        self._seat[fd] = seat
 
     def fds(self) -> list[int]:
         return list(self._fds)
@@ -214,14 +227,19 @@ class EvdevDevices:
             raw = os.read(fd, INPUT_EVENT.size * 64)
         except BlockingIOError:
             return []
-        return self.tr.feed(raw)
+        events = self._tr[fd].feed(raw)
+        seat = self._seat.get(fd, 0)
+        if seat:
+            for e in events:
+                e["seat"] = seat
+        return events
 
     def boot_mouse(self) -> str:
         mice = find_evdev("mouse")
         if not mice:
             raise DeviceError("no mouse found")
-        for path in mice:
-            self._open(path)
+        for i, path in enumerate(mice):
+            self._open(path, min(i, self.MAX_SEATS - 1))
         return ", ".join(mice)
 
     def boot_keyboard(self) -> str:
@@ -235,6 +253,8 @@ class EvdevDevices:
                 pass
             os.close(fd)
         self._fds.clear()
+        self._tr.clear()
+        self._seat.clear()
 
 
 class ScriptedDevices:

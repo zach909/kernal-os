@@ -12,7 +12,7 @@ const two = (n) => String(n).padStart(2, '0');
 
 (async () => {
   const app = new App();
-  const st = { sudo: { active: false, left: 0 }, windows: [], desktop: '', apps: [], local: null, online: null, cpu: 0, mem: 0, prev: null, n: 0, hover: -1, items: [] };
+  const st = { ws: 0, wsCount: 4, sudo: { active: false, left: 0 }, windows: [], desktop: '', apps: [], local: null, online: null, cpu: 0, mem: 0, prev: null, n: 0, hover: -1, items: [] };
   const focused = () => st.windows.find((w) => w.focused);
   const draw = () => {
     const c = new Canvas(), u = app.scale, W = app.width, H = app.height, px = 7 * u + 1, ty = Math.round((H - px * 1.2) / 2);
@@ -50,6 +50,16 @@ const two = (n) => String(n).padStart(2, '0');
     r -= 16 * u;
     const stats = `CPU ${Math.round(st.cpu * 100)}%   Memory ${Math.round(st.mem * 100)}%`;
     r -= tw(stats, 0, px - 1); c.stext(r, ty + 1, stats, '#c9d6ea', px - 1, 0);
+    r -= 12 * u;                                              // the desktops: one chip each, the current one in KOS Blue
+    for (let i = st.wsCount - 1; i >= 0; i--) {
+      const cw = 12 * u, busy = st.windows.some((w) => w.ws === i);
+      r -= cw + 3 * u;
+      c.hit(r, 4 * u, cw, H - 8 * u, `Desktop ${i + 1}`);
+      G.roundRect(c, r, 5 * u, cw, H - 10 * u, 3 * u, i === st.ws ? ACCENT : st.hover === st.items.length ? '#4b525e' : '#2c323c');
+      G.stextCentered(c, app, r + cw / 2, ty + 1, String(i + 1), '#ffffff', px - 2, 1, null);
+      if (busy && i !== st.ws) c.rect(r + Math.round(cw / 2) - u, H - 7 * u, 2 * u, 2 * u, '#ffffff');
+      st.items.push({ x: r, w: cw, action: () => app.requestWorkspace(i) });
+    }
     app.present(c);
   };
   const at = (x) => st.items.findIndex((it) => it.action && x >= it.x && x < it.x + it.w);
@@ -57,7 +67,7 @@ const two = (n) => String(n).padStart(2, '0');
     if (ev.cmd === 'hello') { app.requestSudo('status'); app.requestApps(); app.requestSys('resources'); app.requestSys('network'); }
     else if (ev.cmd === 'apps') st.apps = ev.installed;
     else if (ev.cmd === 'sudo') st.sudo = ev;
-    else if (ev.cmd === 'windows') { st.windows = ev.windows; st.desktop = ev.desktop; }
+    else if (ev.cmd === 'windows') { st.windows = ev.windows; st.desktop = ev.desktop; st.ws = ev.workspace || 0; st.wsCount = ev.workspaces || 4; }
     else if (ev.cmd === 'tick') {
       st.local = ev.local; st.n++;
       if (st.sudo.active || st.n % 5 === 0) app.requestSudo('status');

@@ -4,6 +4,8 @@
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
     kos install APP.kapp            install (the zip is stored as-is, sealed)
+    kos autoupdate status|on|off|mode|every|run   keep apps current; see what KOS and the OS have waiting
+    kos heal [--fix]                look for broken state and repair it (nothing lowers a gate)
     kos mod list|enable NAME|disable NAME   system mods: apps that replace a part of the interface
     kos sudo on [MINUTES]|off       remember the password for a while (in this process only; kernel layer never)
     kos policy [required|off]       whether the interface layer asks (app, command, kernel always do)
@@ -223,6 +225,67 @@ def cmd_mod(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_autoupdate(args, paths: Paths) -> int:
+    """`kos autoupdate status|on|off|mode ask|auto|every HOURS|run`: keep apps current (and see what the OS and KOS itself have waiting)."""
+    from . import osupdate
+    from .autoupdate import AutoUpdate
+    au = AutoUpdate(paths)
+    c = args.au_cmd
+    if c in ("status", None):
+        st = au.status()
+        print(f"auto-update: {'on' if st['enabled'] else 'off'}, mode {st['mode']}, every {st['every_hours']} h, "
+              f"{'DUE now' if st['due'] else 'not due'}; {st['apps_waiting']} app update(s) known, KOS itself {st['core_behind']} commit(s) behind")
+        if st["last_summary"]:
+            print("last run:", st["last_summary"])
+        o = osupdate.pending()
+        if o["packages"]:
+            print("OS:", ", ".join(f"{n} {k}" for k, n in sorted(o["counts"].items())), "waiting -", o["apply"])
+        return 0
+    authority, prompter = _authority(paths)
+    try:
+        if c in ("on", "off"):
+            au.set(authority, enabled=(c == "on"))
+        elif c == "mode":
+            au.set(authority, mode=args.value)
+        elif c == "every":
+            au.set(authority, every_hours=int(args.value))
+        elif c == "run":
+            res = au.run(authority)
+            for line in res["lines"]:
+                print(line)
+            return 0
+    finally:
+        prompter.close()
+    print(au.status()["mode"], "/", "on" if au.policy()["enabled"] else "off")
+    return 0
+
+
+def cmd_heal(args, paths: Paths) -> int:
+    """`kos heal [--fix]`: look for what is broken (corrupt preferences, dead instances, missing or tampered built-in
+    apps, a mod that no longer fits) and, with --fix, repair it. Nothing lowers a gate; see kos/heal.py."""
+    from . import heal
+    from .desktop import SYSTEM_APPS
+    rep = heal.check(paths, builtin=SYSTEM_APPS)
+    if not args.fix:
+        if rep.ok:
+            print("nothing wrong that can be seen without your password (kos heal --fix also verifies every app's seal)")
+        for f in rep.findings:
+            print(f"{f.kind:<15} {f.subject:<28} {f.detail}" + (f"   -> {f.fix}" + (" (password)" if f.needs_password else "") if f.fix else ""))
+        return 0
+    authority, prompter = _authority(paths)
+    try:
+        out = heal.repair(paths, authority, builtin=SYSTEM_APPS)
+    finally:
+        prompter.close()
+    for line in out.fixed:
+        print("fixed:", line)
+    for line in out.left:
+        print("left:", line)
+    if not out.fixed and not out.left:
+        print("healthy: nothing needed fixing")
+    return 0
+
+
 def cmd_update(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
     if args.file == "all":
@@ -436,7 +499,7 @@ def cmd_boot(args, paths: Paths) -> int:
 def _boot_shell(args, paths: Paths) -> int:
     from .desktop import attach_core, boot_core, make_shell
     from .devices import EvdevDevices, TerminalDevices
-    from .display import FbdevBackend, TerminalBackend
+    from .display import FbdevBackend, MultiBackend, TerminalBackend
     from .term import RawTerminal
 
     authority, prompter = _authority(paths)
@@ -444,7 +507,16 @@ def _boot_shell(args, paths: Paths) -> int:
     prompter.close()
     with RawTerminal() as term:
         if (os.path.exists("/dev/fb0") and _on_console_vt() and os.environ.get("KOS_DISPLAY") != "terminal"):
-            backend = FbdevBackend(tty_fd=0)
+            import glob
+            outs = []                                         # every framebuffer is a display; they sit side by side
+            for i, fbpath in enumerate(sorted(glob.glob("/dev/fb[0-9]*"))):
+                try:
+                    outs.append(FbdevBackend(fbpath, tty_fd=0 if not outs else None))
+                except OSError:
+                    continue
+            if not outs:
+                raise OSError("no usable framebuffer")
+            backend = outs[0] if len(outs) == 1 else MultiBackend(outs)
             devices = EvdevDevices(backend.width, backend.height)
         else:
             cols, rows = term.size()
@@ -467,12 +539,14 @@ def _shot(args, paths: Paths) -> int:
     from . import png
     from .desktop import attach_core, boot_core, make_shell
     from .devices import ScriptedDevices
-    from .display import HeadlessBackend
+    from .display import HeadlessBackend, MultiBackend
 
-    w, _, h = args.size.partition("x")
+    sizes = [tuple(int(v) for v in part.split("x")) for part in args.size.split(",")]
+    w, h = sizes[0]
     authority, prompter = _authority(paths)
     core = boot_core(paths, authority, devices=())
-    backend, devices = HeadlessBackend(int(w), int(h)), ScriptedDevices()
+    outs = [HeadlessBackend(a, b) for a, b in sizes]
+    backend, devices = (MultiBackend(outs) if len(outs) > 1 else outs[0]), ScriptedDevices()
     shell = make_shell(paths, authority, backend, devices, keep_prompter=True, preboot=())
     try:
         attach_core(paths, shell, core)
@@ -514,11 +588,77 @@ def _shot(args, paths: Paths) -> int:
     finally:
         shell.close()
         prompter.close()
-    print(f"saved {args.out} ({w}x{h})")
+    print(f"saved {args.out} ({backend.width}x{backend.height}" + (f", {len(outs)} displays" if len(outs) > 1 else "") + ")")
+    return 0
+
+
+def _bench(args, paths: Paths) -> int:
+    """`kos desktop bench`: boot the desktop headless and time the things that make it feel fast or slow."""
+    import statistics
+    import time as _t
+    from .desktop import attach_core, boot_core, make_shell
+    from .devices import ScriptedDevices
+    from .display import HeadlessBackend
+
+    w, _, h = args.size.partition("x")
+    t0 = _t.monotonic()
+    authority, prompter = _authority(paths)
+    core = boot_core(paths, authority, devices=())
+    t_boot = _t.monotonic() - t0
+    shell = make_shell(paths, authority, HeadlessBackend(int(w), int(h)), ScriptedDevices(), keep_prompter=True, preboot=())
+    rows: list[tuple[str, float, str]] = []
+
+    def ms(label, fn, n=20, note=""):
+        xs = []
+        for _ in range(n):
+            a = _t.perf_counter()
+            fn()
+            xs.append((_t.perf_counter() - a) * 1000)
+        rows.append((label, statistics.median(xs), note or f"max {max(xs):.0f} ms over {n}"))
+
+    try:
+        t1 = _t.monotonic()
+        attach_core(paths, shell, core)
+        while _t.monotonic() - t1 < 15 and not all(l.ops or l.kind in ("overlay", "popup") for l in shell.layers.values() if l.kind != "window"):
+            shell.pump(0.05)
+        rows.append(("start: all interface apps running", t_boot * 1000, f"{len(core)} apps (one password)"))
+        rows.append(("start: until every app has drawn", (_t.monotonic() - t1) * 1000, ""))
+        shell.booted.add("mouse")
+        ms("compose: base frame, cold", lambda: (setattr(shell, "_base", None), shell.compose()), 5)
+        ms("compose: base frame, cached", shell.compose, 30)
+        ms("render: normal look, one frame", shell.render, 20)
+        shell.set_look(look="3d")
+        for _ in range(10):
+            shell.pump(0.05)
+        shell.tilt = [6.0, 3.0]
+        ms("render: 3d look, tilted", shell.render, 10)
+        shell.set_look(look="text")
+        ms("render: text look (cold)", lambda: (setattr(shell, "_look_cache", None), shell.render()), 3)
+        ms("render: text look (cached)", shell.render, 10)
+        shell.set_look(look="terminal")
+        ms("render: terminal look", lambda: (setattr(shell, "_look_cache", None), shell.render()), 3)
+        shell.set_look(look="normal")
+        xs = []
+        for i in range(30):
+            a = _t.perf_counter()
+            shell.route({"type": "pointer", "x": 100 + i * 20, "y": 300})
+            shell._update_motion(_t.monotonic())
+            shell.render()
+            xs.append((_t.perf_counter() - a) * 1000)
+        rows.append(("pointer move to a drawn frame", statistics.median(xs), f"max {max(xs):.0f} ms over 30"))
+        ms("controls(): collect every button", shell.controls, 30)
+    finally:
+        shell.close()
+        prompter.close()
+    width = max(len(r[0]) for r in rows)
+    for label, v, note in rows:
+        print(f"{label:<{width}}  {v:>9.1f} ms  {note}")
     return 0
 
 
 def cmd_desktop(args, paths: Paths) -> int:
+    if args.desktop_cmd == "bench":
+        return _bench(args, paths)
     if args.desktop_cmd == "shot":
         return _shot(args, paths)
     """`kos desktop install`: pack, scan, install and permit the two apps the
@@ -1080,6 +1220,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--out")
     s.add_argument("--name", help="app name (default: from the package)")
     s.add_argument("--entry", help="for a .deb: which program to run, a path inside the package")
+    s = sub.add_parser("autoupdate", help="auto-update: autoupdate status | on | off | mode ask|auto | every HOURS | run")
+    s.add_argument("au_cmd", nargs="?", choices=["status", "on", "off", "mode", "every", "run"], default="status")
+    s.add_argument("value", nargs="?")
+    s = sub.add_parser("heal", help="look for broken state and repair it: heal [--fix]")
+    s.add_argument("--fix", action="store_true")
     s = sub.add_parser("mod", help="system mods: mod list | enable NAME | disable NAME")
     s.add_argument("mod_cmd", nargs="?", choices=["list", "enable", "disable"], default="list")
     s.add_argument("name", nargs="?")
@@ -1115,10 +1260,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--graphical", action="store_true", help="(classic mode) draw the desktop graphically")
     s.add_argument("--classic", action="store_true", help="the older one-app-at-a-time desktop")
     s = sub.add_parser("desktop", help="set up the desktop apps, or take a screenshot of it")
-    s.add_argument("desktop_cmd", choices=["install", "shot"])
+    s.add_argument("desktop_cmd", choices=["install", "shot", "bench"])
     s.add_argument("out", nargs="?", default="desktop.png", help="shot: the PNG to write")
     s.add_argument("--from", dest="src", help="install: directory holding the apps (examples/system)")
-    s.add_argument("--size", default="960x540", help="shot: screen size, e.g. 1280x720")
+    s.add_argument("--size", default="960x540", help="shot: screen size, e.g. 1280x720; several, comma-separated, are several displays")
     s.add_argument("--open", help="shot: comma-separated apps to open as windows")
     s.add_argument("--search", help="shot: text to type into the desktop search")
     s.add_argument("--wait", type=float, default=2.5, help="shot: seconds to let apps draw")
@@ -1198,7 +1343,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
-            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
+            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "heal": cmd_heal, "autoupdate": cmd_autoupdate, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,

@@ -44,7 +44,8 @@ app -> OS
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
-    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd", "command": ID?, "line": TEXT?}
+    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd", "command": ID?, "line": TEXT?,
+         "new": bool?, "background": bool?}           new: another instance; background: open minimized, no focus
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
     {"cmd": "request", "action": "info"}                       kernel/admin/owed/audit facts
@@ -65,10 +66,13 @@ app -> OS
     {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|text|terminal, "cursor_direction"|"tilt"|"bubbles": bool}   (shell permission to set)
     {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
     {"cmd": "request", "action": "openlink", "id": ID}      open a pinned link (the OS looks up what it points to)
+    {"cmd": "request", "action": "workspace", "n": 0..3, "id": WINDOW?}   (shell permission) switch desktop, or move a window to one
     {"cmd": "request", "action": "tab", "name": "notifications"|"widgets"}   (shell permission) the sidebar's tab
     {"cmd": "request", "action": "toggle", "app": NAME}      (shell permission) show or hide an interface app's layer
     {"cmd": "request", "action": "notify", "op": "post"|"clear"|"dismiss", "title": str, "body": str, "id"}   notifications (posting is rate-limited)
     {"cmd": "request", "action": "keys", "on": bool}         (shell permission) take the keyboard for a text box until a click elsewhere
+    {"cmd": "request", "action": "autoupdate", "op": "status"|"refresh"|"set"|"run", "enabled", "mode": ask|auto, "every_hours", "scheduled"}
+    {"cmd": "request", "action": "heal", "op": "check"|"fix"}   look for broken state / repair it (password for the parts that need it)
     {"cmd": "request", "action": "mods", "op": "list"|"enable"|"disable", "name": APP}   system mods (password to change)
     {"cmd": "request", "action": "sudo", "op": "status"|"open"|"close", "minutes": 1..60, "layers": [..]}
                                                        remember the password for a while (password to open)
@@ -164,6 +168,11 @@ def _request(msg: dict) -> dict:
         if mode not in REQUEST_MODES:
             raise ProtocolError("request.mode must be tui, graphical or cmd")
         out = {"cmd": "request", "action": "open", "app": app, "mode": mode}
+        for flag in ("new", "background"):
+            if flag in msg:
+                if not isinstance(msg[flag], bool):
+                    raise ProtocolError(f"open.{flag} must be true or false")
+                out[flag] = msg[flag]
         command = msg.get("command")
         if command is not None:
             if not isinstance(command, str) or not _COMMAND_RE.match(command):
@@ -317,6 +326,13 @@ def _request(msg: dict) -> dict:
         if not isinstance(lid, str) or not re.match(r"^[0-9a-f]{10}$", lid):
             raise ProtocolError("openlink.id must be a link id")
         return {"cmd": "request", "action": "openlink", "id": lid}
+    if action == "workspace":
+        out = {"cmd": "request", "action": "workspace", "n": _int(msg.get("n"), 0, 3)}
+        if "id" in msg:
+            if not isinstance(msg["id"], str) or not re.match(r"^[a-z0-9-]{1,80}$", msg["id"]):
+                raise ProtocolError("workspace.id must be a window id")
+            out["id"] = msg["id"]
+        return out
     if action == "tab":
         if msg.get("name") not in ("notifications", "widgets"):
             raise ProtocolError("tab.name must be notifications or widgets")
@@ -343,6 +359,30 @@ def _request(msg: dict) -> dict:
         if not isinstance(on, bool):
             raise ProtocolError("keys.on must be true or false")
         return {"cmd": "request", "action": "keys", "on": on}
+    if action == "autoupdate":
+        op = msg.get("op", "status")
+        if op not in ("status", "refresh", "set", "run"):
+            raise ProtocolError("autoupdate.op must be status, refresh, set or run")
+        out = {"cmd": "request", "action": "autoupdate", "op": op}
+        if op == "set":
+            if "enabled" in msg:
+                if not isinstance(msg["enabled"], bool):
+                    raise ProtocolError("autoupdate.enabled must be true or false")
+                out["enabled"] = msg["enabled"]
+            if "mode" in msg:
+                if msg["mode"] not in ("ask", "auto"):
+                    raise ProtocolError("autoupdate.mode must be ask or auto")
+                out["mode"] = msg["mode"]
+            if "every_hours" in msg:
+                out["every_hours"] = _int(msg["every_hours"], 1, 720)
+        if op == "run":
+            out["scheduled"] = bool(msg.get("scheduled", False))
+        return out
+    if action == "heal":
+        op = msg.get("op", "check")
+        if op not in ("check", "fix"):
+            raise ProtocolError("heal.op must be check or fix")
+        return {"cmd": "request", "action": "heal", "op": op}
     if action == "mods":
         op = msg.get("op", "list")
         if op not in ("list", "enable", "disable"):

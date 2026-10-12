@@ -35,7 +35,7 @@ const K = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'kit.js'));
     if (!d.security_events.length) L.push('    none');
     for (const e of d.security_events.slice(-4)) L.push(`    ${time(e.t)} ${K.pad(e.outcome, 18)} ${e.action} ${e.target}`);
     if (st.note) L.push('', '  ' + st.note);
-    app.screen('Health', L.slice(0, app.height - 2), 'x stop the selected app (password) | r refresh | q back');
+    app.screen('Health', L.slice(0, app.height - 2), 'x stop the selected app (password) | c check state | f repair | r refresh | q back');
   };
   let sel = () => null;
   for await (const ev of app.events()) {
@@ -43,11 +43,14 @@ const K = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'kit.js'));
     if (ev.cmd === 'hello') { app.requestApps(); app.requestSys('health'); }
     else if (ev.cmd === 'tick') { if (++st.n % 5 === 0) app.requestSys('health'); continue; }
     else if (ev.cmd === 'sys' && ev.kind === 'health') st.d = ev.data;
+    else if (ev.cmd === 'heal') { st.note = ev.summary; app.requestSys('health'); }
     else if (ev.cmd === 'result') { st.note = (ev.ok ? '' : 'NOT DONE: ') + ev.detail; app.requestSys('health'); }
     else if (ev.cmd === 'key') {
       const k = ev.key, n = st.d ? st.d.exited_apps.length + Math.min(6, st.d.faults.length) : 0;
       if (cur.key(k, n)) { /* moved */ }
       else if (k === 'r') app.requestSys('health');
+      else if (k === 'f') { st.note = 'repairing - type your password in the OS prompt if asked'; app.requestHeal('fix'); }
+      else if (k === 'c') { st.note = 'checking...'; app.requestHeal('check'); }
       else if (k === 'x' && st.d) {
         const ids = [...st.d.exited_apps, ...st.d.faults.slice(-6).map((f) => f.source.replace(/\.log$/, ''))];
         const id = ids[cur.sel];

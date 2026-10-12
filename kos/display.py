@@ -296,6 +296,55 @@ class FbdevBackend:
         os.close(self.fd)
 
 
+class MultiBackend:
+    """Several outputs side by side, working as one wide screen. The shell lays out and composes the whole width;
+    ``show`` cuts the frame into one slice per output. The first output is the primary one (the top panel, the dock
+    and the sidebar live there). Extra displays are a layout of *independent* backends: on real hardware, each is its
+    own framebuffer device. Written for that and exercised here only with headless outputs."""
+
+    text_overlay = False
+
+    def __init__(self, backends: list):
+        if not backends:
+            raise ValueError("no outputs")
+        self.backends = list(backends)
+        self.outputs: list[tuple[int, int, int, int]] = []
+        x = 0
+        for b in self.backends:
+            self.outputs.append((x, 0, b.width, b.height))
+            x += b.width
+        self.width, self.height = x, max(b.height for b in self.backends)
+        self.status = ""
+
+    def show(self, fb: Framebuffer, modal=None) -> None:
+        self.frames = [fb.copy()]                              # the whole wide frame, for pictures and tests
+        for (x, y, w, h), b in zip(self.outputs, self.backends):
+            b.show(crop(fb, x, y, w, h))
+
+    def set_status(self, text: str) -> None:
+        self.status = text
+        for b in self.backends:
+            b.set_status(text)
+
+    def close(self) -> None:
+        for b in self.backends:
+            b.close()
+
+
+def crop(fb: Framebuffer, x: int, y: int, w: int, h: int) -> Framebuffer:
+    """A copy of one rectangle of a frame (clipped to it; anything outside is black)."""
+    out = Framebuffer(w, h)
+    stride, ostride = fb.width * 4, w * 4
+    x0, x1 = max(0, x), min(fb.width, x + w)
+    if x1 <= x0:
+        return out
+    for r in range(h):
+        yy = y + r
+        if 0 <= yy < fb.height:
+            out.buf[r * ostride + (x0 - x) * 4:r * ostride + (x1 - x) * 4] = fb.buf[yy * stride + x0 * 4:yy * stride + x1 * 4]
+    return out
+
+
 class GraphicalSurface:
     """What the session draws into in graphical mode."""
 

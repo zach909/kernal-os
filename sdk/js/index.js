@@ -91,7 +91,7 @@ class App {
 
   // asking the OS for things (needs the 'system' permission); answers arrive as events
   requestApps() { this.send({ cmd: 'request', action: 'apps' }); }
-  requestOpen(app, mode = 'tui', command = '', line = '') { this.send({ cmd: 'request', action: 'open', app, mode, ...(command ? { command } : {}), ...(line ? { line } : {}) }); }
+  requestOpen(app, mode = 'tui', command = '', line = '', opts = {}) { this.send({ cmd: 'request', action: 'open', app, mode, ...(command ? { command } : {}), ...(line ? { line } : {}), ...(opts.new ? { new: true } : {}), ...(opts.background ? { background: true } : {}) }); }
   requestFocus(id) { this.send({ cmd: 'request', action: 'focus', id }); }
   requestClose(id) { this.send({ cmd: 'request', action: 'close', id }); }
   requestInfo() { this.send({ cmd: 'request', action: 'info' }); }
@@ -120,9 +120,12 @@ class App {
   requestNotifyClear() { this.send({ cmd: 'request', action: 'notify', op: 'clear' }); }
   requestNotifyDismiss(id) { this.send({ cmd: 'request', action: 'notify', op: 'dismiss', id }); }
   requestKeys(on) { this.send({ cmd: 'request', action: 'keys', on: !!on }); }
+  requestWorkspace(n, id = '') { this.send({ cmd: 'request', action: 'workspace', n, ...(id ? { id } : {}) }); }
   requestTab(name) { this.send({ cmd: 'request', action: 'tab', name }); }
   requestLinks(op = 'list', fields = {}) { this.send({ cmd: 'request', action: 'links', op, ...fields }); }
   requestOpenLink(id) { this.send({ cmd: 'request', action: 'openlink', id }); }
+  requestAutoUpdate(op = 'status', fields = {}) { this.send({ cmd: 'request', action: 'autoupdate', op, ...fields }); }
+  requestHeal(op = 'check') { this.send({ cmd: 'request', action: 'heal', op }); }
   requestMods(op = 'list', name = '') { this.send({ cmd: 'request', action: 'mods', op, ...(op !== 'list' ? { name } : {}) }); }
   requestPolicy(op = 'get', iface = '') { this.send({ cmd: 'request', action: 'policy', op, ...(op === 'set' ? { interface: iface } : {}) }); }
   requestSudo(op = 'status', minutes = 5, layers = ['interface', 'app', 'command']) { this.send({ cmd: 'request', action: 'sudo', op, ...(op === 'open' ? { minutes, layers } : {}) }); }

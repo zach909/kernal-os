@@ -3648,3 +3648,457 @@ class TestMods(Env):
         self.assertIn("uptime-widget", s.widget_names)
         self.assertIn("uptime-widget", s.layout["order"])
         self.assertIn("uptime-widget", [n for n, _, _ in s.widget_plan()])
+
+
+class TestHeal(Env):
+    def test_corrupt_preference_files_are_kept_aside_defaults_return_and_policy_never_loosens(self):
+        from kos import heal
+        from kos.auth import Policy
+        (self.paths.state).mkdir(parents=True, exist_ok=True)
+        (self.paths.state / "links.json").write_text("{ not json")
+        (self.paths.state / "policy.json").write_text("\x00\x01garbage")
+        (self.paths.state / "shell.json").write_text('{"look": "3d"}')            # valid: untouched
+        kinds = {(f.kind, f.subject) for f in heal.check(self.paths).findings}
+        self.assertEqual(kinds, {("corrupt-state", "links.json"), ("corrupt-state", "policy.json")})
+        did = heal.quick(self.paths)
+        self.assertEqual(len(did), 2)
+        self.assertFalse((self.paths.state / "links.json").exists())
+        kept = sorted(p.name for p in (self.paths.state / "quarantine").iterdir())
+        self.assertTrue(any(k.startswith("links.json.") for k in kept))              # kept, not deleted
+        self.assertEqual((next((self.paths.state / "quarantine").glob("links.json.*"))).read_text(), "{ not json")
+        self.assertEqual(Policy(self.paths).interface(), "required")                 # the strict setting, never a looser one
+        self.assertEqual(json.loads((self.paths.state / "shell.json").read_text())["look"], "3d")
+        self.assertTrue(heal.check(self.paths).ok)
+
+    def test_dead_instance_records_are_dropped(self):
+        from kos import heal
+        reg = Registry(self.paths)
+        reg.write(Instance(id="hello-aaaaaa", name="hello", mode="tui", broker_pid=2 ** 22 + 1, sock_path=str(self.paths.state / "x.sock"),
+                           log_path="", started=0, status="exited"))
+        self.assertTrue(any(f.kind == "stale-instance" for f in heal.check(self.paths).findings))
+        self.assertTrue(any("dead instance" in d for d in heal.quick(self.paths)))
+        self.assertEqual(reg.list(), [])
+
+    def test_repair_reinstalls_a_missing_or_tampered_builtin_but_will_not_guess_for_other_apps(self):
+        from kos import heal
+        store = AppStore(self.paths)
+        for n in ("wallpaper", "pins"):
+            out = Path(self.tmp.name) / f"{n}.kapp"
+            pack(SYSTEM_DIR / n, out)
+            store.install(out, self.authority(PW))
+        store.install(self.kapp, self.authority(PW))                                   # hello: not a built-in
+        (self.paths.apps / "wallpaper.kapp").unlink()                                  # missing
+        (self.paths.apps / "pins.kapp").write_bytes((self.paths.apps / "pins.kapp").read_bytes() + b"x")      # tampered
+        (self.paths.apps / "hello.kapp").write_bytes((self.paths.apps / "hello.kapp").read_bytes() + b"x")    # tampered, not built in
+        builtin = ("wallpaper", "pins")
+        self.assertTrue(any(f.kind == "missing-app" and f.subject == "wallpaper" for f in heal.check(self.paths, builtin=builtin).findings))
+        rep = heal.repair(self.paths, None, builtin=builtin)                           # no authority: report only
+        self.assertTrue(rep.left and not (self.paths.apps / "wallpaper.kapp").exists())
+        rep = heal.repair(self.paths, self.authority(PW, PW, PW), builtin=builtin)     # seals, then the reinstall
+        self.assertEqual(sorted(l for l in rep.fixed if l.startswith("reinstalled")),
+                         ["reinstalled pins from the copy shipped with KOS", "reinstalled wallpaper from the copy shipped with KOS"])
+        self.assertTrue(any("hello" in l and "not a built-in" in l for l in rep.left))      # reported, left alone
+        grant = self.authority(PW).authorize("app.open", "pins")
+        store.load_verified("pins", grant).manifest                                    # verifies again
+        with self.assertRaises(Exception):
+            store.load_verified("hello", self.authority(PW).authorize("app.open", "hello"))   # still not trusted
+
+    def test_a_mod_that_no_longer_fits_its_slot_is_switched_off_with_the_password(self):
+        from kos import heal
+        from kos.mods import Mods
+        import shutil
+        d = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "src"
+        shutil.copytree(Path(__file__).resolve().parent.parent / "examples" / "mods" / "neon-wallpaper", d)
+        m = json.loads((d / "manifest.json").read_text())
+        m.update(name="greedy-wp", permissions=["system"])
+        (d / "manifest.json").write_text(json.dumps(m))
+        out = Path(self.tmp.name) / "greedy.kapp"
+        pack(d, out)
+        AppStore(self.paths).install(out, self.authority(PW))
+        (self.paths.state).mkdir(parents=True, exist_ok=True)
+        (self.paths.state / "mods.json").write_text(json.dumps({"slots": {"wallpaper": "greedy-wp"}, "widgets": []}))
+        self.assertTrue(any(f.kind == "bad-mod" for f in heal.check(self.paths).findings))
+        rep = heal.repair(self.paths, self.authority(PW, PW), builtin=())
+        self.assertTrue(any("switched off mod greedy-wp" in l for l in rep.fixed))
+        self.assertEqual(Mods(self.paths)._load()["slots"], {})
+
+
+class TestSelfHealingDesktop(Env):
+    def make(self, restarter):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(960, 540), ScriptedDevices(), preboot=(), restarter=restarter)
+
+    def core_layer(self, s, name, slot=None, kind="plain"):
+        from kos.shell import Layer
+        a, b = socket.socketpair()
+        self.addCleanup(lambda: (a.close(), b.close()))
+        L = Layer(id=f"{name}-1", name=name, kind=kind, channel=Channel(a), mode="graphical", rect=[0, 0, 10, 10], slot=slot or "")
+        s.layers[L.id] = L
+        return L
+
+    def test_an_interface_app_that_stops_is_restarted_and_a_user_close_is_not(self):
+        started = []
+        s = self.make(lambda name: started.append(name) or Instance(id=f"{name}-new", name=name, mode="graphical", broker_pid=0,
+                                                                      sock_path="", log_path="", started=0))
+        s._connect = lambda p: Channel(socket.socketpair()[0])
+        dock = self.core_layer(s, "dock", kind="dock")
+        s.remove(dock.id)                                                       # it stopped: unexpected
+        self.assertIn("dock", s._heal)
+        self.assertTrue(any("stopped" in n["title"] for n in s.notes))
+        s._run_heal(time_now() + 0.1)
+        self.assertEqual(started, [])                                           # not before its delay
+        s._run_heal(time_now() + 5)
+        self.assertEqual(started, ["dock"])
+        self.assertEqual(s._heal, {})
+        self.assertTrue(any(l.slot == "dock" for l in s.layers.values()))
+        win = self.core_layer(s, "files", kind="window")
+        s.remove(win.id)                                                        # a window is never healed
+        s.remove(next(l.id for l in s.layers.values() if l.slot == "dock"), expected=True)     # the user closed it
+        self.assertEqual(s._heal, {})
+
+    def test_a_refused_password_stops_the_retries_and_a_failing_mod_falls_back_to_the_builtin(self):
+        from kos.auth import AuthorizationDenied
+        def denied(name):
+            raise AuthorizationDenied("cancelled")
+        s = self.make(denied)
+        s.remove(self.core_layer(s, "dock", kind="dock").id)
+        s._run_heal(time_now() + 5)
+        self.assertEqual(s._heal, {})                                           # no nagging
+        self.assertTrue(any("was not restarted" in n["title"] for n in s.notes))
+        calls = []
+        def failing(name):
+            calls.append(name)
+            if name == "fancy-wallpaper":
+                raise RuntimeError("boom")
+            return Instance(id="wallpaper-new", name=name, mode="graphical", broker_pid=0, sock_path="", log_path="", started=0)
+        s2 = self.make(failing)
+        s2._connect = lambda p: Channel(socket.socketpair()[0])
+        s2.remove(self.core_layer(s2, "fancy-wallpaper", slot="wallpaper", kind="wallpaper").id)
+        t = time_now()
+        for i in range(6):
+            s2._run_heal(t + 100 * (i + 1))
+        self.assertEqual(calls[:3], ["fancy-wallpaper"] * 3)
+        self.assertEqual(calls[3], "wallpaper")                                 # after three failures: the built-in
+        self.assertTrue(any("keeps failing" in n["title"] for n in s2.notes))
+
+    def test_no_restarter_means_no_healing_so_tests_and_tools_are_unaffected(self):
+        s = self.make(None)
+        s.remove(self.core_layer(s, "dock", kind="dock").id)
+        self.assertEqual(s._heal, {})
+
+
+class TestMultiples(Env):
+    """Several seats, desktops and instances at once."""
+
+    def make(self, opener=None):
+        from kos.shell import Shell
+        s = Shell(self.paths, self.authority(PW), HeadlessBackend(960, 540), ScriptedDevices(), preboot=(), opener=opener,
+                  modes_of=lambda n: ["graphical"])
+        s.booted.add("mouse")
+        return s
+
+    def window(self, s, name, rect=(100, 100, 300, 200), ws=None):
+        from kos.shell import Layer
+        a, b = socket.socketpair()
+        self.addCleanup(lambda: (a.close(), b.close()))
+        L = Layer(id=f"{name}-w", name=name, kind="window", channel=Channel(a), mode="graphical", rect=list(rect),
+                  z=s._raise_z(), ws=s.ws if ws is None else ws)
+        s.layers[L.id] = L
+        L._peer = b
+        return L
+
+    def sent(self, L):
+        L._peer.setblocking(False)
+        try:
+            return [json.loads(x) for x in L._peer.recv(1 << 20).splitlines()]
+        except BlockingIOError:
+            return []
+
+    def test_two_seats_have_their_own_pointer_focus_and_keyboard(self):
+        s = self.make()
+        a = self.window(s, "files", (50, 50, 300, 200))
+        b = self.window(s, "editor", (500, 50, 300, 200))
+        s.route({"type": "pointer", "x": 100, "y": 100, "seat": 0})
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 100, "y": 100, "seat": 0})
+        s.route({"type": "pointer", "x": 600, "y": 100, "seat": 1})
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 600, "y": 100, "seat": 1})
+        self.assertEqual((s.seats[0].focus, s.seats[1].focus), (a.id, b.id))        # each seat focused its own window
+        self.assertEqual((s.seats[0].pointer, s.seats[1].pointer), ((100, 100), (600, 100)))
+        self.sent(a), self.sent(b)
+        s.route({"type": "key", "key": "x", "seat": 0})
+        s.route({"type": "key", "key": "y", "seat": 1})
+        self.assertEqual([m["key"] for m in self.sent(a) if m["cmd"] == "key"], ["x"])        # each keyboard types into its own seat's window
+        self.assertEqual([m["key"] for m in self.sent(b) if m["cmd"] == "key"], ["y"])
+        self.assertEqual({w["id"] for w in [{"id": i} for i in s.focused_ids()]}, {a.id, b.id})
+        s.remove(a.id, expected=True)
+        self.assertIsNone(s.seats[0].focus)
+        self.assertEqual(s.seats[1].focus, b.id)
+        self.assertEqual(s.seat(99).id, 0)                                          # an unknown seat number is seat 0
+        self.assertEqual(s._seat.id, 0)                                             # outside route() the shell is back on seat 0
+
+    def test_a_second_seat_is_drawn_by_the_os_and_never_moves_the_cursor_app_or_tilt(self):
+        s = self.make()
+        s.set_look(look="3d")
+        s.route({"type": "pointer", "x": 300, "y": 300, "seat": 1})
+        s.route({"type": "pointer", "x": 700, "y": 300, "seat": 1})
+        self.assertEqual(s.tilt_target, [0.0, 0.0])
+        self.assertEqual(s.seats[0].pointer, (480, 270))
+        fb = s.compose().copy()
+        s.render()
+        self.assertTrue(len(s.backend.frames) >= 1)
+        shown = s.backend.frames[-1]
+        self.assertEqual(shown.pixel(700 + 14 * s.u, 300 + 14 * s.u), (0xe8, 0xa3, 0x17))   # the seat's coloured badge is on screen
+
+    def test_evdev_events_carry_the_seat_of_the_device_that_made_them(self):
+        from kos.devices import EV_KEY, EV_SYN, EvdevDevices
+        import struct as _st
+        d = EvdevDevices.__new__(EvdevDevices)
+        d.w, d.h, d._fds, d._seat = 960, 540, [], {}
+        d._tr = {10: __import__("kos.devices", fromlist=["EvdevTranslator"]).EvdevTranslator(960, 540),
+                 11: __import__("kos.devices", fromlist=["EvdevTranslator"]).EvdevTranslator(960, 540)}
+        d._seat = {10: 0, 11: 2}
+        raw = INPUT_EVENT.pack(0, 0, EV_KEY, 30, 1)
+        os_read = os.read
+        try:
+            os.read = lambda fd, n: raw
+            self.assertEqual(d.read(10), [{"type": "key", "key": "a"}])             # seat 0 stays untagged
+            self.assertEqual(d.read(11), [{"type": "key", "key": "a", "seat": 2}])
+        finally:
+            os.read = os_read
+
+    def test_windows_live_on_a_desktop_and_switching_shows_only_that_desktops_windows(self):
+        s = self.make()
+        w1 = self.window(s, "files")
+        s.route({"type": "key", "key": "ctrl-2"})
+        self.assertEqual(s.ws, 1)
+        w2 = self.window(s, "editor", (100, 100, 300, 200))
+        self.assertIsNone(s.at(150, 150) if s.at(150, 150) is not w2 else None)       # w2 is the one under the pointer here
+        self.assertIs(s.at(150, 150), w2)
+        self.assertFalse(s.shown(w1))
+        self.assertEqual([c.layer for c in s.controls() if c.kind == "focus"], [w2.id])
+        s.route({"type": "key", "key": "ctrl-1"})
+        self.assertIs(s.at(150, 150), w1)
+        s.raise_window(w2)                                                           # asking for a window on another desktop goes there
+        self.assertEqual(s.ws, 1)
+        self.assertEqual(s.seats[0].focus, w2.id)
+        s.move_to_workspace(w2, 3)
+        self.assertFalse(s.shown(w2))
+        self.assertIsNone(s.seats[0].focus)
+        s.set_workspace(99)
+        self.assertEqual(s.ws, 3)                                                    # clamped to the last desktop
+        for bad in (dict(n=7), dict(n=-1), dict(n=1, id="Bad Id!")):
+            with self.assertRaises(ProtocolError):
+                validate_app_message({"cmd": "request", "action": "workspace", **bad}, "graphical")
+
+    def test_interface_apps_are_on_every_desktop_and_the_base_frame_follows_the_desktop(self):
+        s = self.make()
+        from kos.shell import Layer
+        a, b = socket.socketpair()
+        self.addCleanup(lambda: (a.close(), b.close()))
+        bar = Layer(id="menubar-1", name="menubar", kind="bar", channel=Channel(a), mode="graphical", rect=list(s.core_rect("menubar")[1]))
+        s.layers[bar.id] = bar
+        s.window = None
+        for n in range(4):
+            s.set_workspace(n)
+            self.assertTrue(s.shown(bar))
+        w = self.window(s, "files", ws=0)
+        s.set_workspace(0)
+        sig0 = s._base_signature()
+        s.set_workspace(1)
+        self.assertNotEqual(sig0, s._base_signature())
+
+    def test_open_new_starts_another_instance_and_background_opens_minimized_without_focus(self):
+        made = []
+        def opener(name, mode, new=False, taken=frozenset()):
+            made.append((name, new, set(taken)))
+            return Instance(id=f"{name}-{len(made)}", name=name, mode=mode, broker_pid=0, sock_path="", log_path="", started=0)
+        s = self.make(opener)
+        s._connect = lambda p: Channel(socket.socketpair()[0])
+        one = s.open_window("terminal")
+        self.assertEqual(len([w for w in s.windows() if w.name == "terminal"]), 1)
+        again = s.open_window("terminal")
+        self.assertIs(again, one)                                                    # by default: bring the open one forward
+        two = s.open_window("terminal", new=True)
+        self.assertIsNot(two, one)
+        self.assertEqual(len([w for w in s.windows() if w.name == "terminal"]), 2)    # as many as you like
+        self.assertTrue(made[-1][1])                                                 # and it asked for a fresh instance
+        self.assertIn(one.id, made[-1][2])                                           # never adopting one a window already shows
+        focus_before = s.seats[0].focus
+        bg = s.open_window("files", background=True)
+        self.assertTrue(bg.minimized and not bg.visible)
+        self.assertEqual(s.seats[0].focus, focus_before)
+        self.assertIn("files", [w["name"] for w in [{"name": l.name} for l in s.layers.values() if l.kind == "window"]])
+        self.assertEqual(validate_app_message({"cmd": "request", "action": "open", "app": "files", "mode": "graphical",
+                                               "new": True, "background": True}, "graphical")["new"], True)
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "request", "action": "open", "app": "files", "new": "yes"}, "graphical")
+
+
+class TestExtraDisplays(Env):
+    def make(self, sizes=((1280, 720), (800, 600))):
+        from kos.display import MultiBackend
+        from kos.shell import Shell
+        outs = [HeadlessBackend(*s) for s in sizes]
+        s = Shell(self.paths, self.authority(PW), MultiBackend(outs), ScriptedDevices(), preboot=())
+        s._outs = outs
+        return s
+
+    def test_displays_sit_side_by_side_as_one_wide_screen_with_the_panel_on_the_first(self):
+        s = self.make()
+        self.assertEqual((s.W, s.H), (2080, 720))
+        self.assertEqual(s.outputs, [(0, 0, 1280, 720), (1280, 0, 800, 600)])
+        self.assertEqual(s.core_rect("menubar")[1], [0, 0, 1280, s.bar_h])                # the panel spans the primary only
+        self.assertEqual(s.core_rect("wallpaper")[1], [0, 0, 2080, 720])                  # the wallpaper spans everything
+        dx, dy, dw, dh = s.dock_rect()
+        self.assertEqual(dx * 2 + dw, 1280)                                               # centred on the primary
+        self.assertLessEqual(s.core_rect("sidebar")[1][0] + s.core_rect("sidebar")[1][2], 1280)
+        x, y, w, h = s.window_rect()
+        self.assertLessEqual(x + w, 1280)                                                 # new windows open on the primary
+        self.assertEqual(s.u, 2)                                                          # scale comes from the primary
+        single = self.make(((1280, 720),))
+        self.assertEqual(single.core_rect("menubar")[1], [0, 0, 1280, single.bar_h])
+
+    def test_each_output_receives_its_own_slice_of_the_frame(self):
+        s = self.make()
+        fb = Framebuffer(s.W, s.H)
+        fb.clear(parse_color("#000000"))
+        fb.rect(10, 10, 5, 5, parse_color("#ff0000"))                                     # on the first display
+        fb.rect(1290, 10, 5, 5, parse_color("#00ff00"))                                   # on the second
+        s.backend.show(fb)
+        first, second = s._outs[0].frames[-1], s._outs[1].frames[-1]
+        self.assertEqual((first.width, first.height, second.width, second.height), (1280, 720, 800, 600))
+        self.assertEqual(first.pixel(12, 12), (255, 0, 0))
+        self.assertEqual(second.pixel(12, 12), (0, 255, 0))
+        self.assertEqual(second.pixel(5, 5), (0, 0, 0))
+        from kos.display import crop
+        edge = crop(fb, 2000, 600, 200, 200)                                              # past the edge: black, no crash
+        self.assertEqual((edge.width, edge.height), (200, 200))
+
+    def test_the_pointer_can_cross_to_the_second_display_and_a_window_can_be_dragged_there(self):
+        s = self.make()
+        s.booted.add("mouse")
+        s.route({"type": "pointer", "x": 1900, "y": 300})
+        self.assertEqual(s.seats[0].pointer, (1900, 300))
+        s.route({"type": "pointer", "x": 99999, "y": 99999})
+        self.assertEqual(s.seats[0].pointer, (2079, 719))                                 # clamped to the whole wide screen
+
+    def test_the_password_prompt_is_centred_on_the_primary_display_not_the_wide_screen(self):
+        from kos.display import Modal
+        s = self.make()
+        s.show_modal(Modal("Password", ["type it"], secret_len=0))
+        s.render()
+        shown = s.backend.frames[-1]
+        yellow = [(x, y) for y in range(0, 720, 4) for x in range(0, 2080, 4) if shown.pixel(x, y) == (0xff, 0xcc, 0x00)]
+        self.assertTrue(yellow)
+        self.assertTrue(all(x < 1280 for x, _ in yellow))                                 # the prompt's border is only on the first display
+        cx = (min(x for x, _ in yellow) + max(x for x, _ in yellow)) / 2
+        self.assertAlmostEqual(cx, 640, delta=40)
+
+
+class TestAutoUpdate(Env):
+    def setUp(self):
+        super().setUp()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))             # hello 1.0
+        self.srv = Path(self.tmp.name) / "srv"
+        self.srv.mkdir()
+        Sources(self.paths).add(self.authority(PW), "shelf", "folder", str(self.srv))
+        self.clock = [1_000_000.0]
+        self.fake_os = {"manager": "apt", "packages": [{"name": "linux-image-x", "kind": "kernel"}, {"name": "nvidia-x", "kind": "drivers"}],
+                        "counts": {"kernel": 1, "drivers": 1}, "apply": "sudo apt-get update && apt-get upgrade", "note": ""}
+
+    def au(self):
+        from kos.autoupdate import AutoUpdate
+        return AutoUpdate(self.paths, os_pending=lambda: self.fake_os, now=lambda: self.clock[0])
+
+    def put(self, version, **kw):
+        k = make_kapp(Path(self.tmp.name), version, **kw)
+        _shutil.copy(k, self.srv / k.name)
+
+    def hello_version(self):
+        return {a.name: a.version for a in AppStore(self.paths).installed()}["hello"]
+
+    def test_the_policy_is_sanitised_and_due_follows_the_clock(self):
+        au = self.au()
+        self.assertEqual((au.policy()["enabled"], au.policy()["mode"]), (False, "ask"))
+        self.assertFalse(au.due())                                                  # off: never due
+        au.file.write_text(json.dumps({"enabled": True, "mode": "root", "every_hours": 99999, "last_run": "x"}))
+        p = au.policy()
+        self.assertEqual((p["mode"], p["every_hours"], p["last_run"]), ("ask", 24, 0.0))
+        self.assertTrue(au.due())
+        au.set(self.authority(), every_hours=6)                                     # a harmless change: no password
+        au.file.write_text(json.dumps({"enabled": True, "mode": "ask", "every_hours": 6, "last_run": self.clock[0] - 3600}))
+        self.assertFalse(au.due())
+        self.clock[0] += 6 * 3600
+        self.assertTrue(au.due())
+
+    def test_turning_on_auto_mode_asks_for_the_password(self):
+        au = self.au()
+        with self.assertRaises(AssertionError):                                     # it asked; the scripted prompter had no answer
+            au.set(self.authority(), mode="auto")
+        self.assertEqual(au.policy()["mode"], "ask")
+        au.set(self.authority(PW), mode="auto")
+        self.assertEqual(au.policy()["mode"], "auto")
+
+    def test_a_scheduled_run_never_prompts_it_runs_only_inside_a_covering_sudo_window(self):
+        self.put("1.1")
+        au = self.au()
+        res = au.run(self.authority(), scheduled=True, include_core=False)         # no window: refuses, does not prompt
+        self.assertFalse(res["ran"])
+        self.assertEqual(self.hello_version(), "1.0")
+        a = self.authority(PW)                                                      # the one password: opening the window
+        a.sudo_open(5, ("interface", "app"))
+        self.assertFalse(au.run(a, scheduled=True, include_core=False)["ran"])      # app but not command: still not enough
+        a.sudo_close()
+        a = self.authority(PW)
+        a.sudo_open(5, ("app", "command"))
+        res = au.run(a, scheduled=True, include_core=False)                         # covered: runs with no further password
+        self.assertTrue(res["ran"], res)
+        self.assertEqual(self.hello_version(), "1.1")
+        self.assertTrue(any("kernel" in l and "drivers" in l and "sudo apt-get" in l for l in res["lines"]))   # the OS is listed, not touched
+        self.assertGreater(au.policy()["last_run"], 0)
+        self.assertIn("granted-sudo", [e["outcome"] for e in a.audit.entries()])
+        a.sudo_close()
+
+    def test_an_update_that_asks_for_new_permissions_is_held_back_and_the_os_is_never_changed(self):
+        k = make_kapp(Path(self.tmp.name), "1.1", permissions=["network"])
+        _shutil.copy(k, self.srv / k.name)
+        a = self.authority(PW)
+        a.sudo_open(5, ("app", "command"))
+        res = self.au().run(a, scheduled=True, include_core=False)
+        a.sudo_close()
+        self.assertTrue(res["ran"])
+        self.assertTrue(any("new permissions" in l and "network" in l for l in res["lines"]), res["lines"])
+        self.assertEqual(self.hello_version(), "1.0")                               # held back for review, not installed
+        self.assertFalse(any("kos updates" in l and "install" in l for l in res["lines"]))   # and the OS was only listed
+
+    def test_the_os_parsers_sort_kernels_and_drivers_and_never_raise(self):
+        from kos import osupdate
+        apt = ("Listing...\nlinux-image-6.8.0-45-generic/noble-updates,noble-security 6.8.0-45.45 amd64 [upgradable from: 6.8.0-40.40]\n"
+               "libc6/noble-updates 2.39-0ubuntu8.3 amd64 [upgradable from: 2.39-0ubuntu8.2]\n"
+               "nvidia-driver-550/noble-updates 550.120 amd64 [upgradable from: 550.107]\n"
+               "openssl/noble-security 3.0.13 amd64 [upgradable from: 3.0.12]\nlinux-firmware/noble-updates 20240318 all [upgradable from: 20240201]\n")
+        kinds = {p["name"]: p["kind"] for p in osupdate.parse_apt(apt)}
+        self.assertEqual(kinds, {"linux-image-6.8.0-45-generic": "kernel", "libc6": "other", "nvidia-driver-550": "drivers",
+                                 "openssl": "security", "linux-firmware": "drivers"})
+        self.assertEqual([p["name"] for p in osupdate.parse_pacman("linux 6.8.1-1 -> 6.8.2-1\nmesa 24.0-1 -> 24.1-1\n")], ["linux", "mesa"])
+        self.assertEqual(osupdate.parse_dnf("kernel-core.x86_64 6.8.9-1 updates\nbash.x86_64 5.2-3 updates\n")[0]["kind"], "kernel")
+        def boom(*a, **k):
+            raise OSError("no apt here")
+        r = osupdate.pending(run=boom, which="apt")
+        self.assertEqual((r["packages"], r["manager"]), ([], "apt"))
+        self.assertIn("could not ask", r["note"])
+        self.assertTrue(r["apply"].startswith("sudo "))                             # it names the root command; it never runs it
+
+    def test_the_bridge_reports_status_refreshes_the_os_and_refuses_an_unattended_run(self):
+        from kos.system import SystemBridge
+        sent = []
+        b = SystemBridge(self.paths)
+        b.handle({"cmd": "request", "action": "autoupdate", "op": "status"}, sent.append, self.authority())
+        self.assertEqual(sent[-1]["cmd"], "autoupdate")
+        self.assertIn("due", sent[-1]["status"])
+        self.assertNotIn("os", sent[-1])                                            # status is cheap: it does not call the package manager
+        b.handle({"cmd": "request", "action": "autoupdate", "op": "run", "scheduled": True}, sent.append, self.authority())
+        self.assertFalse(sent[-1]["ran"])
+        for bad in (dict(op="set", mode="root"), dict(op="set", enabled="yes"), dict(op="set", every_hours=0), dict(op="nuke")):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message({"cmd": "request", "action": "autoupdate", **bad}, "graphical")

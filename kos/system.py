@@ -186,6 +186,32 @@ class SystemBridge:
                 inst = close_instance(self.paths, authority, req["id"])
                 result(True, f"closed {inst.id}", id=inst.id)
                 return None
+            if action == "autoupdate":
+                from .autoupdate import AutoUpdate
+                au = AutoUpdate(self.paths)
+                if req["op"] == "set":
+                    au.set(authority, **{k: v for k, v in req.items() if k in ("enabled", "mode", "every_hours")})
+                if req["op"] == "run":
+                    res = au.run(authority, scheduled=req["scheduled"])
+                    reply({"cmd": "autoupdate", "status": au.status(), "ran": res["ran"],
+                           "lines": [clean_text(x, 300) for x in res.get("lines", [])], "reason": res.get("reason", "")})
+                    return None
+                msg = {"cmd": "autoupdate", "status": au.status()}
+                if req["op"] == "refresh":
+                    from . import osupdate
+                    o = osupdate.pending()
+                    msg["os"] = {"manager": o["manager"], "counts": o["counts"], "apply": o["apply"], "note": clean_text(o["note"], 200)}
+                reply(msg)
+                return None
+            if action == "heal":
+                from . import heal
+                from .desktop import SYSTEM_APPS
+                rep = heal.check(self.paths, builtin=SYSTEM_APPS) if req["op"] == "check" else heal.repair(self.paths, authority, builtin=SYSTEM_APPS)
+                found = [f.as_dict() for f in rep.findings]
+                summary = (", ".join(rep.fixed + rep.left) if (rep.fixed or rep.left) else
+                           ("nothing wrong" if not found else f"{len(found)} problem(s): " + "; ".join(f["kind"] + " " + f["subject"] for f in found[:4])))
+                reply({"cmd": "heal", "findings": found, "fixed": rep.fixed, "left": rep.left, "summary": clean_text(summary, 300)})
+                return None
             if action == "mods":
                 from .mods import Mods, ModError
                 mods = Mods(self.paths)

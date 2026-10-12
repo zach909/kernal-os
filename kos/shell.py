@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import fbgfx, looks, ttf
-from .auth import Authority
-from .display import Framebuffer, Modal, draw_cursor, draw_modal, parse_color
+from .auth import Authority, AuthorizationDenied
+from .display import Framebuffer, Modal, crop, draw_cursor, draw_modal, parse_color
 from .protocol import Channel, ProtocolError, validate_app_message
 from .registry import Registry
 from .session import SessionPrompter
@@ -99,6 +99,7 @@ class Layer:
     system: bool = False
     ticks: bool = False
     shell: bool = False            # may resize itself / arrange the widgets
+    ws: Optional[int] = None       # the workspace a window lives on (None: interface apps show on every workspace)
     slot: str = ""                 # the interface slot it fills (its own name for built-ins; a mod's declared slot)
     pointer: bool = False          # is told about the pointer and where clicks land
     animate: bool = False          # may ask for animation ticks
@@ -113,19 +114,38 @@ class Layer:
         self.channel.send(obj)
 
 
+SEAT_COLORS = ("#0078d4", "#e8a317", "#2fa84f", "#c0392b")
+MAX_SEATS = 4
+WORKSPACES = 4
+
+
+@dataclass
+class Seat:
+    """One pointer and the keyboard that goes with it: its own position, focus, drag and text-box. Several
+    seats work at once (several mice and keyboards); seat 0 is drawn by the cursor app, the others by the OS."""
+    id: int
+    pointer: tuple = (0, 0)
+    drag: Optional[tuple] = None
+    focus: Optional[str] = None
+    key_target: Optional[str] = None
+    down: bool = False
+    vel: list = field(default_factory=lambda: [0.0, 0.0])
+
+
 class Shell:
     def __init__(self, paths, authority: Authority, backend, devices, *,
                  connect: Optional[Callable] = None, opener: Optional[Callable] = None,
                  closer: Optional[Callable] = None, modes_of: Optional[Callable] = None,
-                 commands_of: Optional[Callable] = None, keep_prompter: bool = False,
+                 commands_of: Optional[Callable] = None, restarter: Optional[Callable] = None, keep_prompter: bool = False,
                  preboot: tuple[str, ...] = ("mouse", "keyboard"), now: Callable[[], float] = time.time):
         self.paths, self.authority, self.backend, self.devices = paths, authority, backend, devices
-        self.W, self.H = backend.width, backend.height
-        self.u = max(1, self.H // 360)                      # UI scale: 1 at 640x360, 2 at 720p, 3 at 1080p
+        self.W, self.H = backend.width, backend.height      # the whole screen: every output side by side
+        self.outputs = list(getattr(backend, "outputs", None) or [(0, 0, self.W, self.H)])
+        _, _, self.PW, self.PH = self.outputs[0]            # the primary output: the panel, dock and sidebar live here
+        self.u = max(1, self.PH // 360)                     # UI scale: 1 at 640x360, 2 at 720p, 3 at 1080p
         self.layers: dict[str, Layer] = {}
-        self.focus: Optional[str] = None
-        self.pointer = (self.W // 2, self.H // 2)
-        self.drag: Optional[tuple[str, int, int]] = None
+        self.seats: dict[int, Seat] = {0: Seat(0, (self.PW // 2, self.PH // 2))}
+        self._seat = self.seats[0]          # the seat whose event is being handled (seat 0 otherwise)
         self.modal: Optional[Modal] = None
         self.pending: deque = deque()
         self.stop_requested = False
@@ -134,6 +154,9 @@ class Shell:
         self.surface_dirty = True
         self.z_top = Z["window"]
         self.cascade = 0
+        self._restarter: Optional[Callable] = restarter        # starts an interface app again (asks for the password)
+        self._heal: dict[str, dict] = {}                       # slot -> {name, tries, at}
+        self.ws = 0                                          # the workspace being shown
         self._now, self._last_tick, self._last_render = now, 0.0, 0.0
         self._connect, self._opener, self._closer = connect or self._default_connect, opener, closer
         self._modes_of = modes_of or self._default_modes
@@ -149,18 +172,59 @@ class Shell:
         self.layout = self._load_layout()
         self.cfg = self._load_cfg()
         self.tilt, self.tilt_target = [0.0, 0.0], [0.0, 0.0]
-        self.vel = [0.0, 0.0]
-        self.down = False
         self._moved_at = self._click_hold = self._last_anim = self._last_cursor = self._fx_until = 0.0
         self._cur_dirty = True
         self.anim_ids: set[str] = set()
         self.nav, self.ring, self.typed = -1, False, ""
         self.notes: list[dict] = []
-        self.key_target: Optional[str] = None                 # a non-window layer holding the keyboard (a text box)
+
         self._base: Optional[Framebuffer] = None
         self._base_sig = None
         self._look_cache = None
         self.dock_w = 0                                      # the dock app asks for its width (resize)
+
+    # -------------------------------------------- per-seat state (the seat whose event is being handled)
+    focus = property(lambda self: self._seat.focus, lambda self, v: setattr(self._seat, "focus", v))
+    pointer = property(lambda self: self._seat.pointer, lambda self, v: setattr(self._seat, "pointer", v))
+    drag = property(lambda self: self._seat.drag, lambda self, v: setattr(self._seat, "drag", v))
+    key_target = property(lambda self: self._seat.key_target, lambda self, v: setattr(self._seat, "key_target", v))
+    down = property(lambda self: self._seat.down, lambda self, v: setattr(self._seat, "down", v))
+    vel = property(lambda self: self._seat.vel)
+
+    def shown(self, layer: Layer) -> bool:
+        """Is this layer on screen: visible, and on the workspace being shown (interface apps are on all)."""
+        return layer.visible and (layer.ws is None or layer.ws == self.ws)
+
+    def set_workspace(self, n: int) -> None:
+        n = max(0, min(WORKSPACES - 1, int(n)))
+        if n == self.ws:
+            return
+        self.ws = n
+        for seat in self.seats.values():                     # each seat's focus moves to the top window here, if any
+            tops = [w for w in self.windows() if w.ws == n and not w.minimized]
+            seat.focus = tops[-1].id if tops else None
+        self._touch_all()
+        self._push_windows()
+
+    def move_to_workspace(self, layer: Layer, n: int) -> None:
+        if layer.kind == "window":
+            layer.ws = max(0, min(WORKSPACES - 1, int(n)))
+            for seat in self.seats.values():
+                if seat.focus == layer.id and layer.ws != self.ws:
+                    seat.focus = None
+            self._touch_all()
+            self._push_windows()
+
+    def focused_ids(self) -> set[str]:
+        return {s.focus for s in self.seats.values() if s.focus}
+
+    def seat(self, sid: int) -> Seat:
+        """The seat with this id, made on first use (a second mouse plugged in, a second keyboard typing)."""
+        sid = sid if isinstance(sid, int) and 0 <= sid < MAX_SEATS else 0
+        if sid not in self.seats:
+            self.seats[sid] = Seat(sid, (self.PW // 2 + 40 * self.u * sid, self.PH // 2 + 20 * self.u * sid))
+            self.surface_dirty = True
+        return self.seats[sid]
 
     # ------------------------------------------------------------------ geometry
     @property
@@ -178,27 +242,28 @@ class Shell:
 
     @property
     def dock_top(self) -> int:
-        return self.H - self.dock_h - self.dock_margin
+        return self.PH - self.dock_h - self.dock_margin
 
     def dock_rect(self) -> list[int]:
-        w = max(8, min(getattr(self, "dock_w", 0) or 320 * self.u, self.W - 4 * self.u))
-        return [(self.W - w) // 2, self.dock_top, w, self.dock_h]
+        w = max(8, min(getattr(self, "dock_w", 0) or 320 * self.u, self.PW - 4 * self.u))
+        return [(self.PW - w) // 2, self.dock_top, w, self.dock_h]
 
     @property
     def titlebar(self) -> int:
         return 9 * self.u + 10
 
     def core_rect(self, name: str) -> tuple[str, list[int]]:
-        W, H, u, bar = self.W, self.H, self.u, self.bar_h
+        W, H, u, bar = self.PW, self.PH, self.u, self.bar_h        # everything but the wallpaper sits on the primary output
         wide, m = 200 * u, 8 * u
         kind = KINDS.get(name, "widget")                      # a widget mod has no entry of its own
         if name == "wallpaper":
-            return kind, [0, 0, W, H]
+            return kind, [0, 0, self.W, self.H]
         if name == "menubar":
             return kind, [0, 0, W, bar]
         if name == "cursor":
             box = 40 * u
-            return kind, [self.pointer[0] - box // 2, self.pointer[1] - box // 2, box, box]
+            p = self.seats[0].pointer
+            return kind, [p[0] - box // 2, p[1] - box // 2, box, box]
         if name == "effects":
             box = 96 * u
             return kind, [self.pointer[0] - box // 2, self.pointer[1] - box // 2, box, box]
@@ -225,7 +290,7 @@ class Shell:
     def widget_plan(self) -> list[tuple[str, list[int], bool]]:
         """(widget, rect, shown) in layout order: widgets are stacked in the sidebar's content area and the
         ones that do not fit are hidden (reorder or hide others to see them). Only on the Widgets tab."""
-        W, H, u, m = self.W, self.H, self.u, 8 * self.u
+        W, H, u, m = self.PW, self.PH, self.u, 8 * self.u
         wide, top = 200 * u, self.bar_h + 10 * u
         x = W - wide - m
         y = top + SIDE_TAB_H * u + 2 * u + 16 * u + m // 2
@@ -343,7 +408,7 @@ class Shell:
                                 for n in self.layout["order"]]})
 
     def window_rect(self) -> list[int]:
-        W, H, u = self.W, self.H, self.u
+        W, H, u = self.PW, self.PH, self.u
         top, bottom = self.bar_h + 4, self.dock_top - 6 * u
         avail_h = bottom - top
         w, h = (W - 16, avail_h - 8) if W < 640 else (int(W * 0.60), int(avail_h * 0.78))
@@ -404,6 +469,8 @@ class Shell:
                       system=getattr(inst, "system", False), ticks=getattr(inst, "ticks", False),
                       shell=getattr(inst, "shell", False), pointer=getattr(inst, "pointer", False),
                       animate=getattr(inst, "animate", False))
+        if kind == "window":
+            layer.ws = self.ws
         self.layers[layer.id] = layer
         self._hello(layer)
         if launch:
@@ -435,14 +502,23 @@ class Shell:
             msg["options"] = {k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "side_tab")}
         layer.send(msg)
 
-    def remove(self, layer_id: str) -> None:
+    HEAL_DELAYS = (1.0, 3.0, 8.0)                           # seconds before each restart attempt, then give up
+
+    def remove(self, layer_id: str, expected: bool = False) -> None:
+        """Drop a layer. An interface app that goes away *unexpectedly* (it crashed, broke the protocol, or its
+        channel died) is scheduled for a restart - self-healing - unless the desktop is shutting down."""
         layer = self.layers.pop(layer_id, None)
         if not layer:
             return
         layer.channel.close()
+        if not expected and layer.kind != "window" and self._restarter is not None and not self.stop_requested:
+            self._schedule_heal(layer)
         self.anim_ids.discard(layer_id)
-        if self.focus == layer_id:
-            self.focus = None
+        for seat in self.seats.values():
+            if seat.focus == layer_id:
+                seat.focus = None
+            if seat.key_target == layer_id:
+                seat.key_target = None
         self._push_windows()
         self.surface_dirty = True
 
@@ -457,16 +533,18 @@ class Shell:
         return next((l for l in self.layers.values() if l.kind == "wallpaper"), None)
 
     def _push_windows(self) -> None:
-        info = [{"id": w.id, "name": w.name, "title": w.title, "focused": w.id == self.focus,
-                 "minimized": w.minimized} for w in self.windows()]
+        info = [{"id": w.id, "name": w.name, "title": w.title, "focused": w.id in self.focused_ids(),
+                 "minimized": w.minimized, "ws": w.ws} for w in self.windows()]
         d = self.desktop_layer()
         for layer in self.layers.values():
             if layer.system:
                 layer.send({"cmd": "windows", "windows": info, "desktop": d.id if d else "",
-                            "focus": self.focus or ""})
+                            "focus": self.seats[0].focus or "", "workspace": self.ws, "workspaces": WORKSPACES})
 
     # ------------------------------------------------------------------ window actions
     def raise_window(self, layer: Layer) -> None:
+        if layer.ws is not None and layer.ws != self.ws:
+            self.set_workspace(layer.ws)                       # asking for a window on another desktop goes there
         layer.z = self._raise_z()
         layer.minimized = False
         layer.visible = True
@@ -483,7 +561,8 @@ class Shell:
 
     def show_desktop(self) -> None:
         for w in self.windows():
-            w.minimized, w.visible = True, False
+            if w.ws == self.ws:
+                w.minimized, w.visible = True, False
         self.focus = None
         d = self.desktop_layer()
         if d:
@@ -496,10 +575,14 @@ class Shell:
             l.rev += 1
         self.surface_dirty = True
 
-    def open_window(self, name: str, command: Optional[dict] = None) -> Optional[Layer]:
-        existing = next((w for w in self.windows() if w.name == name), None)
+    def open_window(self, name: str, command: Optional[dict] = None, *, new: bool = False,
+                    background: bool = False) -> Optional[Layer]:
+        """Show an app in a window. By default an app already in a window is brought forward; ``new`` starts another
+        instance (any number may be open, on any desktop); ``background`` opens it minimized, without taking focus."""
+        existing = None if new else next((w for w in self.windows() if w.name == name), None)
         if existing:
-            self.raise_window(existing)
+            if not background:
+                self.raise_window(existing)
             if command:
                 existing.send({"cmd": "launch", **command})
             return existing
@@ -507,9 +590,18 @@ class Shell:
         mode = "graphical" if "graphical" in modes else "tui" if "tui" in modes else None
         if mode is None:
             raise ProtocolError(f"{name} has no window mode")
-        inst = self._opener(name, mode)
-        layer = self._add(inst, "window", self.window_rect(), mode, command)
-        self.raise_window(layer)
+        taken = frozenset(self.layers)
+        try:
+            inst = self._opener(name, mode, new, taken)
+        except TypeError:                                      # an opener that predates the extra arguments
+            inst = self._opener(name, mode)
+        layer = self._add(inst, "window", self.window_rect(), getattr(inst, "mode", mode) or mode, command)
+        if background:
+            layer.minimized, layer.visible = True, False
+            self._touch_all()
+            self._push_windows()
+        else:
+            self.raise_window(layer)
         return layer
 
     # -------------------------------------------------------------------- app requests
@@ -561,6 +653,17 @@ class Shell:
                 return result(False, "this app does not have the 'shell' permission")
             self.key_target = layer.id if msg["on"] else None
             return result(True, "keyboard taken" if msg["on"] else "keyboard released")
+        if action == "workspace":
+            if not layer.shell:
+                return result(False, "this app does not have the 'shell' permission")
+            if "id" in msg:
+                target = self.layers.get(msg["id"])
+                if target is None or target.kind != "window":
+                    return result(False, "no such window")
+                self.move_to_workspace(target, msg["n"])
+            else:
+                self.set_workspace(msg["n"])
+            return result(True, f"workspace {self.ws + 1}")
         if action == "tab":
             if not layer.shell:
                 return result(False, "this app does not have the 'shell' permission")
@@ -620,7 +723,7 @@ class Shell:
                     cmd = {"command": cid or "line", "line": line}
                 elif cid:
                     cmd = {"command": cid, "line": self._commands_of(msg["app"]).get(cid, "")}
-                w = self.open_window(msg["app"], cmd)
+                w = self.open_window(msg["app"], cmd, new=bool(msg.get("new")), background=bool(msg.get("background")))
                 return result(True, f"opened {msg['app']}", id=w.id if w else "")
             if action == "focus":
                 return self._focus_request(layer, msg["id"], result)
@@ -628,7 +731,7 @@ class Shell:
                 target = self.layers.get(msg["id"])
                 self._closer(msg["id"])
                 if target:
-                    self.remove(target.id)
+                    self.remove(target.id, expected=True)
                 return result(True, f"closed {msg['id']}", id=msg["id"])
         except Exception as e:                                 # a refused password, a bad app: tell the app
             if action in ("open", "close"):
@@ -690,7 +793,7 @@ class Shell:
     def at(self, x: int, y: int) -> Optional[Layer]:
         for layer in sorted(self.layers.values(), key=lambda l: -l.z):
             lx, ly, lw, lh = layer.rect
-            if layer.visible and layer.kind not in NO_HIT and lx <= x < lx + lw and ly <= y < ly + lh:
+            if self.shown(layer) and layer.kind not in NO_HIT and lx <= x < lx + lw and ly <= y < ly + lh:
                 return layer
         return None
 
@@ -714,6 +817,15 @@ class Shell:
         return "title"
 
     def route(self, ev: dict) -> None:
+        """Handle one input event for the seat it came from (``ev["seat"]``, default 0)."""
+        seat = self.seat(ev.get("seat", 0))
+        prev, self._seat = self._seat, seat
+        try:
+            self._route(ev)
+        finally:
+            self._seat = prev
+
+    def _route(self, ev: dict) -> None:
         t = ev["type"]
         if t == "interrupt":
             self.stop_requested = True
@@ -721,6 +833,9 @@ class Shell:
         if t == "key":
             if ev["key"] == "super":                            # the Super key: the launcher
                 self._toggle_named("launcher")
+                return
+            if ev["key"] in ("ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4"):    # Ctrl-1..4: switch desktop
+                self.set_workspace(int(ev["key"][-1]) - 1)
                 return
             pop = next((l for l in self.layers.values() if l.kind == "popup" and l.visible), None)
             if pop is not None:                                 # the launcher is open: it gets the keyboard
@@ -789,7 +904,7 @@ class Shell:
                 if part == "close":
                     try:
                         self._closer(hit.id)
-                        self.remove(hit.id)
+                        self.remove(hit.id, expected=True)
                     except Exception as e:
                         self.log.append(f"close refused: {e}")
                     return
@@ -817,6 +932,8 @@ class Shell:
 
     # ------------------------------------------------- pointer, clicks, tilt, animation, controls
     def _place_pointer_layers(self) -> None:
+        if self._seat.id != 0:
+            return                                              # only seat 0's pointer is drawn by the cursor app
         for layer in self.layers.values():
             if layer.kind == "cursor":
                 layer.rect[:] = self.core_rect("cursor")[1]
@@ -828,7 +945,7 @@ class Shell:
         self.vel[0], self.vel[1] = 0.55 * self.vel[0] + 0.45 * dx, 0.55 * self.vel[1] + 0.45 * dy
         self._moved_at = time.monotonic()
         self._cur_dirty = True
-        if self.cfg["look"] == "3d" and self.cfg["tilt"]:
+        if self.cfg["look"] == "3d" and self.cfg["tilt"] and self._seat.id == 0:
             k = TILT_PX * self.u
             m = max(abs(self.vel[0]), abs(self.vel[1]), 1.0)
             self.tilt_target[0] = max(-k, min(k, self.vel[0] / m * k * min(1.0, m / 12)))
@@ -836,10 +953,11 @@ class Shell:
 
     def _note_click(self, x: int, y: int, pressed: bool, button: str) -> None:
         self.down = pressed
-        self._cur_dirty = True
+        if self._seat.id == 0:
+            self._cur_dirty = True
         for layer in self.layers.values():
             if layer.pointer:
-                layer.send({"cmd": "click", "x": x, "y": y, "button": button, "pressed": pressed})
+                layer.send({"cmd": "click", "x": x, "y": y, "button": button, "pressed": pressed, "seat": self._seat.id})
         if pressed and self.cfg["look"] == "3d":
             now = time.monotonic()
             if self.cfg["bubbles"]:
@@ -848,14 +966,51 @@ class Shell:
                         layer.rect[:] = self.core_rect("effects")[1]
                         layer.visible = True
                         self._fx_until = now + 1.2
-            if self.cfg["tilt"]:
+            if self.cfg["tilt"] and self._seat.id == 0:
                 k = TILT_PX * self.u
                 self.tilt_target[0] = (x - self.W / 2) / (self.W / 2) * k
                 self.tilt_target[1] = (y - self.H / 2) / (self.H / 2) * k
                 self._click_hold = now + 0.18
 
+    def _schedule_heal(self, layer: Layer) -> None:
+        e = self._heal.get(layer.slot)
+        if e is None:
+            e = self._heal[layer.slot] = {"name": layer.name, "tries": 0, "at": 0.0}
+            self.notify("desktop", f"{layer.name} stopped", "Restarting it. This needs your password unless a sudo window is open.")
+        e["name"] = layer.name
+        e["at"] = time.monotonic() + self.HEAL_DELAYS[min(e["tries"], len(self.HEAL_DELAYS) - 1)]
+
+    def _run_heal(self, now: float) -> None:
+        from .mods import DEFAULTS
+        for slot, e in list(self._heal.items()):
+            if now < e["at"] or self._restarter is None:
+                continue
+            try:
+                inst = self._restarter(e["name"])
+                self.add_core(inst, slot=slot)
+                del self._heal[slot]
+                self.log.append(f"healed {slot}: restarted {e['name']}")
+            except AuthorizationDenied as ex:                  # the owner did not type the password: do not nag
+                del self._heal[slot]
+                self.notify("desktop", f"{e['name']} was not restarted", "No password was given. `kos heal` or restarting the desktop brings it back.")
+            except Exception as ex:
+                e["tries"] += 1
+                self.log.append(f"heal {slot} attempt {e['tries']} failed: {ex}")
+                if e["tries"] >= len(self.HEAL_DELAYS):
+                    default = DEFAULTS.get(slot)
+                    if default and e["name"] != default:       # a mod that keeps failing: fall back to the built-in app
+                        self.notify("desktop", f"{e['name']} keeps failing", f"Using the built-in {default} instead.")
+                        e["name"], e["tries"] = default, 0
+                    else:
+                        del self._heal[slot]
+                        self.notify("desktop", f"{e['name']} keeps stopping", "Giving up for now. Run `kos heal` to look into it.")
+                        continue
+                e["at"] = now + self.HEAL_DELAYS[min(e["tries"], len(self.HEAL_DELAYS) - 1)]
+
     def _update_motion(self, now: float) -> None:
-        """Called every step: ease the tilt, feed the pointer app, run the animation clock."""
+        """Called every step: ease the tilt, feed the pointer app, run the animation clock, heal what stopped."""
+        if self._heal:
+            self._run_heal(now)
         if self.cfg["look"] == "3d":
             if now > self._click_hold and now - self._moved_at > 0.05:
                 self.tilt_target[0] *= 0.6
@@ -875,8 +1030,9 @@ class Shell:
             self._cur_dirty, self._last_cursor = False, now
             for layer in self.layers.values():
                 if layer.pointer and layer.kind == "cursor":
-                    layer.send({"cmd": "cursor", "x": self.pointer[0], "y": self.pointer[1],
-                                "dx": round(self.vel[0], 2), "dy": round(self.vel[1], 2), "down": self.down})
+                    s0 = self.seats[0]
+                    layer.send({"cmd": "cursor", "x": s0.pointer[0], "y": s0.pointer[1],
+                                "dx": round(s0.vel[0], 2), "dy": round(s0.vel[1], 2), "down": s0.down})
             self.surface_dirty = True
         if self.anim_ids and now - self._last_anim >= 1 / 24:
             dt, self._last_anim = now - self._last_anim, now
@@ -941,7 +1097,7 @@ class Shell:
     def controls(self) -> list["looks.Control"]:
         """Every clickable thing on screen, front to back: apps' declared ``hit`` ops and window frames."""
         out: list[looks.Control] = []
-        layers = sorted((l for l in self.layers.values() if l.visible and l.kind not in ("wallpaper", "cursor", "overlay")),
+        layers = sorted((l for l in self.layers.values() if self.shown(l) and l.kind not in ("wallpaper", "cursor", "overlay")),
                         key=lambda l: (0 if l.kind == "window" else 1, -l.z))
         r, u = 5 * self.u, self.u
         for layer in layers:
@@ -967,7 +1123,7 @@ class Shell:
         if c.kind == "close":
             try:
                 self._closer(layer.id)
-                self.remove(layer.id)
+                self.remove(layer.id, expected=True)
             except Exception as e:
                 self.log.append(f"close refused: {e}")
             return
@@ -1055,8 +1211,8 @@ class Shell:
         return d.wall
 
     def _signature(self, layer: Layer, ordered: list[Layer]) -> tuple:
-        below = tuple((l.id, l.rev, tuple(l.rect), l.visible) for l in ordered if l.z < layer.z)
-        return (below, tuple(layer.rect), layer.id == self.focus)
+        below = tuple((l.id, l.rev, tuple(l.rect), self.shown(l)) for l in ordered if l.z < layer.z)
+        return (below, tuple(layer.rect), layer.id in self.focused_ids())
 
     def _glass(self, fb: Framebuffer, rect: list[int], spec: dict, *, radius: int) -> None:
         """Frosted glass: shadow, blur what is behind, tint, sheen, bevel, rounded corners."""
@@ -1164,9 +1320,9 @@ class Shell:
         self._paint_content(fb, layer)
 
     def _base_signature(self) -> tuple:
-        return (tuple((l.id, l.rev, tuple(l.rect), l.visible, l.z) for l in self.layers.values()
+        return (self.ws, tuple((l.id, l.rev, tuple(l.rect), self.shown(l), l.z) for l in self.layers.values()
                       if l.kind not in NOT_IN_BASE or l.kind == "wallpaper"),
-                self.focus, self.cfg["look"])
+                tuple(sorted(self.focused_ids())), tuple(sorted(s.focus or "" for s in self.seats.values())), self.cfg["look"])
 
     def compose(self) -> Framebuffer:
         """The scene: the cached base frame (everything but the click effects and the pointer) with the
@@ -1175,18 +1331,18 @@ class Shell:
         if self._base is None or sig != self._base_sig:
             self._base, self._base_sig = self._compose_base(), sig
         fb = self._base.copy()
-        for layer in sorted((l for l in self.layers.values() if l.visible and l.kind == "overlay"), key=lambda l: l.z):
+        for layer in sorted((l for l in self.layers.values() if self.shown(l) and l.kind == "overlay"), key=lambda l: l.z):
             self._paint_content(fb, layer)
         self.composed = fb
         return fb
 
     def _compose_base(self) -> Framebuffer:
         fb = self._wallpaper().copy()
-        ordered = sorted((l for l in self.layers.values() if l.visible and l.kind not in NOT_IN_BASE), key=lambda l: l.z)
+        ordered = sorted((l for l in self.layers.values() if self.shown(l) and l.kind not in NOT_IN_BASE), key=lambda l: l.z)
         every = sorted(self.layers.values(), key=lambda l: l.z)
         for layer in ordered:
             if layer.kind == "window":
-                self._paint_window(fb, layer, layer.id == self.focus)
+                self._paint_window(fb, layer, layer.id in self.focused_ids())
                 continue
             if layer.kind in ("plain", "top"):               # no glass: the app's own shapes, over what is beneath
                 self._paint_content(fb, layer)
@@ -1195,7 +1351,7 @@ class Shell:
             m = 8 * self.u
             region = (max(0, x - m), max(0, y - m), min(self.W, x + w + m) - max(0, x - m),
                       min(self.H, y + h + m) - max(0, y - m))
-            sig = self._signature(layer, [l for l in every if l.visible])
+            sig = self._signature(layer, [l for l in every if self.shown(l)])
             if layer.cache and layer.cache[0] == sig:
                 fbgfx._put_rows(fb, region[0], region[1], layer.cache[1])
             else:
@@ -1229,6 +1385,17 @@ class Shell:
             fb = looks.shear(fb, self.tilt[0], self.tilt[1])
         return fb
 
+    def _draw_modal(self, fb: Framebuffer) -> None:
+        """The trusted password prompt, centered on the primary output (not on the whole wide screen)."""
+        if len(self.outputs) <= 1:
+            return draw_modal(fb, self.modal, self.u)
+        px, py, pw, ph = self.outputs[0]
+        sub = crop(fb, px, py, pw, ph)
+        draw_modal(sub, self.modal, self.u)
+        stride = fb.width * 4
+        for r in range(ph):
+            fb.buf[(py + r) * stride + px * 4:(py + r) * stride + (px + pw) * 4] = sub.buf[r * pw * 4:(r + 1) * pw * 4]
+
     def render(self) -> None:
         fb = self._look_frame()
         if self.cfg["look"] != "terminal" and self.ring:
@@ -1240,12 +1407,16 @@ class Shell:
             if cur is not None and self.cfg["look"] != "terminal":
                 self._paint_content(fb, cur)
             else:
-                draw_cursor(fb, *self.pointer, scale=self.u)
+                draw_cursor(fb, *self.seats[0].pointer, scale=self.u)
+            for sid, seat in self.seats.items():                 # more pointers: the OS draws them, each with its seat's colour
+                if sid:
+                    draw_cursor(fb, *seat.pointer, scale=self.u)
+                    fbgfx.circle(fb, seat.pointer[0] + 14 * self.u, seat.pointer[1] + 14 * self.u, 4 * self.u, SEAT_COLORS[sid % len(SEAT_COLORS)])
         if getattr(self.backend, "text_overlay", False):
             self.backend.show(fb, self.modal)
         else:
             if self.modal:
-                draw_modal(fb, self.modal, self.u)
+                self._draw_modal(fb)
             self.backend.show(fb)
         self.surface_dirty = False
 
