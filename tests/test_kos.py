@@ -213,13 +213,14 @@ class TestSandboxedRun(Env):
         devices.push(*keys("y"), *keys(PW), {"type": "key", "key": "enter"})   # mouse
         devices.push(*keys("y"), *keys(PW), {"type": "key", "key": "enter"})   # keyboard
         devices.push({"type": "button", "button": "left", "pressed": True, "x": 50, "y": 60},
+                     {"type": "pointer", "x": 100, "y": 10},       # move the pointer off the dot so it is visible
                      *keys("ok"))
         threading.Timer(4.0, lambda: devices.push({"type": "key", "key": "escape"})).start()
         code = s.run(first_frame_timeout=5)
         self.assertEqual(code, 0)
         self.assertEqual(devices.booted, ["mouse", "keyboard"])
         last = backend.frames[-1]
-        self.assertEqual(last.pixel(49, 60), (255, 80, 128))  # the click drew a dot (OS cursor covers 50,60)
+        self.assertEqual(last.pixel(49, 60), (255, 80, 128))  # the click drew a dot
         outcomes = [(e["action"], e["outcome"]) for e in auth.audit.entries()]
         self.assertIn(("device.mouse", "granted"), outcomes)
         self.assertIn(("device.keyboard", "granted"), outcomes)
