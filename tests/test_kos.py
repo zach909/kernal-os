@@ -4698,7 +4698,7 @@ class TestImmersiveLooks(Env):
         spec.loader.exec_module(mod)
         a, b = socket.socketpair()
         old = os.environ.get("KOS_CHANNEL_FD")
-        os.environ["KOS_CHANNEL_FD"] = str(b.fileno())
+        os.environ["KOS_CHANNEL_FD"] = str(b.detach())               # the app takes over this descriptor and owns it
         t = threading.Thread(target=mod.main, daemon=True)
         t.start()
         try:
