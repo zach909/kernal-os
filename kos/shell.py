@@ -103,6 +103,7 @@ class Layer:
     slot: str = ""                 # the interface slot it fills (its own name for built-ins; a mod's declared slot)
     pointer: bool = False          # is told about the pointer and where clicks land
     animate: bool = False          # may ask for animation ticks
+    neural: bool = False           # a neural driver: may send intents while the neural look is on
     rev: int = 0                   # bumps whenever what this layer shows changes
     cache: Optional[tuple] = None  # (signature, region rows) of its glass, before content
 
@@ -176,6 +177,8 @@ class Shell:
         self._cur_dirty = True
         self.anim_ids: set[str] = set()
         self.nav, self.ring, self.typed = -1, False, ""
+        self.neural: dict = {"last_step": 0.0, "paused": False, "last": "", "last_intent_t": 0.0}
+        self._stereo = None                                      # cached eyes of the virtual / mixed-reality look
         self.stack_open = False                                  # the looks shown as a stack of cards (Ctrl-Up)
         self._stack_rects: list = []
         self.notes: list[dict] = []
@@ -338,7 +341,7 @@ class Shell:
             d = json.loads(f.read_text()) if f else {}
         except (OSError, ValueError):
             return cfg
-        if d.get("look") in looks.LOOKS:
+        if d.get("look") in looks.LOOKS and d["look"] not in looks.IMMERSIVE:     # a virtual, mixed or neural look is never restored: entering it asks
             cfg["look"] = d["look"]
         for k in ("cursor_direction", "tilt", "bubbles"):
             if isinstance(d.get(k), bool):
@@ -363,11 +366,15 @@ class Shell:
         self._save()
         self.relayout()
 
-    def set_look(self, **opts) -> dict:
-        """Change the look or one of its options. Remembered across restarts. Every app is sent a fresh
-        ``hello`` so it redraws in the new look."""
+    def set_look(self, authorized: bool = False, **opts) -> dict:
+        """Change the look or one of its options. Remembered across restarts (except the immersive looks). Every app is
+        sent a fresh ``hello`` so it redraws in the new look. The virtual, mixed-reality and neural looks need
+        ``authorized=True``, which only a typed password gives (see ``_authorize_immersive``)."""
         changed = False
         for k, v in opts.items():
+            if k == "look" and v in looks.IMMERSIVE and not authorized and v != self.cfg["look"]:
+                self.log.append(f"refused the {v} look: it needs the password")
+                continue
             if k == "look" and v in looks.LOOKS and v != self.cfg["look"]:
                 self.cfg["look"], changed = v, True
             elif k in ("cursor_direction", "tilt", "bubbles") and isinstance(v, bool) and v != self.cfg[k]:
@@ -376,11 +383,25 @@ class Shell:
             self._save()
             self._base_sig = self._look_cache = None
             self.nav, self.ring, self.typed = -1, False, ""
+            self._stereo = None
+            if self.cfg["look"] == "neural":                    # the scan starts on the first control and moves on its own
+                self.ring, self.nav = True, 0
+                self.neural = {"last_step": time.monotonic(), "paused": False, "last": "", "last_intent_t": 0.0}
             for layer in self.layers.values():
                 if layer.mode == "graphical":
                     self._hello(layer)
             self._touch_all()
         return dict(self.cfg)
+
+    def authorize_immersive(self, look: str) -> tuple[bool, str]:
+        """Entering a virtual-reality, mixed-reality or neural look always asks for the password (never remembered by a
+        sudo window, not skipped when the interface layer is set to not ask): these looks reach for a headset, a camera or
+        a neural device."""
+        try:
+            self.authority.authorize("look.immersive", look).close()
+        except Exception as e:                                   # AuthorizationDenied, a cancelled prompt, ...
+            return False, f"the {look} look needs your password ({e})"
+        return True, ""
 
     def relayout(self) -> None:
         for layer in self.layers.values():
@@ -470,7 +491,7 @@ class Shell:
                       z=Z[kind] if kind != "window" else self._raise_z(), title=inst.name,
                       system=getattr(inst, "system", False), ticks=getattr(inst, "ticks", False),
                       shell=getattr(inst, "shell", False), pointer=getattr(inst, "pointer", False),
-                      animate=getattr(inst, "animate", False))
+                      animate=getattr(inst, "animate", False), neural=getattr(inst, "neural", False))
         if kind == "window":
             layer.ws = self.ws
         self.layers[layer.id] = layer
@@ -622,10 +643,22 @@ class Shell:
             if msg["op"] == "set":
                 if not layer.shell:
                     return result(False, "this app does not have the 'shell' permission")
-                self.set_look(**{k: v for k, v in msg.items() if k in ("look", "cursor_direction", "tilt", "bubbles")})
+                want = {k: v for k, v in msg.items() if k in ("look", "cursor_direction", "tilt", "bubbles")}
+                if want.get("look") in looks.IMMERSIVE and want["look"] != self.cfg["look"]:
+                    ok, why = self.authorize_immersive(want["look"])
+                    if not ok:
+                        want.pop("look")
+                        self.notify("shell", "Not switched", why)
+                    else:
+                        self.set_look(authorized=True, **want)
+                        want = {}
+                self.set_look(**want)
             layer.send({"cmd": "look", "look": self.cfg["look"],
                         "options": {k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles")}})
             return
+        if action == "intent":
+            ok, detail = self.intent(layer, msg["name"])
+            return result(ok, detail)
         if action == "toggle":
             if not layer.shell:
                 return result(False, "this app does not have the 'shell' permission")
@@ -1175,11 +1208,14 @@ class Shell:
         elif key == "enter" and 0 <= self.nav < n:
             self.typed = ""
             self.activate(ctl[self.nav])
-            if not terminal:
+            if not terminal and look != "neural":
                 self.ring = False
+            self.neural["last_step"] = time.monotonic()
         elif key == "escape":
             if self.typed:
                 self.typed = ""
+            elif look == "neural":
+                self.set_look(look="normal")                    # leaving the neural look needs no password
             elif not terminal:
                 self.ring = False
             else:
@@ -1192,7 +1228,7 @@ class Shell:
             if self.typed:
                 self.nav = max(0, min(n - 1, int(self.typed) - 1))
         else:
-            if not terminal:
+            if not terminal and look != "neural":
                 self.ring = False                      # any other key: back to normal typing
                 self.surface_dirty = True
                 return False
@@ -1416,6 +1452,8 @@ class Shell:
         if self.stack_open:
             return self._stack_frame()
         look = self.cfg["look"]
+        if look in ("vr", "mr"):
+            return looks.render_stereo(self, look == "mr")
         if look in ("text", "terminal"):
             ctl = self.controls() if look == "terminal" else []
             sig = (look, self._base_signature(), self.nav, self.typed, self.ring, tuple(c.rect for c in ctl))
@@ -1448,8 +1486,14 @@ class Shell:
         if self.cfg["look"] != "terminal" and self.ring:
             ctl = self.controls()
             if 0 <= self.nav < len(ctl):
-                looks.draw_ring(fb, ctl[self.nav].rect, self.u)
-        if not self.modal:
+                looks.draw_ring(fb, ctl[self.nav].rect, self.u * (2 if self.cfg["look"] == "neural" else 1))
+        if self.cfg["look"] == "neural" and not self.modal:
+            ctl = self.controls()
+            n = self.neural
+            progress = min(1.0, (time.monotonic() - n["last_step"]) / self.NEURAL_DWELL)
+            looks.neural_hud(self, fb, ctl, self.nav, progress, {"paused": n["paused"], "last": n["last"],
+                                                                 "driver": any(l.neural for l in self.layers.values())})
+        if not self.modal and self.cfg["look"] not in ("vr", "mr"):          # those looks draw the pointer once per eye
             cur = next((l for l in self.layers.values() if l.kind == "cursor" and l.visible and l.ops), None)
             if cur is not None:
                 self._paint_content(fb, cur)
@@ -1510,6 +1554,61 @@ class Shell:
             self.route(self.pending.popleft())
         self.tick()
         self._update_motion(time.monotonic())
+        self._neural_step(time.monotonic())
+
+    NEURAL_DWELL = 1.4                    # seconds the scan rests on each control before moving on
+
+    def _neural_step(self, now: float) -> None:
+        """The neural look scans: the highlight moves to the next control every ``NEURAL_DWELL`` seconds, so one signal
+        (a blink, a clench, a thought the driver recognises) is enough to press things."""
+        if self.cfg["look"] != "neural":
+            return
+        n = self.neural
+        if n["paused"]:
+            return
+        ctl = self.controls()
+        if ctl and now - n["last_step"] >= self.NEURAL_DWELL:
+            self.nav = (self.nav + 1) % len(ctl)
+            n["last_step"] = now
+            self.surface_dirty = True
+        elif now - n.get("last_paint", 0.0) >= 0.1:           # the progress bar fills smoothly
+            n["last_paint"] = now
+            self.surface_dirty = True
+
+    def intent(self, layer: Layer, name: str) -> tuple[bool, str]:
+        """One decision from a neural driver. Only while the neural look is on, only from an app that was granted the
+        'neural' permission (a driver), and at most ~12 a second: the OS sees decisions, never signals."""
+        if self.cfg["look"] != "neural":
+            return False, "the neural look is not on"
+        if not layer.neural:
+            return False, "this app is not a neural driver"
+        now = time.monotonic()
+        n = self.neural
+        if now - n["last_intent_t"] < 0.08:
+            return False, "too fast"
+        n["last_intent_t"], n["last"] = now, name
+        ctl = self.controls()
+        if name == "pause":
+            n["paused"] = not n["paused"]
+            n["last_step"] = now
+        elif ctl:
+            if name == "next":
+                self.nav = (self.nav + 1) % len(ctl)
+            elif name == "prev":
+                self.nav = (self.nav - 1) % len(ctl)
+            elif name == "select" and 0 <= self.nav < len(ctl):
+                self.activate(ctl[self.nav])
+            elif name == "back":
+                top = next((l for l in sorted(self.layers.values(), key=lambda l: -l.z) if self.shown(l) and l.kind == "window"), None)
+                if top is not None:
+                    try:
+                        self._closer(top.id)
+                        self.remove(top.id, expected=True)
+                    except Exception as e:
+                        self.log.append(f"close refused: {e}")
+            n["last_step"] = now
+        self.surface_dirty = True
+        return True, name
 
     def step(self, timeout: float = 0.1) -> None:
         now = time.monotonic()

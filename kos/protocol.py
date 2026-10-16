@@ -40,6 +40,8 @@ app -> OS
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
            | ["stext", x, y, str, color, px, face?]     smooth text, face 0 sans / 1 bold / 2 mono
            | ["poly", [[x, y], ...], color, alpha?]      smooth (anti-aliased) filled shape, alpha 0-255, up to 64 points
+           | ["blit", x, y, w, h, scale, base64]        raw RGB pixels (w*h*3 bytes, at most 96000 pixels), drawn
+                                                       scale times larger - a camera preview, say
            | ["hit", x, y, w, h, label]                 draws nothing: declares a clickable control, so the
                                                        interface can be listed, tabbed through, or shown as text
         color = "#rrggbb"
@@ -64,7 +66,9 @@ app -> OS
     {"cmd": "request", "action": "signal", "pid": N, "sig": "TERM"|"KILL"|"STOP"|"CONT"}   (password)
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
     {"cmd": "request", "action": "animate", "on": bool}      (animate permission) ask for / stop ~24 'anim' events a second
-    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|text|terminal, "cursor_direction"|"tilt"|"bubbles": bool}   (shell permission to set)
+    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|mr|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles": bool}   (shell permission to set)
+    {"cmd": "request", "action": "intent", "name": next|prev|select|back|pause}   (neural permission, neural look only) one decision
+                                                              a neural driver made from the wearer's signals - never the signals
     {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
     {"cmd": "request", "action": "openlink", "id": ID}      open a pinned link (the OS looks up what it points to)
     {"cmd": "request", "action": "workspace", "n": 0..3, "id": WINDOW?}   (shell permission) switch desktop, or move a window to one
@@ -98,11 +102,13 @@ types the password in the OS's own prompt.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
 from typing import Any
 
+INTENTS = ("next", "prev", "select", "back", "pause")      # what a neural driver may say: never raw signals
 MAX_LINE = 1 << 20
 MAX_LINES = 500
 MAX_LINE_CHARS = 1000
@@ -164,6 +170,17 @@ def _op(op: Any) -> list:
                 raise ProtocolError("poly points are [x, y] numbers")
             clean.append([round(max(-8192.0, min(8192.0, float(v))), 2) for v in p])
         return ["poly", clean, _color(op[2]), _int(op[3], 0, 255) if len(op) == 4 else 255]
+    if kind == "blit" and len(op) == 7:
+        w, h, scale = _int(op[3], 1, 640), _int(op[4], 1, 640), _int(op[5], 1, 32)
+        if w * h > 96000:
+            raise ProtocolError("a blit is at most 96000 pixels")
+        try:
+            raw = base64.b64decode(op[6], validate=True) if isinstance(op[6], str) else b""
+        except ValueError:
+            raise ProtocolError("blit pixels must be base64") from None
+        if len(raw) != w * h * 3:
+            raise ProtocolError("blit needs exactly width*height*3 bytes")
+        return ["blit", _int(op[1]), _int(op[2]), w, h, scale, op[6]]
     if kind == "hit" and len(op) == 6:
         return ["hit", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), clean_text(op[5], 60)]
     raise ProtocolError(f"bad draw op {kind!r}")
@@ -306,8 +323,8 @@ def _request(msg: dict) -> dict:
         out = {"cmd": "request", "action": "look", "op": op}
         if op == "set":
             if "look" in msg:
-                if msg["look"] not in ("normal", "3d", "text", "terminal"):
-                    raise ProtocolError("look.look must be normal, 3d, text or terminal")
+                if msg["look"] not in ("normal", "3d", "vr", "mr", "neural", "text", "terminal"):
+                    raise ProtocolError("look.look must be normal, 3d, vr, mr, neural, text or terminal")
                 out["look"] = msg["look"]
             for k in ("cursor_direction", "tilt", "bubbles"):
                 if k in msg:
@@ -315,6 +332,10 @@ def _request(msg: dict) -> dict:
                         raise ProtocolError(f"look.{k} must be true or false")
                     out[k] = msg[k]
         return out
+    if action == "intent":
+        if msg.get("name") not in INTENTS:
+            raise ProtocolError(f"intent.name must be one of {', '.join(INTENTS)}")
+        return {"cmd": "request", "action": "intent", "name": msg["name"]}
     if action == "links":
         op = msg.get("op", "list")
         if op not in ("list", "add", "remove"):

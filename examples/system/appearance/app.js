@@ -1,7 +1,10 @@
 'use strict';
-// Appearance. The look of the whole interface is a setting: normal, 3D, text (everything built from
-// text) or terminal (a numbered list of every button - pick one and press Enter). The pointer, the
-// screen tilt and the click bubbles are options of the 3D look. The OS remembers the choice.
+// Appearance. The look of the whole interface is a setting: normal, 3D, virtual reality (one picture per
+// eye), mixed reality (over a camera passthrough), neural (a scanning highlight a neural driver can drive),
+// text (everything built from text) or terminal (a numbered list of every button - pick one and press
+// Enter). The virtual, mixed and neural looks reach for a headset, a camera or a neural device, so they
+// always ask for your password and are never restored at the next start. The pointer, the screen tilt and
+// the click bubbles are options of the 3D look. The OS remembers the choice of the other looks.
 const path = require('path');
 const { App, Canvas } = require(process.env.KOS_SDK_JS);
 const G = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'gfx.js'));
@@ -9,6 +12,9 @@ const G = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'gfx.js'));
 const LOOKS = [
   { id: 'normal', name: 'Normal', note: 'Glass, clean and flat. The default.' },
   { id: '3d', name: '3D', note: 'Depth, a 3D pointer, bubbles on click, and the screen tilts toward your hand.' },
+  { id: 'vr', name: 'Virtual reality', note: 'A picture for each eye, side by side, with depth. Asks for your password.', lock: true },
+  { id: 'mr', name: 'Mixed reality', note: 'The interface floats over a camera passthrough. Asks for your password.', lock: true },
+  { id: 'neural', name: 'Neural', note: 'A highlight scans the buttons; a neural driver picks. Asks for your password.', lock: true },
   { id: 'text', name: 'Text', note: 'Everything is built from text: boxes, labels and [buttons].' },
   { id: 'terminal', name: 'Terminal', note: 'No pictures. Every button in a list: Up/Down or a number, then Enter.' },
 ];
@@ -26,9 +32,10 @@ const OPTIONS = [
     st.zones = [];
     G.stext(c, app, 16 * u, 10 * u, 'Appearance', '#ffffff', 11 * u, 1);
     G.stext(c, app, 16 * u, 26 * u, 'How the whole interface looks and is driven.', '#9fb2c8', 6 * u + 1);
-    const cw = Math.floor((W - 32 * u - 3 * 8 * u) / 4), ch = 52 * u, y0 = 44 * u;
+    const cols = 4, cw = Math.floor((W - 32 * u - (cols - 1) * 8 * u) / cols), ch = 52 * u, y00 = 44 * u;
     LOOKS.forEach((l, i) => {
-      const x = 16 * u + i * (cw + 8 * u), on = st.look === l.id, hot = st.hover === l.id;
+      const x = 16 * u + (i % cols) * (cw + 8 * u), y0 = y00 + Math.floor(i / cols) * (ch + 8 * u);
+      const on = st.look === l.id, hot = st.hover === l.id;
       c.hit(x, y0, cw, ch, `${l.name} look`);
       G.roundRect(c, x, y0, cw, ch, 8 * u, on ? G.ACCENT : hot ? '#3b4250' : '#262b34');
       G.stext(c, app, x + 8 * u, y0 + 6 * u, l.name, '#ffffff', 8 * u, 1, null);
@@ -39,7 +46,7 @@ const OPTIONS = [
       G.stext(c, app, x + 8 * u, ly, line, on ? '#e6f2ff' : '#aab4c4', 5 * u + 1, 0, null);
       st.zones.push({ x, y: y0, w: cw, h: ch, look: l.id });
     });
-    let y = y0 + ch + 16 * u;
+    let y = y00 + Math.ceil(LOOKS.length / cols) * (ch + 8 * u) + 8 * u;
     G.stext(c, app, 16 * u, y, 'Options', '#ffffff', 8 * u, 1);
     y += 16 * u;
     for (const o of OPTIONS) {

@@ -15,10 +15,12 @@ Your documents leave this machine here, so every guard is deliberate:
 * It uses *your* git credentials (credential helper / ssh agent). KOS never
   sees, stores or asks for a GitHub token.
 
-Honest limits: the backup is **not encrypted** - "private" is GitHub's access
-control, not cryptography; and the anonymous probe cannot tell a private
-repository from one that does not exist (the push then fails). End-to-end
-encryption needs a vetted crypto library and is on the backlog.
+* **The backup is encrypted before it leaves** (AES-256-GCM, a key from your password: see ``kos/vault.py``), so GitHub holds
+  only ciphertext - "private" is no longer the only protection. If encryption is unavailable nothing is sent.
+  ``kos offsite decrypt FILE OUT`` opens one (password).
+
+Honest limits: the anonymous probe cannot tell a private repository from one that does not exist (the push then fails);
+file names and sizes are visible to GitHub; after a password change, older files open only with the old password.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from typing import Callable, Optional
 from .admin import AdminError
 from .auth import Authority
 from .backup import NAME_RE, backup_dir
+from . import vault
 from .paths import Paths, atomic_write
 
 GITHUB_RE = re.compile(
@@ -111,7 +114,8 @@ class Offsite:
         if self.is_public(url):
             raise OffsiteError(f"refusing: {url} is publicly readable. Your documents only go to a "
                                "PRIVATE repository - make it private or set a different one.")
-        with authority.authorize("backup.push", f"{backup_name} -> {url}"):
+        vault._aes()                                      # no cryptography package: refuse now, before any prompt
+        with authority.authorize("backup.push", f"{backup_name} -> {url}") as grant:
             if self.is_public(url):                       # re-check after the password prompt
                 raise OffsiteError("refusing: the repository became publicly readable")
             self.work.mkdir(parents=True, exist_ok=True)
@@ -121,8 +125,15 @@ class Offsite:
             have = self._git("remote").stdout.split()
             self._git(*(["remote", "set-url", "origin", url] if "origin" in have
                         else ["remote", "add", "origin", url]))
-            shutil.copyfile(src, self.work / backup_name)
-            self._git("add", backup_name)
-            self._git("commit", "-q", "-m", f"backup {backup_name}", "--allow-empty")
+            sealed = backup_name + ".kenc"
+            vault.encrypt_file(src, self.work / sealed, grant.key(vault.LABEL))
+            self._git("add", sealed)
+            self._git("commit", "-q", "-m", "encrypted backup", "--allow-empty")
             self._git("push", "-q", "origin", "HEAD:main")
-        return f"pushed {backup_name} to {url}"
+        return f"pushed {backup_name} to {url} (encrypted: {sealed})"
+
+    def decrypt(self, authority: Authority, src: Path, dest: Path) -> str:
+        """Open a file this machine pushed (needs the password you had when it was sealed)."""
+        with authority.authorize("backup.decrypt", str(src)) as grant:
+            vault.decrypt_file(Path(src), Path(dest), grant.key(vault.LABEL))
+        return f"decrypted to {dest}"

@@ -171,13 +171,27 @@ pure-Python TrueType rasterizer (`kos/ttf.py`, exact-coverage anti-aliasing) usi
 the app windows' *content* is still the older text-mode pages (now drawn in a smooth monospace font), and a few
 widget details still use the pixel font.
 
-### Four looks, one set of controls
+### Seven looks, one set of controls
 
-`Appearance` (or `kos desktop shot --look`) switches the whole interface between four looks; the choice is remembered.
+`Appearance` (or `kos desktop shot --look`) switches the whole interface between seven looks; the choice is remembered (except the three
+immersive ones, below). **Ctrl-Up** looks down at the looks as a stack of cards (interface in front, text and terminal behind); click one to pick it.
 
 * **normal** - glass, pills, smooth type.
 * **3d** - deeper bevels and shadows, a 3D pointer that presses down, bubbles on click, and the **whole screen tilts** a little toward the
   direction you move or click (options for each). The tilt is a cheap shear done with row and strip copies - an approximation of perspective, not a 3D transform.
+* **vr** - virtual reality: **one picture per eye**, side by side (half-width each, the usual half side-by-side format). Every layer sits at a depth -
+  the wallpaper far away, windows and the sidebar nearer, effects and the pointer nearest - and each eye sees it shifted by that depth's disparity;
+  moving the pointer turns your head, which slides the far layers more than the near ones. *Not here:* head tracking from a headset's sensors, lens
+  correction, 90 Hz (it is pure Python: the two eyes are composed once and cached). A headset appears as one more display, which the extra-displays
+  layer already handles; its sensors would come in through an `"driver": "xr"` app like the others. None was available to test.
+* **mr** - mixed reality: the same stereo view, but the wallpaper is a **camera passthrough** when a camera driver app fills the wallpaper slot (it
+  sends frames with the new `blit` op) - the interface floats over the world. With no camera driver it says so on screen and floats over the plain
+  wallpaper. `examples/drivers/camsim` is a camera *emulator* (a synthetic room), labelled as one; no real camera driver is included.
+* **neural** - a surface neural interface (an EEG band, an EMG wristband): a highlight **scans the buttons on its own** (every 1.4 s), and one signal
+  - a blink, a clench, a thought the driver recognises - presses. A **neural driver** is an app with `"driver": "neural"` and the `neural`
+  permission; it may send exactly five decisions (`next`, `prev`, `select`, `back`, `pause`), only while this look is on, at most ~12 a second.
+  **The OS never receives or asks for the signal**: it stays inside the driver's sandbox, which has no network and no files. `examples/drivers/neurosim`
+  is an emulator you click. No real neural device driver is included or was tested.
 * **text** - everything is built from text: windows are boxes, labels are characters, buttons are `[Label]`.
 * **terminal** - no pictures: a numbered list of **every button on screen**; Up/Down or a number picks one, Enter presses it, or click the line.
 
@@ -186,6 +200,12 @@ frames it draws itself) into one list. In **every** look, **Tab** (when no windo
 control - the keyboard-only way around the interface. An app with no `hit` ops still shows its text in the text look but is not reachable from the keyboard.
 
 ### Every layer asks for your password
+
+**Entering the virtual-reality, mixed-reality or neural look asks for the password every time** (it reaches for a headset, a camera or a neural
+device): a sudo window does not stand in for it, "interface: don't ask" does not skip it, and it is never restored at the next start. A driver's
+device node is given only after its own password (`app.device`), exactly as for the quantum drivers. **Each app also has its own folder**
+(`<state>/appdata/NAME/`, `KOS_DATA_DIR`, `app.data_dir()`): persistent, writable by that app alone (nothing else is mounted into it, checked
+with real Landlock), kept when the app is removed (`kos remove NAME --purge-data` deletes it).
 
 Four layers each ask: **interface** (starting the desktop and its devices - *optional*, `kos policy interface off`), **apps** (open, close, install, update,
 permit), **commands** (what a running app asks the OS to do: files, code, processes, backups) and the **kernel** (the admin keyboard, your password, software
@@ -381,9 +401,21 @@ the code. Pushing uses your normal git credentials (credential helper / ssh agen
 KOS never sees or stores a token. Guards: only `github.com` repositories are
 accepted (git's exotic transports can't be reached); **before every push** the
 repository is probed anonymously and the push is **refused if it is publicly
-readable**; every push needs your password. Limits: the backup is not
-encrypted - "private" is GitHub's access control, not cryptography - and the probe
-can't tell a private repository from one that doesn't exist (the push then fails).
+readable**; every push needs your password. **The backup is encrypted before it
+leaves** (AES-256-GCM from the `cryptography` package, key from your password,
+fresh salt per file, chunked so tampering, truncation and reordering are
+detected); without that package nothing is sent. `kos offsite decrypt FILE.kenc
+OUT` opens one. Limits: the probe can't tell a private repository from one that
+doesn't exist (the push then fails); GitHub sees names and sizes; after a
+password change, older files open only with the old password.
+
+### Is everything encrypted? `kos encryption`
+
+It answers layer by layer and does not flatter: **disk** (the root must be on LUKS/dm-crypt), **swap** (absent or encrypted), **RAM** (software cannot
+encrypt main memory - the CPU can: AMD SME/SEV, Intel TME/TDX; KOS reports what the CPU offers and what the kernel was asked for, and "unknown" where
+only the boot log can tell), **scratch and /tmp** (RAM-backed, so exactly as protected as RAM), **core dumps and hibernation** (off), **secrets in
+memory** (locked out of swap, wiped after use, KOS's own processes are non-dumpable and non-attachable) and **off-site backups** (above). On a
+machine without those hardware features, RAM and the disk report **NO**, and the fix is named. KOS writes no cipher of its own.
 
 ## Try it on any Linux machine
 

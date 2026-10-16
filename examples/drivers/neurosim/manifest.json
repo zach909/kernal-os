@@ -1,0 +1,10 @@
+{
+  "name": "neurosim",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "driver:main",
+  "modes": ["graphical"],
+  "permissions": ["neural", "ticks"],
+  "driver": "neural",
+  "description": "A neural-interface EMULATOR: a scripted signal and the decisions a driver would make from it. Not a real device."
+}

@@ -60,7 +60,7 @@ def run_job(paths: Paths, authority: Authority, driver: str, job: dict, *, timeo
         raise JobError(f"{driver} needs a device node ({', '.join(app.manifest.devices)}) and none was found or allowed")
     paths.ensure()
     cache_dir = cache.alloc(paths, driver, ram=app.manifest.runtime in ("npm", "bundle"))
-    loader.apply_to_policy(policy, app, cache_dir)
+    loader.apply_to_policy(policy, app, cache_dir, paths.data_dir(driver))
     if app.manifest.runtime not in ("npm", "bundle"):
         policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
     mine, theirs = socket.socketpair()

@@ -126,6 +126,23 @@ its child - the child inherits Landlock, the empty network namespace and no_new_
 executable (`exec_scratch`) because their runtime unpacks there; the sandbox now also allows symlinks in scratch. The converter never executes anything,
 drops setuid bits, resolves symlinks inside the package only, ignores maintainer scripts, scans the result and refuses a flagged one.
 
+## Immersive looks and neural intents (`kos/looks.py`, `kos/shell.py`, `kos/protocol.py`)
+`looks.IMMERSIVE = (vr, mr, neural)`. `Shell.set_look` refuses them unless `authorized=True`, which only `Shell.authorize_immersive` (the
+`look.immersive` action: interface layer, in `NEVER_REMEMBERED`, not in `KEYLESS`) gives; the saved layout never restores them. `render_stereo`
+shifts every layer's rect by `eye * depth * u` (plus a head-turn term from the pointer), composes each eye once (cached on the base signature and the
+quantised yaw), restores the rects, paints the pointer per eye (never cached) and squeezes each eye to half width. Mixed reality is the same with the
+wallpaper layer's `blit` pixels as the backdrop (`has_passthrough`). The neural look is the normal frame plus the focus ring and a card; `_neural_step`
+advances the scan on a dwell timer; `Shell.intent` accepts one of `protocol.INTENTS` from a layer whose app holds the `neural` permission - which a
+manifest may only have with `"driver": "neural"` - and only while the look is on, rate limited. The `blit` op (raw RGB, <= 96000 px, scaled up to 32x) is
+how a camera driver's frames reach the screen. Gap: no real headset, camera or neural device was available; drivers for them are to be written against
+this contract.
+
+## App folders and encryption (`kos/paths.py`, `kos/loader.py`, `kos/vault.py`, `kos/encryption.py`)
+`Paths.data_dir(name)` makes `<state>/appdata/NAME` (0700). `loader.apply_to_policy(..., data_dir)` adds it to the Landlock write set and records it on the
+policy; `loader.launch` passes `KOS_DATA_DIR`. `vault` seals a file with AES-256-GCM in 1 MiB chunks (nonce = random prefix + counter, AAD = chunk index +
+last-flag) under `HMAC(grant key, salt)`; `Offsite.push` seals before git ever sees the file. `encryption.check` reads /proc and /sys (injectable, so
+tests can use a pretend machine) and `encryption.harden` sets the core limit to 0 and clears PR_SET_DUMPABLE at the start of every `kos` command.
+
 ## System mods (`kos/mods.py`)
 Slots, ceilings and the enabled set live in `<state>/mods.json`. `desktop.boot_core` asks `mods.core_names` which app to run for each slot; the shell tracks
 `Layer.slot`, so everything that used to look up "dock" or "search" by app name works for a mod filling that slot. A widget mod is a new widget slot.

@@ -132,8 +132,11 @@ def sandbox_dirs(app: KApp, cache_dir: Optional[Path]) -> tuple[list[str], list[
     return [str(cache_dir)], []
 
 
-def apply_to_policy(policy: SandboxPolicy, app: KApp, cache_dir: Optional[Path]) -> None:
+def apply_to_policy(policy: SandboxPolicy, app: KApp, cache_dir: Optional[Path], data_dir: Optional[Path] = None) -> None:
     rw, ro = sandbox_dirs(app, cache_dir)
+    if data_dir is not None:                    # the app's own folder: persistent, writable by it alone
+        policy.data_dir = str(data_dir)
+        rw = [*rw, str(data_dir)]
     policy.rw_dirs = [*policy.rw_dirs, *rw]
     policy.read_paths = [*policy.read_paths, *ro]
     if app.manifest.runtime == "npm":
@@ -267,6 +270,8 @@ def launch(p: LaunchPlan, policy: SandboxPolicy, log_path: Optional[Path]) -> su
     policy.read_paths = [*policy.read_paths, *(d for d in p.ro_dirs if d not in policy.read_paths)]
     if p.ro_dirs:
         policy.max_memory = max(policy.max_memory, 64 << 30)
+    if policy.data_dir:
+        p.env = {**p.env, "KOS_DATA_DIR": policy.data_dir}
     log = open(log_path, "ab") if log_path else subprocess.DEVNULL
     try:
         proc = subprocess.Popen(

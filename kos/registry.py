@@ -44,6 +44,7 @@ class Instance:
     shell: bool = False       # manifest has 'shell': may resize its own layer / arrange the widgets
     pointer: bool = False     # manifest has 'pointer': is told where the pointer is and where clicks land
     animate: bool = False     # manifest has 'animate': may ask for ~24 animation ticks a second while it needs them
+    neural: bool = False      # manifest has 'neural' (a neural driver): may send intents while the neural look is on
 
 
 def _alive(pid: int) -> bool:

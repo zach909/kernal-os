@@ -28,7 +28,8 @@ from .display import Framebuffer, parse_color
 
 ACCENT = "#0078d4"
 BORDER = "#5b6475"
-LOOKS = ("normal", "3d", "text", "terminal")
+LOOKS = ("normal", "3d", "vr", "mr", "neural", "text", "terminal")
+IMMERSIVE = ("vr", "mr", "neural")        # these reach for sensors or a headset: entering one always asks for the password
 
 
 @dataclass
@@ -98,6 +99,125 @@ def draw_ring(fb: Framebuffer, rect: tuple[int, int, int, int], u: int = 1) -> N
     for dx, dy, rw, rh in ((x - t, y - t, w + 2 * t, t), (x - t, y + h, w + 2 * t, t),
                            (x - t, y, t, h), (x + w, y, t, h)):
         fb.rect(dx, dy, rw, rh, col)
+
+
+# ------------------------------------------------------------------------- virtual / mixed reality
+DEPTH = {"wallpaper": 0, "plain": 1, "top": 1, "widget": 1, "bar": 2, "dock": 2, "sidebar": 3, "popup": 3, "window": 3,
+         "overlay": 4, "cursor": 5}
+
+
+def hsqueeze(fb: Framebuffer) -> Framebuffer:
+    """Half the width, full height (every other column): the "half side-by-side" format a headset un-squeezes."""
+    W, H = fb.width, fb.height
+    mv = memoryview(fb.buf).cast("I")
+    out = Framebuffer(W // 2, H)
+    ow = out.width
+    dst = memoryview(out.buf).cast("I")
+    for y in range(H):
+        dst[y * ow:(y + 1) * ow] = mv[y * W:y * W + 2 * ow:2]
+    return out
+
+
+def has_passthrough(shell) -> bool:
+    """Is the wallpaper layer showing camera pixels (a ``blit``)? That is what mixed reality calls passthrough."""
+    wall = shell.wallpaper_layer()
+    return bool(wall and any(op[0] == "blit" for op in wall.ops))
+
+
+def render_stereo(shell, mixed: bool) -> Framebuffer:
+    """The interface once per eye, side by side. Every layer sits at a depth (the wallpaper far away, windows and the
+    sidebar nearer, effects and the pointer nearest): each eye sees it shifted by that depth's disparity, and moving the
+    pointer turns your head, which slides the far layers more than the near ones - so panels float in front of the picture.
+    Each eye is squeezed to half width (the usual half side-by-side format; a headset runtime widens it again and adds the
+    lens correction). Mixed reality is the same, but the wallpaper is the camera's passthrough when a camera driver
+    provides one. Pure Python: the two eyes are composed once and cached until something changes."""
+    from . import fbgfx
+    W, H, u = shell.W, shell.H, shell.u
+    yaw = int(round((shell.pointer[0] - W / 2) / (W / 2) * 4)) * 2 * u          # head turn: -8u .. 8u in steps of 2u
+    key = (shell._base_signature(), yaw, mixed)
+    cached = getattr(shell, "_stereo", None)
+    if cached and cached[0] == key:
+        eyes = cached[1]
+    else:
+        saved = {l.id: l.rect[0] for l in shell.layers.values()}
+        eyes = []
+        try:
+            for eye in (-1, 1):
+                for l in shell.layers.values():
+                    d = DEPTH.get(l.kind, 3)
+                    l.rect[0] = saved[l.id] + eye * d * u + int(yaw * (5 - d) / 5)
+                shell._base = shell._base_sig = None
+                eyes.append(shell.compose().copy())
+        finally:
+            for l in shell.layers.values():
+                l.rect[0] = saved[l.id]
+            shell._base = shell._base_sig = None
+            for l in shell.layers.values():
+                l.cache = None
+        shell._stereo = (key, eyes)
+    out = Framebuffer(W, H)
+    half_w = W // 2
+    cur = next((l for l in shell.layers.values() if l.kind == "cursor" and l.visible and l.ops), None)
+    for i, full in enumerate(eyes):
+        full = full.copy()
+        if cur is not None:                                  # the pointer is the nearest thing: it moves every frame, so it is never cached
+            was = cur.rect[0]
+            cur.rect[0] = was + (1 if i else -1) * DEPTH["cursor"] * u
+            shell._paint_content(full, cur)
+            cur.rect[0] = was
+        eye = hsqueeze(full)
+        for y in range(H):
+            out.buf[(y * W + i * half_w) * 4:(y * W + i * half_w + eye.width) * 4] = eye.buf[y * eye.width * 4:(y + 1) * eye.width * 4]
+    out.rect(half_w - u, 0, 2 * u, H, parse_color("#000000"))
+    face = ttf.load("bold")
+    label = "MIXED REALITY" if mixed else "VIRTUAL REALITY"
+    sub = ("passthrough: the camera shows behind the interface" if has_passthrough(shell)
+           else "no camera driver: the interface floats over the plain wallpaper") if mixed else "side by side, one picture per eye - move the pointer to look around"
+    if face:
+        px = 6 * u + 2
+        for i in (0, 1):
+            cx = i * half_w + half_w // 2
+            tw = int(face.width(label, px))
+            out.stext(cx - tw // 2 + 1, 3 * u + 1, label, "#000000", px, 1)          # in the empty middle of the top bar
+            out.stext(cx - tw // 2, 3 * u, label, "#4cb0ff", px, 1)
+            sans = ttf.load("sans")
+            if sans:                                                                 # the note sits above the dock, clear of everything
+                sw = int(sans.width(sub, px - 2))
+                out.stext(cx - sw // 2 + 1, H - 84 * u + 1, sub, "#000000", px - 2, 0)
+                out.stext(cx - sw // 2, H - 84 * u, sub, "#ffffff", px - 2, 0)
+    return out
+
+
+# ------------------------------------------------------------------------------------- neural
+def neural_hud(shell, fb: Framebuffer, controls: list, nav: int, progress: float, state: dict) -> None:
+    """The neural look's card: what is selected, how long until the scan moves on, what each intent does, and whether a
+    neural driver is connected. The scan moves on its own, so one switch-like signal is enough to use the interface."""
+    from . import fbgfx
+    W, H, u = shell.W, shell.H, shell.u
+    cw, ch = min(W - 40 * u, 220 * u), 46 * u
+    x, y = (W - cw) // 2, H - ch - 80 * u                  # above the dock, so the highlight on it stays visible
+    fbgfx.shadow(fb, x, y, cw, ch, spread=8 * u, strength=0.55, dy=4 * u)
+    fbgfx.blend(fb, x, y, cw, ch, "#0b0f16", 0.86)
+    fbgfx.border(fb, x, y, cw, ch, "#ffffff", "#000000", 0.4)
+    bold, sans = ttf.load("bold"), ttf.load("sans")
+    if not (bold and sans):
+        return
+    px = 6 * u + 2
+    paused = state.get("paused")
+    driver = state.get("driver")
+    fb.rect(x + 8 * u, y + 7 * u, 36 * u, 11 * u, parse_color(ACCENT))
+    fb.stext(x + 12 * u, y + 8 * u, "NEURAL", "#ffffff", px - 1, 1)
+    status = ("paused" if paused else "scanning") + ("" if driver else " - no neural driver connected (keyboard still works)")
+    fb.stext(x + 50 * u, y + 9 * u, status, "#9fb2c8", px - 1, 0)
+    label = controls[nav].label if 0 <= nav < len(controls) else "nothing to select"
+    fb.stext(x + 8 * u, y + 21 * u, label[:40], "#ffffff", 9 * u, 1)
+    bw = cw - 16 * u
+    fb.rect(x + 8 * u, y + ch - 12 * u, bw, 3 * u, parse_color("#2a303b"))
+    if not paused:
+        fb.rect(x + 8 * u, y + ch - 12 * u, max(1, int(bw * min(1.0, progress))), 3 * u, parse_color(ACCENT))
+    last = state.get("last")
+    legend = "next / prev move - select presses - back closes - pause stops the scan" + (f"      last: {last}" if last else "")
+    fb.stext(x + 8 * u, y + ch - 9 * u + 1, legend[:90], "#7f8da3", px - 3, 0)
 
 
 # ------------------------------------------------------------------------------------ the stack

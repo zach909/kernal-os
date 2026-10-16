@@ -96,6 +96,33 @@ class Framebuffer:
                     if bits & (0x10 >> col):
                         self.rect(gx + col * scale, y + row * scale, scale, scale, color)
 
+    def blit(self, x: int, y: int, w: int, h: int, scale: int, b64: str) -> None:
+        """Raw RGB pixels (base64), drawn ``scale`` times larger, clipped to the framebuffer."""
+        import base64
+        raw = base64.b64decode(b64)
+        if len(raw) != w * h * 3:
+            return
+        W, H = self.width, self.height
+        ow = w * scale
+        x0, x1 = max(0, x), min(W, x + ow)
+        if x1 <= x0:
+            return
+        for r in range(h):
+            row = raw[r * w * 3:(r + 1) * w * 3]
+            px = bytearray(w * 4)
+            px[0::4], px[1::4], px[2::4] = row[2::3], row[1::3], row[0::3]
+            if scale > 1:
+                words, wide = memoryview(px).cast("I"), bytearray(ow * 4)
+                ew = memoryview(wide).cast("I")
+                for k in range(scale):
+                    ew[k::scale] = words
+                px = wide
+            seg = px[(x0 - x) * 4:(x1 - x) * 4]
+            for k in range(scale):
+                yy = y + r * scale + k
+                if 0 <= yy < H:
+                    self.buf[(yy * W + x0) * 4:(yy * W + x1) * 4] = seg
+
     def poly(self, pts: list, color: str, alpha: int = 255) -> None:
         """An anti-aliased filled polygon (non-zero winding, exact pixel coverage), blended at ``alpha``."""
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
@@ -150,6 +177,8 @@ class Framebuffer:
                 self.stext(op[1], op[2], op[3], op[4], op[5], op[6])
             elif kind == "poly":
                 self.poly(op[1], op[2], op[3])
+            elif kind == "blit":
+                self.blit(op[1], op[2], op[3], op[4], op[5], op[6])
             # "hit" declares a control and draws nothing
 
 

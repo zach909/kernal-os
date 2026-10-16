@@ -1,0 +1,11 @@
+{
+  "name": "camsim",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": [],
+  "slot": "wallpaper",
+  "driver": "camera",
+  "description": "A camera EMULATOR for mixed reality: a moving test scene sent as passthrough pixels. Not a real camera."
+}

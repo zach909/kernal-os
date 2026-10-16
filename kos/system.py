@@ -129,7 +129,7 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
         release()                          # e.g. close the TTY before forking the broker
     paths.ensure()
     cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime in ("npm", "bundle"))
-    loader.apply_to_policy(policy, app, cache_dir)
+    loader.apply_to_policy(policy, app, cache_dir, paths.data_dir(name))
     registry = Registry(paths)
     registry.prune()
     inst_id = registry.new_id(name)
@@ -140,7 +140,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     ticks="ticks" in app.manifest.permissions,
                     shell="shell" in app.manifest.permissions,
                     pointer="pointer" in app.manifest.permissions,
-                    animate="animate" in app.manifest.permissions)
+                    animate="animate" in app.manifest.permissions,
+                    neural="neural" in app.manifest.permissions)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)

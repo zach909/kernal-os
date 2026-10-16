@@ -38,6 +38,34 @@ class Paths:
         return self.state / "log"
 
     @property
+    def appdata(self) -> Path:
+        """One private folder per app lives here: ``appdata/<name>/``. It survives restarts and updates."""
+        return self.state / "appdata"
+
+    def data_dir(self, name: str) -> Path:
+        """This app's own folder, made on first use. Only that app (inside its sandbox) can write to it; nothing else is
+        mounted into it. Removing the app keeps it (reinstalling gets your data back) until you ask to purge it."""
+        d = self.appdata / name
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.appdata, 0o700)
+        os.chmod(d, 0o700)
+        if os.geteuid() == 0:                                   # dev/test as root: apps run as 'nobody'
+            for parent in (self.appdata, *self.appdata.parents):   # nobody must be able to walk down to its folder
+                mode = parent.stat().st_mode
+                if not mode & 0o001:
+                    os.chmod(parent, mode | 0o001)               # search only: it still cannot list or read them
+            os.chown(d, 65534, 65534)
+        return d
+
+    def purge_data(self, name: str) -> bool:
+        import shutil
+        d = self.appdata / name
+        if not d.is_dir() or d.is_symlink():
+            return False
+        shutil.rmtree(d)
+        return True
+
+    @property
     def cells(self) -> Path:
         return self.state / "cells"
 

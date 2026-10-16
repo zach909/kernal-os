@@ -562,6 +562,93 @@ class TestWatcher(unittest.TestCase):
             self.assertEqual(result.findings[0].rule, "eicar-test-file")
 
 
+
+
+class TestEncryptionReport(Env):
+    """`kos encryption` reads /proc and /sys, so a pretend machine can be fed to it."""
+
+    def machine(self, *, mounts, swaps="Filename Type Size Used Priority\n", cpu="flags : fpu vme", cmdline="ro quiet",
+                dm=(), plain=(), dumpable="0", power="freeze mem"):
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        proc, sysfs = root / "proc", root / "sys"
+        (proc / "sys" / "kernel").mkdir(parents=True)
+        (proc / "sys" / "fs").mkdir(parents=True)
+        (proc / "mounts").write_text(mounts)
+        (proc / "swaps").write_text(swaps)
+        (proc / "cpuinfo").write_text(cpu + "\n")
+        (proc / "cmdline").write_text(cmdline)
+        (proc / "sys" / "kernel" / "core_pattern").write_text("core\n")
+        (proc / "sys" / "fs" / "suid_dumpable").write_text(dumpable + "\n")
+        (sysfs / "power").mkdir(parents=True)
+        (sysfs / "power" / "state").write_text(power + "\n")
+        for name, uuid, slaves in dm:                          # (kernel name, dm uuid, [devices it sits on])
+            d = sysfs / "class" / "block" / name
+            (d / "dm").mkdir(parents=True)
+            (d / "dm" / "uuid").write_text(uuid + "\n")
+            (d / "slaves").mkdir()
+            for sl in slaves:
+                (d / "slaves" / sl).mkdir()
+        for name in plain:
+            (sysfs / "class" / "block" / name).mkdir(parents=True, exist_ok=True)
+        return str(proc), str(sysfs)
+
+    def items(self, **kw):
+        from kos import encryption
+        proc, sysfs = self.machine(**kw)
+        return {i.layer: i for i in encryption.check(proc, sysfs)}
+
+    def test_a_root_on_luks_is_encrypted_and_a_plain_root_is_not(self):
+        enc = self.items(mounts="/dev/dm-0 / ext4 rw 0 0\n", dm=[("dm-0", "CRYPT-LUKS2-abc-root", ["vda2"])], plain=["vda2"])
+        self.assertEqual(enc["disk (at rest)"].status, "ok")
+        lvm = self.items(mounts="/dev/dm-1 / ext4 rw 0 0\n",
+                         dm=[("dm-1", "LVM-xyz", ["dm-0"]), ("dm-0", "CRYPT-LUKS2-abc", ["vda2"])], plain=["vda2"])
+        self.assertEqual(lvm["disk (at rest)"].status, "ok")                    # LUKS underneath LVM counts
+        bad = self.items(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"])
+        self.assertEqual(bad["disk (at rest)"].status, "no")
+        self.assertIn("luks", bad["disk (at rest)"].fix.lower())
+
+    def test_swap_must_be_absent_or_encrypted(self):
+        none = self.items(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"])
+        self.assertEqual(none["swap"].status, "ok")
+        bad = self.items(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2", "vda3"],
+                         swaps="Filename Type Size Used Priority\n/dev/vda3 partition 100 0 -2\n")
+        self.assertEqual(bad["swap"].status, "no")
+        filebad = self.items(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"],
+                             swaps="Filename Type Size Used Priority\n/swapfile file 100 0 -2\n")
+        self.assertEqual(filebad["swap"].status, "no")
+        good = self.items(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"], dm=[("dm-5", "CRYPT-PLAIN-swap", ["vda3"])],
+                          swaps="Filename Type Size Used Priority\n/dev/dm-5 partition 100 0 -2\n")
+        self.assertEqual(good["swap"].status, "ok")
+        z = self.items(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"],
+                       swaps="Filename Type Size Used Priority\n/dev/zram0 partition 100 0 100\n")
+        self.assertEqual(z["swap"].status, "partial")
+
+    def test_ram_encryption_is_reported_honestly(self):
+        base = dict(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"])
+        self.assertEqual(self.items(**base)["RAM"].status, "no")                                    # no CPU feature
+        can = self.items(cpu="flags : fpu sme", **base)["RAM"]
+        self.assertEqual(can.status, "unknown")                                                     # capable, not confirmed
+        self.assertIn("mem_encrypt=on", can.fix)
+        asked = self.items(cpu="flags : fpu sme", cmdline="ro mem_encrypt=on", **base)["RAM"]
+        self.assertEqual(asked.status, "unknown")                                                   # still not claimed active
+        self.assertIn("dmesg", asked.detail)
+        self.assertEqual(self.items(cpu="flags : fpu tdx_guest", **base)["RAM"].status, "ok")      # an encrypted guest
+
+    def test_hibernation_and_core_dumps_are_flagged(self):
+        base = dict(mounts="/dev/vda2 / ext4 rw 0 0\n", plain=["vda2"])
+        self.assertEqual(self.items(cmdline="ro resume=/dev/vda3", power="freeze mem disk", **base)["hibernation"].status, "no")
+        self.assertEqual(self.items(**base)["hibernation"].status, "ok")
+        self.assertEqual(self.items(dumpable="2", **base)["core dumps"].status, "no")
+
+    def test_harden_turns_off_dumps_and_attaching(self):
+        out = _sp.run([sys.executable, "-c",
+                              "import ctypes,resource;from kos import encryption as e;r=e.harden();"
+                              "print(r, ctypes.CDLL(None).prctl(3,0,0,0,0), resource.getrlimit(resource.RLIMIT_CORE))"],
+                             cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True)
+        self.assertIn("'dumpable_off': True", out.stdout, out.stderr)
+        self.assertIn("0 (0, 0)", out.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1723,11 +1810,47 @@ class TestOffsite(AdminEnv):
     def test_push_sends_the_backup_to_a_private_repository_after_the_password(self):
         msg = self.off.push(self.authority(PW), self.info["name"])
         self.assertIn(self.info["name"], msg)
-        self.assertTrue(self.remote_has(self.info["name"]))
-        blob = _sp.run(["git", "--git-dir", str(self.bare), "show", f"main:{self.info['name']}"],
-                       capture_output=True).stdout
-        self.assertEqual(blob, Path(self.info["path"]).read_bytes())
+        sealed = self.info["name"] + ".kenc"
+        self.assertTrue(self.remote_has(sealed))
+        self.assertFalse(self.remote_has(self.info["name"]))           # the plain backup never leaves
+        blob = _sp.run(["git", "--git-dir", str(self.bare), "show", f"main:{sealed}"], capture_output=True).stdout
+        plain = Path(self.info["path"]).read_bytes()
+        self.assertTrue(blob.startswith(b"KOSENC1\n"))
+        self.assertNotIn(b"alpha", blob)
+        self.assertNotIn(plain[:30], blob)                               # not even the zip header shows
+        out = Path(self.tmp.name) / "opened.zip"
+        enc = Path(self.tmp.name) / "got.kenc"
+        enc.write_bytes(blob)
+        self.off.decrypt(self.authority(PW), enc, out)
+        self.assertEqual(out.read_bytes(), plain)                        # and it opens with the password
+        from kos import vault
+        with self.assertRaises(vault.VaultError) as ctx:                  # e.g. sealed under an older password
+            vault.decrypt_file(enc, Path(self.tmp.name) / "no.zip", b"x" * 32)
+        self.assertIn("wrong password", str(ctx.exception))
+        self.assertFalse((Path(self.tmp.name) / "no.zip").exists())
         self.off.push(self.authority(PW), self.info["name"])           # pushing again is fine
+
+    def test_encryption_detects_tampering_truncation_and_reordering(self):
+        from kos import vault
+        key = b"k" * 32
+        src, enc, out = (Path(self.tmp.name) / n for n in ("p.bin", "p.kenc", "p.out"))
+        src.write_bytes(os.urandom(vault.CHUNK * 2 + 123))              # three chunks
+        vault.encrypt_file(src, enc, key)
+        vault.decrypt_file(enc, out, key)
+        self.assertEqual(out.read_bytes(), src.read_bytes())
+        data = enc.read_bytes()
+        cases = {"flip": data[:100] + bytes([data[100] ^ 1]) + data[101:], "cut": data[:-50],
+                 "dropped last chunk": data[:len(vault.MAGIC) + 24 + 4 + vault.CHUNK + 16 + 4 + vault.CHUNK + 16],
+                 "empty": b"", "other": b"hello"}
+        for name, bad in cases.items():
+            enc.write_bytes(bad)
+            with self.assertRaises(vault.VaultError, msg=name):
+                vault.decrypt_file(enc, out, key)
+        enc.write_bytes(data)
+        with self.assertRaises(vault.VaultError):
+            vault.decrypt_file(enc, out, b"x" * 32)
+        vault.encrypt_file(src, Path(self.tmp.name) / "p2.kenc", key)     # fresh salt/nonce each time
+        self.assertNotEqual((Path(self.tmp.name) / "p2.kenc").read_bytes()[:40], data[:40])
 
     def test_a_publicly_readable_repository_is_refused_before_any_password(self):
         self.public[0] = True
@@ -1790,7 +1913,7 @@ class TestOffsite(AdminEnv):
                 {"cmd": "request", "action": "push", "backup": self.info["name"]},
                 sent.append, self.authority(PW))
         self.assertEqual(sent[-1]["cmd"], "text")
-        self.assertTrue(self.remote_has(self.info["name"]))
+        self.assertTrue(self.remote_has(self.info["name"] + ".kenc"))
         self.public[0] = True
         with mock.patch("kos.offsite.Offsite", lambda paths: self.off):
             SystemBridge(self.paths).handle(
@@ -2191,6 +2314,75 @@ def make_kapp(tmp: Path, version: str, *, permissions=(), extra: bytes = b"", na
     out = tmp / f"{name}-{version}-{len(permissions)}{'x' if extra else ''}.kapp"
     pack(src / name, out)
     return out
+
+
+class TestAppFolders(Env):
+    """Every app has its own folder: persistent, writable by that app alone, kept when the app is removed."""
+
+    DRIVER = (
+        "import json, os\n"
+        "from kos.sdk import App\n"
+        "def main():\n"
+        "    app = App()\n"
+        "    for ev in app.events():\n"
+        "        if ev.get('cmd') != 'launch': continue\n"
+        "        job = json.loads(json.loads(ev['line'])['program']); d = os.environ.get('KOS_DATA_DIR'); out = {'dir': d}\n"
+        "        f = os.path.join(d, 'note.txt')\n"
+        "        out['before'] = open(f).read() if os.path.exists(f) else ''\n"
+        "        open(f, 'a').write(job['text'])\n"
+        "        for other in job.get('peek', []):\n"
+        "            try: out['peek_' + os.path.basename(other)] = os.listdir(other)\n"
+        "            except OSError as e: out['peek_' + os.path.basename(other)] = 'denied'\n"
+        "        try: open(os.path.join(os.path.dirname(d), 'x-planted'), 'w').write('x'); out['planted'] = True\n"
+        "        except OSError: out['planted'] = False\n"
+        "        app.log('RESULT ' + json.dumps(out)); return\n")
+
+    def install(self, name):
+        src = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (src / "driver.py").write_text(self.DRIVER)
+        (src / "manifest.json").write_text(json.dumps({
+            "name": name, "version": "1.0", "runtime": "python", "entry": "driver:main", "modes": ["cmd"],
+            "permissions": [], "driver": "quantum", "description": "test"}))
+        kapp = Path(self.tmp.name) / f"{name}.kapp"
+        pack(src, kapp)
+        AppStore(self.paths).install(kapp, self.authority(PW))
+        from kos.permit import PermitStore
+        PermitStore(self.paths).grant(name)
+
+    def job(self, name, payload):
+        from kos import qjob
+        return qjob.run_job(self.paths, self.authority(PW), name, {"program": json.dumps(payload)})
+
+    def test_the_folder_persists_between_runs_and_is_private_to_its_app(self):
+        self.install("alpha")
+        self.install("beta")
+        a1 = self.job("alpha", {"text": "one;"})
+        self.assertEqual((a1["before"], a1["dir"]), ("", str(self.paths.appdata / "alpha")))
+        b1 = self.job("beta", {"text": "other;", "peek": [str(self.paths.appdata / "alpha")]})
+        self.assertEqual(b1["before"], "")                                    # beta did not see alpha's file
+        self.assertEqual(b1["peek_alpha"], "denied")                          # and cannot list alpha's folder
+        a2 = self.job("alpha", {"text": "two;"})
+        self.assertEqual(a2["before"], "one;")                                # alpha's own data came back
+        self.assertFalse(a2["planted"])                                       # it cannot write next to its folder either
+
+    def test_removing_an_app_keeps_its_folder_until_you_purge_it(self):
+        self.install("alpha")
+        self.job("alpha", {"text": "keep;"})
+        AppStore(self.paths).remove("alpha", self.authority(PW))
+        self.assertTrue((self.paths.appdata / "alpha" / "note.txt").exists())
+        self.install("alpha")
+        self.assertEqual(self.job("alpha", {"text": ""})["before"], "keep;")
+        self.assertTrue(self.paths.purge_data("alpha"))
+        self.assertFalse((self.paths.appdata / "alpha").exists())
+        self.assertFalse(self.paths.purge_data("alpha"))
+
+    def test_the_folder_is_made_private_and_a_stray_link_is_never_followed_by_purge(self):
+        d = self.paths.data_dir("gamma")
+        self.assertEqual(oct(d.stat().st_mode & 0o777), oct(0o700) if os.geteuid() else oct(0o700))
+        link = self.paths.appdata / "delta"
+        link.symlink_to(self.tmp.name)
+        self.assertFalse(self.paths.purge_data("delta"))
+        self.assertTrue(Path(self.tmp.name).exists())
 
 
 class TestProvenance(Env):
@@ -4368,3 +4560,175 @@ class TestQuantumHardwareLayer(Env):
         for bad in (dict(op="run", program=""), dict(op="run", program="h q;", shots=0), dict(op="run", program="h q;", driver="../x"), dict(op="teleport")):
             with self.assertRaises(ProtocolError, msg=bad):
                 validate_app_message({"cmd": "request", "action": "quantum", **bad}, "graphical")
+
+
+from kos.kapp import Manifest  # noqa: E402
+
+
+class TestImmersiveLooks(Env):
+    """Virtual reality, mixed reality and the neural look: each asks for the password, none is restored at start, and a neural
+    driver can only ever say next / prev / select / back / pause."""
+
+    layer = TestLooksAndControls.layer
+
+    def shell_with(self, *answers, w=640, h=360):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(*answers), HeadlessBackend(w, h), ScriptedDevices(), preboot=(),
+                     keep_prompter=True)
+
+    def test_every_action_has_a_layer_and_the_immersive_ones_always_ask(self):
+        from kos import auth
+        self.assertEqual(set(auth.ACTIONS) - set(auth.LAYER_OF), set())          # nothing is outside the layers
+        self.assertIn("look.immersive", auth.NEVER_REMEMBERED)
+        self.assertNotIn("look.immersive", auth.KEYLESS)                         # "interface: don't ask" does not skip it
+
+    def test_an_immersive_look_needs_the_password_and_is_not_restored(self):
+        sh = self.shell_with(PW)
+        sh.set_look(look="vr")
+        self.assertEqual(sh.cfg["look"], "normal")                               # refused without the password
+        ok, _ = sh.authorize_immersive("vr")
+        self.assertTrue(ok)
+        sh.set_look(look="vr", authorized=True)
+        self.assertEqual(sh.cfg["look"], "vr")
+        again = self.shell_with()                                                # a new session starts in a normal look
+        self.assertNotIn(again.cfg["look"], ("vr", "mr", "neural"))
+        wrong = self.shell_with("not the password", "still not", "no")
+        ok, why = wrong.authorize_immersive("neural")
+        self.assertFalse(ok)
+        self.assertIn("password", why)
+
+    def test_a_sudo_window_does_not_stand_in_for_the_password(self):
+        sh = self.shell_with(PW, "x", "x", "x")                                  # one answer opens the window; none left for the look
+        sh.authority.sudo_open(5, ("interface", "app", "command"))
+        ok, _ = sh.authorize_immersive("mr")
+        self.assertFalse(ok)
+
+    def test_vr_renders_one_picture_per_eye_with_depth_and_leaves_the_layers_alone(self):
+        sh = self.shell_with(PW)
+        dock = self.layer(sh, "dock", "dock", (100, 280, 200, 50), ops=[["rect", 0, 0, 200, 50, "#ff0000"]])
+        win = self.layer(sh, "win", "window", (200, 60, 200, 120), ops=[["rect", 0, 0, 200, 120, "#00ff00"]])
+        before = (list(dock.rect), list(win.rect))
+        sh.set_look(look="vr", authorized=True)
+        sh.render()
+        frame = sh.backend.frames[-1]
+        self.assertEqual((frame.width, frame.height), (640, 360))
+        half = frame.width // 2
+        left = [frame.pixel(x, 300) for x in range(0, half)]
+        right = [frame.pixel(half + x, 300) for x in range(0, half)]
+        red = lambda row: [i for i, p in enumerate(row) if p[0] > 200 and p[1] < 80]
+        self.assertTrue(red(left) and red(right))                                # the dock is in both eyes...
+        self.assertNotEqual(red(left)[0], red(right)[0])                         # ...at different places: disparity
+        self.assertEqual((list(dock.rect), list(win.rect)), before)              # layer positions were restored
+        sh.render()                                                              # the second frame comes from the cache
+        self.assertIs(sh._stereo[1][0], sh._stereo[1][0])
+
+    def test_mixed_reality_says_whether_there_is_a_passthrough(self):
+        sh = self.shell_with(PW)
+        sh.set_look(look="mr", authorized=True)
+        from kos import looks
+        self.assertFalse(looks.has_passthrough(sh))
+        wall = self.layer(sh, "wallpaper", "wallpaper", (0, 0, 640, 360),
+                          ops=[["blit", 0, 0, 2, 1, 160, __import__("base64").b64encode(b"\x10\x20\x30\x40\x50\x60").decode()]])
+        self.assertTrue(looks.has_passthrough(sh))
+        sh.render()                                                              # the camera pixels are the backdrop
+        frame = sh.backend.frames[-1]
+        self.assertEqual(frame.pixel(40, 100), (0x10, 0x20, 0x30))
+
+    def test_the_neural_look_scans_on_its_own_and_a_driver_can_only_send_five_decisions(self):
+        sh = self.shell_with(PW)
+        pressed = []
+        btn = self.layer(sh, "dock", "dock", (10, 300, 300, 40), ops=[["hit", 0, 0, 60, 30, "One"], ["hit", 70, 0, 60, 30, "Two"],
+                                                                      ["hit", 140, 0, 60, 30, "Three"]])
+        drv = self.layer(sh, "neurosim", "plain", (0, 0, 10, 10), neural=True)
+        stranger = self.layer(sh, "stranger", "plain", (0, 0, 10, 10))
+        self.assertFalse(sh.intent(drv, "next")[0])                              # not in the neural look yet
+        sh.set_look(look="neural", authorized=True)
+        self.assertTrue(sh.ring)
+        self.assertFalse(sh.intent(stranger, "next")[0])                         # a layer without the permission is refused
+        start = sh.nav
+        sh._neural_step(sh.neural["last_step"] + sh.NEURAL_DWELL + 0.01)         # time passes: the scan moves on its own
+        self.assertEqual(sh.nav, (start + 1) % len(sh.controls()))
+        sh.neural["last_intent_t"] = 0.0
+        self.assertTrue(sh.intent(drv, "prev")[0])
+        self.assertEqual(sh.nav, start)
+        sh.neural["last_intent_t"] = 0.0
+        self.assertTrue(sh.intent(drv, "pause")[0])
+        before = sh.nav
+        sh._neural_step(sh.neural["last_step"] + 100)
+        self.assertEqual(sh.nav, before)                                         # paused: it does not move
+        self.assertFalse(sh.intent(drv, "next")[0])                              # ...and decisions are rate limited
+        sh.render()
+        card = sh.backend.frames[-1]                                             # the card is drawn near the bottom, over the interface
+        self.assertNotEqual([card.pixel(x, 330) for x in range(200, 440, 8)], [card.pixel(x, 20) for x in range(200, 440, 8)])
+        sh.set_look(look="normal")                                               # leaving needs no password
+        self.assertEqual(sh.cfg["look"], "normal")
+
+    def test_protocol_accepts_five_intents_and_bounded_blits_and_nothing_else(self):
+        import base64
+        ok = validate_app_message({"cmd": "request", "action": "intent", "name": "select"}, "graphical")
+        self.assertEqual(ok["name"], "select")
+        for bad in ("raw", "eeg", "", None, 5, "SELECT"):
+            with self.assertRaises(ProtocolError, msg=repr(bad)):
+                validate_app_message({"cmd": "request", "action": "intent", "name": bad}, "graphical")
+        px = base64.b64encode(bytes(12)).decode()
+        validate_app_message({"cmd": "frame", "ops": [["blit", 0, 0, 2, 2, 1, px]]}, "graphical")
+        for op in (["blit", 0, 0, 2, 2, 1, "!!"], ["blit", 0, 0, 3, 2, 1, px], ["blit", 0, 0, 400, 400, 1, px],
+                   ["blit", 0, 0, 2, 2, 99, px], ["blit", 0, 0, 2, 2, 1, 5]):
+            with self.assertRaises(ProtocolError, msg=str(op)[:40]):
+                validate_app_message({"cmd": "frame", "ops": [op]}, "graphical")
+        for look in ("vr", "mr", "neural"):
+            validate_app_message({"cmd": "request", "action": "look", "op": "set", "look": look}, "graphical")
+
+    def test_only_a_neural_driver_may_hold_the_neural_permission(self):
+        base = {"name": "x", "version": "1", "runtime": "python", "entry": "m", "modes": ["graphical"]}
+        Manifest.parse(json.dumps({**base, "permissions": ["neural"], "driver": "neural"}).encode())
+        for extra in ({"permissions": ["neural"]}, {"permissions": ["neural"], "driver": "camera"},
+                      {"driver": "toaster"}):
+            with self.assertRaises(KAppError, msg=str(extra)):
+                Manifest.parse(json.dumps({**base, **extra}).encode())
+        for kind in ("xr", "camera", "neural", "quantum"):
+            Manifest.parse(json.dumps({**base, "driver": kind}).encode())
+
+    def test_the_neural_emulator_sends_only_the_five_decisions_and_draws_valid_frames(self):
+        import importlib.util
+        import select
+        drv = Path(__file__).resolve().parent.parent / "examples" / "drivers" / "neurosim" / "driver.py"
+        spec = importlib.util.spec_from_file_location("neurosim_driver", drv)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        a, b = socket.socketpair()
+        old = os.environ.get("KOS_CHANNEL_FD")
+        os.environ["KOS_CHANNEL_FD"] = str(b.fileno())
+        t = threading.Thread(target=mod.main, daemon=True)
+        t.start()
+        try:
+            ch = Channel(a)
+            ch.send({"cmd": "hello", "mode": "graphical", "width": 360, "height": 160, "scale": 1})
+            ch.send({"cmd": "tick", "t": 1})
+            seen, deadline = [], _time.time() + 5
+            while _time.time() < deadline and not any(m["cmd"] == "frame" for m in seen):
+                select.select([ch], [], [], 0.2)
+                seen += [validate_app_message(m, "graphical") for m in ch.receive()]
+            frame = next(m for m in seen if m["cmd"] == "frame")
+            hits = [op for op in frame["ops"] if op[0] == "hit"]
+            self.assertEqual(len(hits), 5)                                       # five buttons, one per decision
+            x, y = hits[2][1] + 2, hits[2][2] + 2                                # "select"
+            ch.send({"cmd": "button", "button": "left", "pressed": True, "x": x, "y": y})
+            deadline = _time.time() + 5
+            while _time.time() < deadline and not any(m.get("action") == "intent" for m in seen):
+                select.select([ch], [], [], 0.2)
+                seen += [validate_app_message(m, "graphical") for m in ch.receive()]
+            self.assertEqual([m["name"] for m in seen if m.get("action") == "intent"], ["select"])
+            ch.send({"cmd": "quit"})
+        finally:
+            if old is None:
+                os.environ.pop("KOS_CHANNEL_FD", None)
+            else:
+                os.environ["KOS_CHANNEL_FD"] = old
+            a.close()
+
+    def test_the_emulators_are_valid_and_say_what_they_are(self):
+        root = Path(__file__).resolve().parent.parent / "examples" / "drivers"
+        for name in ("camsim", "neurosim"):
+            m = Manifest.parse((root / name / "manifest.json").read_bytes())
+            self.assertIn("EMULATOR", m.description.upper())

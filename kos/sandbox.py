@@ -124,6 +124,8 @@ class SandboxPolicy:
     ro_files: list[str] = field(default_factory=lambda: ["/dev/urandom"])
     # Device nodes the owner agreed to give this app for this run (read, write and ioctl): see apps' "devices" manifest key.
     device_paths: list[str] = field(default_factory=list)
+    # The app's own persistent folder (``Paths.data_dir``); also in rw_dirs. Handed to the app as KOS_DATA_DIR.
+    data_dir: Optional[str] = None
     max_open_files: int = 256
     max_memory: int = 4 << 30
     # Development escape hatch; never set on a real install.

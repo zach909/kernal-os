@@ -54,6 +54,12 @@ class Canvas:
         self.ops.append(["hit", int(x), int(y), int(w), int(h), str(label)])
         return self
 
+    def blit(self, x: int, y: int, w: int, h: int, rgb: bytes, scale: int = 1) -> "Canvas":
+        """Raw RGB pixels (``w*h*3`` bytes), drawn ``scale`` times larger: a camera preview, say."""
+        import base64
+        self.ops.append(["blit", int(x), int(y), int(w), int(h), int(scale), base64.b64encode(rgb).decode()])
+        return self
+
     def poly(self, pts, color: str, alpha: int = 255) -> "Canvas":
         """A smooth (anti-aliased) filled shape: ``pts`` is a list of (x, y)."""
         self.ops.append(["poly", [[float(x), float(y)] for x, y in pts], color, int(alpha)])
@@ -220,6 +226,11 @@ class App:
     def request_restore(self, backup: str, member: str, to: str) -> None:
         self.send({"cmd": "request", "action": "restore", "backup": backup, "member": member, "to": to})
 
+    def request_intent(self, name: str) -> None:
+        """A neural driver (``"driver": "neural"``): one decision - next, prev, select, back or pause - made from the wearer's
+        signals. The signals themselves never leave the driver."""
+        self.send({"cmd": "request", "action": "intent", "name": name})
+
     def request_line(self, text: str) -> None:
         self.send({"cmd": "request", "action": "line", "text": text})
 
@@ -228,6 +239,10 @@ class App:
         didn't provide one. It is wiped the moment this app's process ends -
         never use it for anything you need to keep."""
         return os.environ.get("KOS_CACHE_DIR")
+
+    def data_dir(self) -> Optional[str]:
+        """This app's own folder: private to it, persistent across runs and updates. Put what you want to keep here."""
+        return os.environ.get("KOS_DATA_DIR")
 
     def resource(self, name: str) -> bytes:
         """Read a file from this app's own zip (still never extracted)."""

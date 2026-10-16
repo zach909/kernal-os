@@ -56,7 +56,7 @@ import socket
 import sys
 from pathlib import Path
 
-from . import loader
+from . import loader, looks
 from .admin import AdminError, WriteBlocked
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
@@ -363,6 +363,11 @@ def cmd_remove(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
     AppStore(paths).remove(args.name, authority)
     print(f"removed {args.name}")
+    if args.purge_data:
+        print("its folder was deleted" if paths.purge_data(args.name) else "it had no folder")
+    elif (paths.appdata / args.name).is_dir():
+        print(f"its folder is kept ({paths.appdata / args.name}); reinstalling gets your data back. "
+              f"`kos remove {args.name} --purge-data` deletes it.")
     return 0
 
 
@@ -412,7 +417,7 @@ def cmd_run(args, paths: Paths) -> int:
         proc = None
     else:
         cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime in ("npm", "bundle"))
-        loader.apply_to_policy(policy, app, cache_dir)
+        loader.apply_to_policy(policy, app, cache_dir, paths.data_dir(name))
         sock, child = socket.socketpair()
         proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir), policy, log_path)
         child.close()
@@ -596,7 +601,13 @@ def _shot(args, paths: Paths) -> int:
         while _t.monotonic() < end:
             shell.pump(0.1)                                  # let the apps draw; paint only once, at the end
         if args.look:
-            shell.set_look(look=args.look)
+            if args.look in looks.IMMERSIVE:                  # the same password a person is asked for
+                ok, why = shell.authorize_immersive(args.look)
+                if not ok:
+                    raise KAppError(why)
+                shell.set_look(look=args.look, authorized=True)
+            else:
+                shell.set_look(look=args.look)
         if args.demo_notes:
             for title, body in (("Update available", "Files 1.1 is ready to install from your sources."),
                                 ("Backup finished", "Documents were backed up and scanned: 214 files, nothing flagged."),
@@ -1009,6 +1020,21 @@ def cmd_doctor(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_encryption(args, paths: Paths) -> int:
+    """`kos encryption`: is everything encrypted? Layer by layer, honestly."""
+    from . import encryption
+    mark = {"ok": "yes    ", "no": "NO     ", "partial": "partly ", "unknown": "unknown"}
+    items = encryption.check()
+    for i in items:
+        print(f"{mark[i.status]} {i.layer:<18} {i.detail}")
+        if i.fix and i.status != "ok":
+            print(f"        fix: {i.fix}")
+    bad = [i.layer for i in items if i.status == "no"]
+    print("\n" + ("everything KOS can check is encrypted or protected." if not bad and all(i.status != "unknown" for i in items)
+                  else "not everything is encrypted yet: " + (", ".join(bad) or "some layers could not be confirmed")))
+    return 0
+
+
 def cmd_audit(args, paths: Paths) -> int:
     import time
     from .auth import AuditLog
@@ -1203,6 +1229,13 @@ def cmd_offsite(args, paths: Paths) -> int:
         print("off-site repository:", off.set_remote(authority, args.arg))
         prompter.close()
         return 0
+    if args.offsite_cmd == "decrypt":
+        if not (args.arg and args.out):
+            raise KAppError("usage: kos offsite decrypt FILE.kenc OUT")
+        authority, prompter = _authority(paths)
+        print(off.decrypt(authority, Path(args.arg), Path(args.out)))
+        prompter.close()
+        return 0
     if not args.arg:
         raise KAppError("usage: kos offsite push BACKUP")
     authority, prompter = _authority(paths)
@@ -1313,8 +1346,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--from", dest="from_dir", help="directory to check for updates (with 'all')")
     s = sub.add_parser("view", help="view a file (asks for the password)")
     s.add_argument("file")
-    s = sub.add_parser("remove", help="remove an app")
+    s = sub.add_parser("remove", help="remove an app (its data folder is kept unless --purge-data)")
     s.add_argument("name")
+    s.add_argument("--purge-data", action="store_true", help="also delete the app's own folder")
     sub.add_parser("list", help="list installed apps")
     s = sub.add_parser("run", help="run an app: run [graphical|cmd] NAME")
     s.add_argument("target", nargs="+")
@@ -1339,7 +1373,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--open", help="shot: comma-separated apps to open as windows")
     s.add_argument("--search", help="shot: text to type into the desktop search")
     s.add_argument("--wait", type=float, default=2.5, help="shot: seconds to let apps draw")
-    s.add_argument("--look", choices=["normal", "3d", "text", "terminal"], help="shot: the look to render in")
+    s.add_argument("--look", choices=["normal", "3d", "vr", "mr", "neural", "text", "terminal"], help="shot: the look to render in")
     s.add_argument("--point", help="shot: move the pointer to X,Y")
     s.add_argument("--click", help="shot: click at X,Y (the shot is taken a moment later, mid-effect)")
     s.add_argument("--keys", help="shot: comma-separated key names to press, e.g. tab,tab")
@@ -1375,6 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    sub.add_parser("encryption", help="is everything encrypted? disk, swap, RAM, scratch, backups - honestly")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
     s = sub.add_parser("admin", help="the elevated administrator keyboard")
@@ -1382,8 +1417,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("backup", help="back a file or folder up (no PATH lists backups)")
     s.add_argument("path", nargs="?")
     s = sub.add_parser("offsite", help="push backups to your PRIVATE GitHub repository")
-    s.add_argument("offsite_cmd", choices=["remote", "push"])
-    s.add_argument("arg", nargs="?", help="remote: the GitHub URL; push: the backup name")
+    s.add_argument("offsite_cmd", choices=["remote", "push", "decrypt"])
+    s.add_argument("arg", nargs="?", help="remote: the GitHub URL; push: the backup name; decrypt: the .kenc file")
+    s.add_argument("out", nargs="?", help="decrypt: where to write the opened backup")
     s = sub.add_parser("restore", help="restore one file from a backup (guarded write)")
     s.add_argument("backup")
     s.add_argument("member")
@@ -1420,13 +1456,15 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
+            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "provenance": cmd_provenance, "sources": cmd_sources, "updates": cmd_updates, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    from .encryption import harden
+    harden()                                               # no core dumps, not attachable: secrets stay in this process
     paths = Paths.from_env()
     try:
         return COMMANDS[args.cmd](args, paths)
