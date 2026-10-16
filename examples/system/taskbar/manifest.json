@@ -8,7 +8,7 @@
     "graphical"
   ],
   "permissions": [
-    "system"
+    "system:apps"
   ],
   "description": "The desktop's home bar: shows what is open and switches to it. Right mouse = App Library."
 }

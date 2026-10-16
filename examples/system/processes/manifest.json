@@ -7,8 +7,10 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:os",
+    "system:processes"
   ],
   "description": "Process manager: every task, its state and scheduling, signals, priority, and IPC channels.",
   "commands": [

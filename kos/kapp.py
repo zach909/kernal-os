@@ -33,6 +33,8 @@ import re
 import stat
 import zipfile
 from dataclasses import dataclass, field
+
+from . import capabilities
 from pathlib import Path
 
 MANIFEST = "manifest.json"
@@ -87,6 +89,11 @@ class Manifest:
     devices: tuple[str, ...] = ()       # device nodes (globs under /dev) it asks to open - asked again at every launch
     driver: str = ""                    # the kind of hardware it is a driver for (see DRIVER_KINDS)
 
+    @property
+    def scopes(self) -> frozenset:
+        """What it may ask the OS to do: ``{"*"}`` for the bare ``system`` permission, else its ``system:<scope>`` ones."""
+        return capabilities.scopes_of(self.permissions)
+
     @classmethod
     def parse(cls, raw: bytes) -> "Manifest":
         try:
@@ -112,8 +119,8 @@ class Manifest:
         if not modes or not set(modes) <= MODES or not all(isinstance(m, str) for m in modes):
             raise KAppError(f"modes must be a non-empty subset of {sorted(MODES)}")
         perms = tuple(d.get("permissions", []))
-        if not set(perms) <= PERMISSIONS:
-            raise KAppError(f"permissions must be a subset of {sorted(PERMISSIONS)}")
+        if not all(isinstance(p, str) for p in perms) or not set(perms) <= PERMISSIONS | {p for p in perms if p.startswith(capabilities.PREFIX) and capabilities.valid(p)}:
+            raise KAppError(f"permissions must be a subset of {sorted(PERMISSIONS)} or system:<scope> with a scope from {sorted(capabilities.SCOPES)}")
         desc = d.get("description", "")
         if not isinstance(desc, str) or len(desc) > 200:
             raise KAppError("description must be a string of at most 200 characters")

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .paths import Paths, atomic_write
@@ -44,6 +44,7 @@ class Instance:
     shell: bool = False       # manifest has 'shell': may resize its own layer / arrange the widgets
     pointer: bool = False     # manifest has 'pointer': is told where the pointer is and where clicks land
     animate: bool = False     # manifest has 'animate': may ask for ~24 animation ticks a second while it needs them
+    scopes: list = field(default_factory=list)   # which system:<scope> permissions it holds (["*"] = the bare 'system')
     neural: bool = False      # manifest has 'neural' (a neural driver): may send intents while the neural look is on
 
 

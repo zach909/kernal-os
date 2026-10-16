@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import backup as backups_mod
+from . import capabilities
 from . import loader
 from . import fschange, osinfo, proctl
 from . import cache, sysinfo
@@ -136,7 +137,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
                     sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
                     log_path=str(paths.logs / f"{inst_id}.log"), started=time.time(),
-                    system="system" in app.manifest.permissions,
+                    system=bool(app.manifest.scopes),
+                    scopes=sorted(app.manifest.scopes),
                     ticks="ticks" in app.manifest.permissions,
                     shell="shell" in app.manifest.permissions,
                     pointer="pointer" in app.manifest.permissions,
@@ -169,9 +171,10 @@ class SystemBridge:
     """Answers one app's ``request`` commands. ``handle`` returns a switch
     target - ``("instance", id)`` - when the request moves the desktop."""
 
-    def __init__(self, paths: Paths, spawner: Callable = spawn):
+    def __init__(self, paths: Paths, spawner: Callable = spawn, scopes=None):
         self.paths = paths
         self._spawner = spawner
+        self.scopes = scopes                     # None: trusted caller, unrestricted. Otherwise the app's system:<scope>s
 
     def handle(self, req: dict, reply: Callable[[dict], None],
                authority: Authority) -> Optional[tuple[str, str]]:
@@ -181,6 +184,8 @@ class SystemBridge:
             reply({"cmd": "result", "action": action, "ok": ok,
                    "detail": clean_text(detail, 300), **extra})
 
+        if self.scopes is not None and not capabilities.allows(self.scopes, action):
+            return result(False, f"this app does not have the '{capabilities.needed(action)}' permission")
         try:
             if action == "apps":
                 reply({"cmd": "apps", "installed": list_apps(self.paths),

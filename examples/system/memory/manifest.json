@@ -7,8 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:os"
   ],
   "description": "Memory manager: RAM, cache, swap, paging, pressure, and who is using it.",
   "commands": [

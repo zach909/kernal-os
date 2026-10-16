@@ -7,8 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:os"
   ],
   "description": "Networking: interfaces, protocols, connections, local IPC sockets, and an internet check.",
   "commands": [

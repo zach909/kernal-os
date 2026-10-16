@@ -11,7 +11,7 @@ What keeps this safe:
 * Enabling or disabling one is a **kernel-layer** action: it asks for your password every time, even inside a
   sudo window, because it changes what the desktop itself runs.
 * Each slot has a *ceiling* of permissions. A wallpaper may ask for nothing; a cursor for the pointer and
-  animation ticks; a dock for the system and shell permissions the built-in dock has. A mod asking for more
+  animation ticks; a dock for the scopes the built-in dock has (listing and opening apps). A mod asking for more
   than its slot allows cannot be enabled. (It still runs in the same sandbox as every app.)
 * The built-in app is never deleted: disabling a mod, or a mod that fails to start, falls back to it.
 * Enabling a mod permits it (``kos permit``) as part of the same password.
@@ -30,16 +30,16 @@ from .paths import Paths, atomic_write
 # What each slot may ask for. The built-in apps in each slot ask for exactly this or less.
 CEILING: dict[str, frozenset[str]] = {
     "wallpaper": frozenset(),
-    "menubar": frozenset({"system", "ticks", "shell"}),
-    "dock": frozenset({"system", "shell"}),
-    "pins": frozenset({"system", "shell"}),
-    "search": frozenset({"system", "shell"}),
-    "sidebar": frozenset({"system", "shell"}),
-    "launcher": frozenset({"system", "shell"}),
+    "menubar": frozenset({"ticks", "shell", "system:apps", "system:os", "system:passwords"}),
+    "dock": frozenset({"shell", "system:apps"}),
+    "pins": frozenset({"shell", "system:apps", "system:links"}),
+    "search": frozenset({"shell", "system:apps"}),
+    "sidebar": frozenset({"shell", "system:apps", "system:links", "system:notify"}),
+    "launcher": frozenset({"shell", "system:apps"}),
     "widgets": frozenset({"shell"}),
     "cursor": frozenset({"pointer", "animate"}),
     "effects": frozenset({"pointer", "animate"}),
-    "widget": frozenset({"ticks", "system"}),
+    "widget": frozenset({"ticks", "system:os"}),
 }
 assert set(CEILING) == set(SLOTS), "every slot needs a ceiling"
 

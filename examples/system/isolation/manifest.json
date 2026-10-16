@@ -7,8 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:os"
   ],
   "description": "Protection: how each app is confined, kernel hardening, authentication and access levels.",
   "commands": [

@@ -7,7 +7,8 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:run"
   ],
   "description": "The line shell as an app: every line is a command, in your own language.",
   "commands": [

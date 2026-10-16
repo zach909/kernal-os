@@ -3,7 +3,13 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "shell"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "shell",
+    "system:apps",
+    "system:links"
+  ],
   "description": "The desktop's pins: apps, files, folders and web links you pinned to the backdrop."
 }

@@ -3,7 +3,12 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "ticks"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "ticks",
+    "system:os"
+  ],
   "description": "System widget: CPU, memory, load and uptime, live."
 }

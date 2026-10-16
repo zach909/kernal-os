@@ -162,7 +162,8 @@ class Framebuffer:
         c = parse_color(color)
         f.draw(self, x, y, s, (c[2], c[1], c[0]), px)
 
-    def apply(self, ops: list[list]) -> None:
+    def apply(self, ops: list[list], extrude: bool = False) -> None:
+        """Draw ops. ``extrude`` is the 3D look: text gets depth - a stack of darker copies behind it, down and to the right."""
         for op in ops:
             kind = op[0]
             if kind == "clear":
@@ -172,14 +173,28 @@ class Framebuffer:
             elif kind == "line":
                 self.line(op[1], op[2], op[3], op[4], parse_color(op[5]))
             elif kind == "text":
+                if extrude:
+                    for k in (2, 1):
+                        self.text(op[1] + k, op[2] + k, op[3], parse_color(_deepen(op[4], k)), op[5])
                 self.text(op[1], op[2], op[3], parse_color(op[4]), op[5])
             elif kind == "stext":
+                if extrude:
+                    depth = max(1, min(4, op[5] // 6))
+                    for k in range(depth, 0, -1):               # the far end of the letters first, so the near face covers it
+                        self.stext(op[1] + k, op[2] + k, op[3], _deepen(op[4], k / depth), op[5], op[6])
                 self.stext(op[1], op[2], op[3], op[4], op[5], op[6])
             elif kind == "poly":
                 self.poly(op[1], op[2], op[3])
             elif kind == "blit":
                 self.blit(op[1], op[2], op[3], op[4], op[5], op[6])
             # "hit" declares a control and draws nothing
+
+
+def _deepen(color: str, k: float) -> str:
+    """The side of an extruded letter: the colour, darker the farther back it is (k = 1 at the back for text of any depth)."""
+    r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    f = 0.62 - 0.1 * min(k, 4)
+    return "#%02x%02x%02x" % (int(r * f), int(g * f), int(b * f))
 
 
 _CURSOR = [

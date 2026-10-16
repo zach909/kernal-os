@@ -126,6 +126,13 @@ its child - the child inherits Landlock, the empty network namespace and no_new_
 executable (`exec_scratch`) because their runtime unpacks there; the sandbox now also allows symlinks in scratch. The converter never executes anything,
 drops setuid bits, resolves symlinks inside the package only, ignores maintainer scripts, scans the result and refuses a flagged one.
 
+## Scoped capabilities and the ledger (`kos/capabilities.py`, `kos/services.py`)
+`capabilities.ACTION_SCOPE` maps every OS request to one scope; a manifest holds `system:<scope>` permissions (`Manifest.scopes`; the bare `system` is
+`{"*"}` and fits no mod slot). `SystemBridge(scopes=...)` checks every request before dispatch, `Layer.allows(action)` gates the shell's own handlers and
+what is pushed to an app (window list: `apps`; notifications: `notify`; links: `links`), `mods.CEILING` is written in scopes. `services.actions_used`
+reads an app's source for the requests it makes, so the test that each built-in manifest equals the scopes its code needs cannot be fooled by an
+understated manifest. `kos services` prints `services.CORE` (what must stay outside the app model, and what each piece cannot do) and the app ledger.
+
 ## Immersive looks and neural intents (`kos/looks.py`, `kos/shell.py`, `kos/protocol.py`)
 `looks.IMMERSIVE = (vr, mr, neural)`. `Shell.set_look` refuses them unless `authorized=True`, which only `Shell.authorize_immersive` (the
 `look.immersive` action: interface layer, in `NEVER_REMEMBERED`, not in `KEYLESS`) gives; the saved layout never restores them. `render_stereo`
@@ -163,7 +170,7 @@ stale scratch; `heal.repair` verifies every seal with one batch grant and reinst
 clock), *can run unattended* (a live sudo window covering the app and command layers) and *what is only listed* (KOS core: kernel-layer; OS: root). Gap: the OS can
 only be listed - applying it needs root KOS does not hold.
 
-## Hardware device layer (`kos/qdev.py`, `kos/qjob.py`, `kos/sandbox.py`)
+## Hardware device layer (`kos/qdev.py`, `kos/qjob.py`, `kos/sandbox.py`) - generic; quantum is one optional driver kind
 The manifest keys `devices` (up to four `/dev/...` globs) and `driver` (`quantum`) describe a driver. `authorize_app_action` resolves the globs to existing nodes, asks,
 requires the password (`app.device`, never remembered) and passes the nodes as `SandboxPolicy.device_paths`, which Landlock opens for read, write and ioctl on exactly
 those files. `qjob.run_job` is the one-shot runner (same shape as `coderun`): verify the driver, grant, launch in `cmd` mode, send the job, read one `RESULT` line,

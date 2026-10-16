@@ -3,7 +3,12 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "shell"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "shell",
+    "system:apps"
+  ],
   "description": "Search: type to find apps and what they can do - or run anything as a command, even code."
 }

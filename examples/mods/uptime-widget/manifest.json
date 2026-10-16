@@ -4,7 +4,7 @@
   "runtime": "npm",
   "entry": "start",
   "modes": ["graphical"],
-  "permissions": ["ticks", "system"],
+  "permissions": ["ticks", "system:os"],
   "slot": "widget",
   "description": "A widget showing how long the machine has been up and its load."
 }

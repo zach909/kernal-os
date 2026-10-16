@@ -7,7 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:os",
+    "system:security"
   ],
   "description": "Kernel protections and which apps are permitted to run.",
   "commands": [

@@ -7,7 +7,8 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:files"
   ],
   "description": "File manager: browse folders and zips without extracting; viewing asks for your password.",
   "commands": [

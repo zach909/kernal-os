@@ -3,11 +3,36 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "ticks"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "ticks",
+    "system:notify",
+    "system:updates"
+  ],
   "description": "Auto-update: keeps apps current, and shows what KOS itself and the operating system (kernel, drivers) have waiting.",
   "commands": [
-    {"id": "run", "title": "Update everything now", "keywords": ["update", "upgrade", "latest", "drivers", "kernel", "auto"]},
-    {"id": "check", "title": "Check what is waiting to be updated", "keywords": ["updates", "available", "outdated"]}
+    {
+      "id": "run",
+      "title": "Update everything now",
+      "keywords": [
+        "update",
+        "upgrade",
+        "latest",
+        "drivers",
+        "kernel",
+        "auto"
+      ]
+    },
+    {
+      "id": "check",
+      "title": "Check what is waiting to be updated",
+      "keywords": [
+        "updates",
+        "available",
+        "outdated"
+      ]
+    }
   ]
 }

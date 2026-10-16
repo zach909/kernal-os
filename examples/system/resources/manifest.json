@@ -7,8 +7,10 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:os",
+    "system:processes"
   ],
   "description": "Resource accounting: CPU, memory and storage use, per-app consumption, priorities.",
   "commands": [

@@ -3,7 +3,15 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "ticks", "shell"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "ticks",
+    "shell",
+    "system:apps",
+    "system:os",
+    "system:passwords"
+  ],
   "description": "The top panel: the KOS menu, the active app and what it can do, system stats, network and the clock."
 }

@@ -199,11 +199,23 @@ All of this works because apps *declare* their controls with invisible `hit` ops
 frames it draws itself) into one list. In **every** look, **Tab** (when no window is focused) walks that list with a focus ring and **Enter** presses the
 control - the keyboard-only way around the interface. An app with no `hit` ops still shows its text in the text look but is not reachable from the keyboard.
 
+### Nothing has power over everything (`kos services`)
+
+The rule: **every service, system and part of KOS is an app, and nothing - the OS included - holds power over everything**, because things can be
+faked: an app, a "system" app, a update, a driver. So the old all-or-nothing `system` permission is gone from the built-in apps. It is now a list of
+**scopes** - `system:apps`, `os`, `files`, `backup`, `processes`, `security`, `passwords`, `run`, `updates`, `maintenance`, `heal`, `mods`, `links`,
+`notify`, `hardware` - each opening a few related requests and nothing else (`kos/capabilities.py`). The dock may list and open apps and nothing more;
+the clock widget may read OS facts and nothing more; a mod can never exceed the ceiling of its slot. A scope only lets the *question* reach the OS: whatever
+changes anything still needs its own password. `kos services` prints the **trusted core** - the five small pieces that cannot be apps because they
+launch, seal, confine and ask for the password (authority, store, sandbox/broker, registry, compositor), each with what it does and what it cannot do -
+then every installed app with exactly the scopes it holds, and fails if any holds the bare `system`. The tests read each built-in app's own code and
+require its manifest to hold **exactly** the scopes that code uses: no more, no less.
+
 ### Every layer asks for your password
 
 **Entering the virtual-reality, mixed-reality or neural look asks for the password every time** (it reaches for a headset, a camera or a neural
 device): a sudo window does not stand in for it, "interface: don't ask" does not skip it, and it is never restored at the next start. A driver's
-device node is given only after its own password (`app.device`), exactly as for the quantum drivers. **Each app also has its own folder**
+device node is given only after its own password (`app.device`), exactly as for every hardware driver. **Each app also has its own folder**
 (`<state>/appdata/NAME/`, `KOS_DATA_DIR`, `app.data_dir()`): persistent, writable by that app alone (nothing else is mounted into it, checked
 with real Landlock), kept when the app is removed (`kos remove NAME --purge-data` deletes it).
 
@@ -272,16 +284,16 @@ prompt on its own, and truly unattended installs cannot exist because every inst
 fast-forwarded only with you (always asks). **The OS - kernel, drivers, firmware, packages** - is listed by kind (kernel, drivers, security, other) with the
 exact root command, because KOS holds no root and cannot install them. An update that asks for new permissions is held back for review.
 
-### Quantum and photonic hardware
+### Hardware drivers (quantum is one optional kind)
 
-*What is real:* `kos quantum devices` finds what the machine shows - `/dev/qpu*`, `/dev/quantum*`, `/dev/qrng*`, `/dev/photonic*`, sysfs entries, hardware random sources
-that identify as quantum, and PCI ids you list in `/etc/kos/quantum-devices.json` - and says plainly when there is none. A **driver** is an ordinary app with
-`"driver": "quantum"` and `"devices": ["/dev/qpu*"]`: at launch KOS names the nodes, asks, and after your password (every time, never remembered) opens
-**exactly those nodes** to that app in the usual sandbox - no network, no files, nothing else in `/dev` (verified with real Landlock). Jobs use one protocol
-(OpenQASM in, counts out), so an app does not care which device. *What is not:* **no vendor driver is included and no real quantum device was available to test** -
-there is no standard Linux interface for quantum computers, photonic processors, "quantum RAM" or Majorana devices, so each needs its maker's driver written
-against this protocol. `examples/drivers/qsim` is a state-vector **emulator** that speaks the same protocol so the path can be tested; it is labelled an emulator
-everywhere. The Quantum app and `kos quantum run circuit.qasm` use it.
+KOS has one generic way to let an app use a piece of hardware: a **driver** is an ordinary app whose manifest names a kind (`quantum`, `camera`,
+`xr`, `neural`) and the device nodes it wants (`"devices": ["/dev/video0"]`). At launch KOS names the nodes, asks, and after your password (every
+time, never remembered) opens **exactly those nodes** to that app in the usual sandbox - no network, no files, nothing else in `/dev` (verified
+with real Landlock). That is all the OS knows about hardware; everything device-specific lives in the driver app.
+
+Quantum hardware is just one such kind, **not part of the default system**: the Quantum app is in `examples/optional/` and is not installed by
+`kos desktop install`; `kos quantum devices|run` is a thin helper over the same driver mechanism. **No real quantum driver exists here and none was
+tested**; `examples/drivers/qsim` is a state-vector *emulator* of the job protocol, labelled as one.
 
 ### Speed
 

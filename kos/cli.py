@@ -4,7 +4,7 @@
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
     kos install APP.kapp            install (the zip is stored as-is, sealed)
-    kos quantum devices|run FILE    find quantum/photonic hardware; run an OpenQASM job through a driver app
+    kos quantum devices|run FILE    (optional) a thin helper over the hardware-driver mechanism, for quantum drivers
     kos autoupdate status|on|off|mode|every|run   keep apps current; see what KOS and the OS have waiting
     kos heal [--fix]                look for broken state and repair it (nothing lowers a gate)
     kos mod list|enable NAME|disable NAME   system mods: apps that replace a part of the interface
@@ -51,6 +51,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import socket
 import sys
@@ -423,7 +424,7 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        bridge = SystemBridge(paths, scopes=app.manifest.scopes) if app.manifest.scopes else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, ticks="ticks" in app.manifest.permissions)
     finally:
@@ -465,7 +466,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    bridge = SystemBridge(paths, scopes=frozenset(inst.scopes) or frozenset({"*"})) if inst.system else None   # set by the OS at open time
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge, ticks=inst.ticks, **session_kwargs)
 
@@ -615,6 +616,10 @@ def _shot(args, paths: Paths) -> int:
                 shell.notify("demo", title, body)
             shell.cfg["side_tab"] = "notifications"
             shell.relayout()
+        if args.orbit:                                       # "yaw,pitch" in degrees: go around the blocks, look down at them
+            yaw, _, pitch = args.orbit.partition(",")
+            shell.orbit(reset=True)
+            shell.cam[0], shell.cam[1] = math.radians(float(yaw)), math.radians(float(pitch or 0))
         for ch in args.search or "":
             devices.push({"type": "key", "key": ch})
         end = _t.monotonic() + 1.5
@@ -1020,6 +1025,26 @@ def cmd_doctor(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_services(args, paths: Paths) -> int:
+    """`kos services`: what is the trusted core, and what every installed app may ask of the OS."""
+    from . import services
+    r = services.report(paths)
+    print("Trusted core (the only parts that are not apps):")
+    for c in r["core"]:
+        print(f"  {c['part']}\n      does: {c['does']}\n      cannot: {c['cannot']}")
+    print(f"\nApps ({len(r['apps'])}): each sandboxed; what each may ask of the OS:")
+    for a in r["apps"]:
+        extra = [x for x, on in (("network", a["network"]), ("devices " + ",".join(a["devices"]), a["devices"]),
+                                 (f"driver:{a['driver']}", a["driver"]), (f"slot:{a['slot']}", a["slot"])) if on]
+        scopes = ", ".join(a["scopes"]) or "nothing"
+        print(f"  {a['name']:<16} {scopes}" + (f"   [{'; '.join(extra)}]" if extra else ""))
+    if r["blanket"]:
+        print("\nWARNING - these hold the bare 'system' permission (every scope): " + ", ".join(r["blanket"]))
+        return 1
+    print("\nNo app holds the bare 'system' permission.")
+    return 0
+
+
 def cmd_encryption(args, paths: Paths) -> int:
     """`kos encryption`: is everything encrypted? Layer by layer, honestly."""
     from . import encryption
@@ -1376,6 +1401,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--look", choices=["normal", "3d", "vr", "mr", "neural", "text", "terminal"], help="shot: the look to render in")
     s.add_argument("--point", help="shot: move the pointer to X,Y")
     s.add_argument("--click", help="shot: click at X,Y (the shot is taken a moment later, mid-effect)")
+    s.add_argument("--orbit", help="shot: the 3D look's camera as YAW,PITCH in degrees (pitch 80 looks straight down at the blocks)")
     s.add_argument("--keys", help="shot: comma-separated key names to press, e.g. tab,tab")
     s.add_argument("--demo-notes", action="store_true", help="shot: post three sample notifications and show that tab")
     s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
@@ -1409,6 +1435,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    sub.add_parser("services", help="the trusted core, and what every app may ask of the OS (nothing has power over everything)")
     sub.add_parser("encryption", help="is everything encrypted? disk, swap, RAM, scratch, backups - honestly")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
@@ -1456,7 +1483,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "audit": cmd_audit,
+            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "services": cmd_services, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "provenance": cmd_provenance, "sources": cmd_sources, "updates": cmd_updates, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 

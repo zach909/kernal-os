@@ -649,6 +649,7 @@ class TestEncryptionReport(Env):
         self.assertIn("0 (0, 0)", out.stdout)
 
 
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1025,7 +1026,8 @@ class TestSystemApps(Env):
             if name == "wallpaper":
                 self.assertEqual(m.permissions, (), name)             # the background only draws: no permission at all
             else:
-                self.assertTrue(set(m.permissions) & {"system", "ticks", "shell", "pointer", "animate", "network"}, name)   # widgets: ticks; handler: shell; pointer, effects: pointer; browser: network
+                self.assertTrue(set(m.permissions) & {"ticks", "shell", "pointer", "animate", "network"} or m.scopes, name)   # widgets: ticks; handler: shell; pointer, effects: pointer; browser: network; the rest: system scopes
+            self.assertNotIn("*", m.scopes, f"{name} holds the bare 'system' permission")
             self.assertEqual(m.runtime, "npm" if name != "hello" else m.runtime)
             self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
 
@@ -2823,8 +2825,8 @@ class TestShellDesign(Env):
         import json as _j
         menubar = _j.loads((SYSTEM_DIR / "menubar" / "manifest.json").read_text())
         dock = _j.loads((SYSTEM_DIR / "dock" / "manifest.json").read_text())
-        self.assertEqual(set(menubar["permissions"]), {"system", "ticks", "shell"})
-        self.assertEqual(set(dock["permissions"]), {"system", "shell"})    # shell: to size itself, nothing else
+        self.assertEqual(set(menubar["permissions"]), {"ticks", "shell", "system:apps", "system:os", "system:passwords"})
+        self.assertEqual(set(dock["permissions"]), {"shell", "system:apps"})    # shell: to size itself; apps: list and open them. Nothing else
 
     def test_the_dock_can_resize_only_with_the_shell_permission(self):
         s = self.make()
@@ -4732,3 +4734,258 @@ class TestImmersiveLooks(Env):
         for name in ("camsim", "neurosim"):
             m = Manifest.parse((root / name / "manifest.json").read_bytes())
             self.assertIn("EMULATOR", m.description.upper())
+
+
+class TestScopedCapabilities(Env):
+    """Nothing has power over everything: the 'system' permission is a list of scopes, and each app holds only its own."""
+
+    def test_every_built_in_app_holds_exactly_the_scopes_its_code_uses(self):
+        from kos import services
+        for d in sorted(SYSTEM_DIR.iterdir()):
+            if not d.is_dir():
+                continue
+            m = Manifest.parse((d / "manifest.json").read_bytes())
+            self.assertNotIn("*", m.scopes, d.name)                                # none holds the bare permission
+            self.assertEqual(set(m.scopes), services.scopes_needed(d), d.name)     # no more, no less than its code asks for
+
+    def test_a_scoped_bridge_answers_its_own_scope_and_refuses_the_rest(self):
+        sent = []
+        bridge = SystemBridge(self.paths, scopes=frozenset({"os"}))
+        bridge.handle({"cmd": "request", "action": "sys", "kind": "resources", "arg": ""}, sent.append, self.authority())
+        self.assertNotEqual(sent[-1].get("ok"), False)
+        for req in ({"action": "backups"}, {"action": "ls", "path": "/"}, {"action": "signal", "pid": 1, "sig": "TERM"},
+                    {"action": "permit", "app": "hello"}, {"action": "line", "text": "print(1)"},
+                    {"action": "updates", "op": "check"}, {"action": "apps"}, {"action": "mods", "op": "list"},
+                    {"action": "sudo", "op": "status"}, {"action": "heal", "op": "check"}):
+            sent.clear()
+            bridge.handle({"cmd": "request", **req}, sent.append, self.authority())
+            self.assertFalse(sent[-1]["ok"], req)
+            self.assertIn("system:", sent[-1]["detail"], req)
+        every = SystemBridge(self.paths, scopes=frozenset({"*"}))
+        sent.clear()
+        every.handle({"cmd": "request", "action": "apps"}, sent.append, self.authority())
+        self.assertEqual(sent[-1]["cmd"], "apps")                                  # the old bare permission still works
+
+    def test_manifests_accept_only_real_scopes_and_mods_cannot_reach_beyond_their_slot(self):
+        base = {"name": "x", "version": "1", "runtime": "python", "entry": "m", "modes": ["graphical"]}
+        ok = Manifest.parse(json.dumps({**base, "permissions": ["system:apps", "system:os"]}).encode())
+        self.assertEqual(ok.scopes, {"apps", "os"})
+        self.assertEqual(Manifest.parse(json.dumps({**base, "permissions": ["system"]}).encode()).scopes, {"*"})
+        for bad in (["system:everything"], ["system:"], ["system:apps:extra"], [5]):
+            with self.assertRaises(KAppError, msg=str(bad)):
+                Manifest.parse(json.dumps({**base, "permissions": bad}).encode())
+        from kos import mods
+        dock = Manifest.parse(json.dumps({**base, "slot": "dock", "permissions": ["shell", "system:apps", "system:backup"]}).encode())
+        with self.assertRaises(KAppError):
+            mods.check(KApp(dock, b"", {}) if False else type("A", (), {"manifest": dock})())      # a dock may not push backups
+        fine = Manifest.parse(json.dumps({**base, "slot": "dock", "permissions": ["shell", "system:apps"]}).encode())
+        self.assertEqual(mods.check(type("A", (), {"manifest": fine})()), "dock")
+        blanket = Manifest.parse(json.dumps({**base, "slot": "dock", "permissions": ["system"]}).encode())
+        with self.assertRaises(KAppError):
+            mods.check(type("A", (), {"manifest": blanket})())                      # and the bare permission fits no slot
+
+    def test_a_layer_without_the_scope_is_refused_and_is_not_sent_what_it_may_not_see(self):
+        sh = TestLooksAndControls.make(self)
+        dock = self.layer_of(sh, "dock", system=True, scopes=frozenset({"apps"}))
+        side = self.layer_of(sh, "sidebar", system=True, scopes=frozenset({"apps"}))
+        self.assertFalse(dock.allows("links"))
+        self.assertTrue(dock.allows("open"))
+        sh._on_request(side, {"cmd": "request", "action": "notify", "op": "post", "title": "x", "body": "y"})
+        self.assertEqual(sh.notes, [])                                              # no system:notify: refused
+        refusal = self.sent(side)
+        self.assertEqual([(m["cmd"], m["ok"]) for m in refusal if m["cmd"] == "result"], [("result", False)])
+        self.assertIn("system:notify", refusal[-1]["detail"])
+        sh.notify("test", "hello", "there")
+        got = [m["cmd"] for m in (self.sent(dock) + self.sent(side))]
+        self.assertNotIn("notifications", got)                                     # and the notification list is not pushed to it
+
+    def layer_of(self, shell, name, **flags):
+        return TestLooksAndControls.layer(self, shell, name, "plain", (0, 0, 10, 10), **flags)
+
+    sent = TestLooksAndControls.sent
+
+    def test_the_ledger_names_the_trusted_core_and_flags_a_bare_system_app(self):
+        from kos import services
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        r = services.report(self.paths)
+        self.assertEqual({c["part"].split(" ")[0] for c in r["core"]}, {"authority", "store", "sandbox", "registry", "compositor"})
+        self.assertEqual(r["blanket"], [])
+        out = _sp.run([sys.executable, "-m", "kos", "services"], cwd=str(Path(__file__).resolve().parent.parent),
+                      env={**os.environ, "KOS_ROOT": str(self.paths.root)}, capture_output=True, text=True)
+        self.assertIn("Trusted core", out.stdout, out.stderr)
+
+
+class TestBlocks3D(Env):
+    """The 3D look: every layer is a block with a front, a matrix terminal on top, sides and a back; the camera orbits."""
+
+    layer = TestLooksAndControls.layer
+    sent = TestLooksAndControls.sent
+
+    def shell3d(self, w=640, h=360):
+        from kos.shell import Shell
+        sh = Shell(self.paths, self.authority(PW), HeadlessBackend(w, h), ScriptedDevices(), preboot=())
+        sh.booted.add("mouse")
+        return sh
+
+    def test_a_homography_maps_the_unit_square_onto_a_quad_and_back(self):
+        from kos import blocks
+        quad = [(10, 10), (110, 20), (100, 90), (5, 80)]
+        inv = blocks.unit_to_quad(quad)
+        for (u, v), (x, y) in zip([(0, 0), (1, 0), (1, 1), (0, 1)], quad):
+            A, B, C, D, E, F, G, H, I = inv
+            den = G * x + H * y + I
+            self.assertAlmostEqual((A * x + B * y + C) / den, u, places=6)
+            self.assertAlmostEqual((D * x + E * y + F) / den, v, places=6)
+        self.assertTrue(blocks.point_in_quad(quad, 60, 50))
+        self.assertFalse(blocks.point_in_quad(quad, 120, 50))
+        self.assertIsNone(blocks.unit_to_quad([(0, 0), (1, 1), (2, 2), (3, 3)]))          # a line is not a face
+
+    def test_a_texture_lands_on_its_face_and_transparent_texels_are_skipped(self):
+        from kos import blocks
+        fb = Framebuffer(4, 4)
+        for x in range(4):
+            for y in range(4):
+                fb.rect(x, y, 1, 1, bytes((0, 0, 255 if x < 2 else 0, 0)) if y < 2 else bytes((0, 255, 0, 0)))
+        out = Framebuffer(40, 40)
+        blocks.fill_face(out, [(10, 10), (30, 10), (30, 30), (10, 30)], blocks.Texture(fb))
+        self.assertEqual(out.pixel(12, 12), (255, 0, 0))                  # the texture's top left
+        self.assertEqual(out.pixel(28, 12), (0, 0, 0))                    # its top right is black
+        self.assertEqual(out.pixel(20, 28), (0, 255, 0))                  # the bottom half is green
+        self.assertEqual(out.pixel(5, 5), (0, 0, 0))                      # nothing outside the quad
+        alpha = bytearray(b"\xff" * 16)
+        alpha[0] = 0
+        out2 = Framebuffer(40, 40)
+        blocks.fill_face(out2, [(10, 10), (30, 10), (30, 30), (10, 30)], blocks.Texture(fb, alpha))
+        self.assertEqual(out2.pixel(11, 11), (0, 0, 0))                   # the transparent texel left the background alone
+
+    def test_the_camera_looks_straight_on_at_zero_and_sees_tops_when_it_looks_down(self):
+        from kos import blocks
+        cam = blocks.Camera(0, 0, 320, 180, 0, 1000)
+        self.assertEqual([round(v) for v in cam.project(100, 50, 0)[:2]], [100, 50])           # the wallpaper plane is not scaled
+        self.assertGreater(abs(cam.project(100, 50, 100)[0] - 320), abs(100 - 320))             # nearer things are drawn larger
+        down = blocks.Camera(0, 0.9, 320, 180, 0, 1000)
+        nx, ny, nz = down.normal_faces(0, -1, 0)                                             # the top face's normal...
+        self.assertGreater(nz, 0)                                                            # ...now points at the viewer
+        flat = blocks.Camera(0, 0, 320, 180, 0, 1000)
+        self.assertLessEqual(flat.normal_faces(0, -1, 0)[2], 1e-9)                            # straight on: the top is edge-on
+        side = blocks.Camera(0.6, 0, 320, 180, 0, 1000)
+        self.assertTrue(side.normal_faces(-1, 0, 0)[2] > 0 or side.normal_faces(1, 0, 0)[2] > 0)   # turned: one side comes into view
+
+    def test_every_layer_becomes_a_block_stacked_on_what_is_beneath_it(self):
+        sh = self.shell3d()
+        self.layer(sh, "sidebar", "sidebar", (400, 30, 200, 300), ops=[["rect", 0, 0, 200, 300, "#223355"]])
+        self.layer(sh, "widget-clock", "widget", (410, 40, 180, 80), ops=[["rect", 0, 0, 180, 80, "#335577"]])
+        self.layer(sh, "menubar", "bar", (0, 0, 640, 20), ops=[["rect", 0, 0, 640, 20, "#112244"]])
+        self.layer(sh, "files", "window", (40, 60, 300, 200), ops=[["rect", 0, 0, 300, 170, "#143a5a"]])
+        sh.set_look(look="3d")
+        sh.render()
+        bl = {b.layer_id: b for b in sh._blocks}
+        self.assertEqual(set(b.name for b in bl.values()), {"sidebar", "widget-clock", "menubar", "files"})
+        side, clock = bl["sidebar-1"], bl["widget-clock-1"]
+        self.assertEqual(clock.z_back, side.z_front)                      # the widget stands on the sidebar
+        self.assertGreater(clock.z_front, side.z_front)
+        self.assertEqual(bl["files-1"].z_back, 0.0)                       # a window on the bare wallpaper
+        self.assertGreater(bl["files-1"].z_front - bl["files-1"].z_back, bl["menubar-1"].z_front)   # windows are deeper than the bar
+
+    def test_a_click_on_a_rotated_front_face_reaches_the_app_where_it_was_aimed(self):
+        sh = self.shell3d(960, 540)
+        win = self.layer(sh, "files", "window", (100, 80, 400, 300), ops=[["rect", 0, 0, 398, 270, "#143a5a"], ["hit", 100, 100, 60, 30, "Open"]])
+        sh.set_look(look="3d")
+        sh.orbit(reset=True)
+        sh.cam[0], sh.cam[1] = 0.5, 0.35
+        sh.render()
+        b = next(b for b in sh._blocks if b.name == "files")
+        # aim at the middle of the "Open" button as drawn: find the screen point whose flat position is that button
+        from kos import blocks
+        rect, quad = win.rect, b.quad
+        found = None
+        for x in range(int(min(p[0] for p in quad)), int(max(p[0] for p in quad))):
+            for y in range(int(min(p[1] for p in quad)) , int(max(p[1] for p in quad)), 3):
+                u, v = blocks.unproject([b], x, y)[1:] if blocks.unproject([b], x, y) else (None, None)
+                if u is not None and abs(u - (130 + 1)) < 1.5 and abs(v - (sh.titlebar + 115)) < 1.5:
+                    found = (x, y)
+                    break
+            if found:
+                break
+        self.assertIsNotNone(found)
+        self.assertNotEqual(found, (rect[0] + 131, rect[1] + sh.titlebar + 115))     # the camera really moved it on screen
+        self.sent(win)
+        sh.pending.append({"type": "pointer", "x": found[0], "y": found[1]})
+        sh.pending.append({"type": "button", "button": "left", "pressed": True, "x": found[0], "y": found[1]})
+        while sh.pending:
+            sh.route(sh.pending.popleft())
+        msgs = [m for m in self.sent(win) if m.get("cmd") == "button"]
+        self.assertEqual(len(msgs), 1)
+        self.assertLessEqual(abs(msgs[0]["x"] - 130), 3)                                # content-local: where the button is
+        self.assertLessEqual(abs(msgs[0]["y"] - 115), 3)
+
+    def test_alt_arrows_and_middle_drag_orbit_and_only_in_the_3d_look(self):
+        sh = self.shell3d()
+        sh.set_look(look="3d")
+        sh.orbit(reset=True)
+        y0, p0 = sh.cam
+        sh._route({"type": "key", "key": "alt-right"})
+        sh._route({"type": "key", "key": "alt-up"})
+        self.assertGreater(sh.cam[0], y0)
+        self.assertGreater(sh.cam[1], p0)
+        sh._route({"type": "key", "key": "alt-0"})
+        self.assertEqual(sh.cam, [y0, p0])
+        sh._route({"type": "button", "button": "middle", "pressed": True, "x": 100, "y": 100})
+        sh._route({"type": "pointer", "x": 160, "y": 100})
+        self.assertGreater(sh.cam[0], y0)                                                  # dragged right: turned
+        sh._route({"type": "button", "button": "middle", "pressed": False, "x": 160, "y": 100})
+        before = list(sh.cam)
+        sh._route({"type": "pointer", "x": 300, "y": 200})
+        self.assertEqual(sh.cam, before)                                                   # released: the pointer no longer turns it
+        for _ in range(60):
+            sh.orbit(0, 0.2)
+        self.assertLessEqual(sh.cam[1], 1.45)                                              # never past straight down
+        sh.set_look(look="normal")
+        sh.orbit(reset=True)
+        sh._route({"type": "key", "key": "alt-right"})
+        self.assertEqual(sh.cam, [y0, p0])                                                 # other looks ignore the keys
+
+    def test_the_top_face_rains_only_when_it_can_be_seen(self):
+        sh = self.shell3d()
+        self.layer(sh, "files", "window", (40, 60, 300, 200), ops=[["rect", 0, 0, 300, 170, "#143a5a"]])
+        sh.set_look(look="3d")
+        sh.cam[1] = 0.1
+        t0 = sh._matrix_t
+        sh._matrix_step(100.0)
+        self.assertEqual(sh._matrix_t, t0)                                                 # looking from the side: no animation
+        sh.cam[1] = 0.9
+        sh._matrix_step(200.0)
+        self.assertGreater(sh._matrix_t, t0)                                               # looking down: it moves on
+        from kos import blocks
+        tex = blocks.matrix_texture(blocks.Block("a-1", "files", (0, 0, 120, 40), 0, 40, None, words=["Files", "Open"]), 120, 40, 1.0)
+        greens = sum(1 for x in range(120) for y in range(40) if tex.fb.pixel(x, y)[1] > 120 and tex.fb.pixel(x, y)[0] < 120)
+        self.assertGreater(greens, 20)                                                     # there are green characters
+        again = blocks.matrix_texture(blocks.Block("a-1", "files", (0, 0, 120, 40), 0, 40, None, words=["Files", "Open"]), 120, 40, 2.0)
+        self.assertNotEqual(bytes(tex.fb.buf), bytes(again.fb.buf))                        # and they fall
+
+    def test_text_is_extruded_in_the_3d_look_and_icons_have_depth(self):
+        flat, deep = Framebuffer(80, 30), Framebuffer(80, 30)
+        flat.apply([["stext", 4, 4, "Hi", "#ffffff", 18, 1]])
+        deep.apply([["stext", 4, 4, "Hi", "#ffffff", 18, 1]], extrude=True)
+        self.assertNotEqual(bytes(flat.buf), bytes(deep.buf))
+        count = lambda fb: sum(1 for x in range(80) for y in range(30) if fb.pixel(x, y) != (0, 0, 0))
+        self.assertGreater(count(deep), count(flat))                                       # the sides add pixels
+        dark = [fb for fb in (deep,) for x in range(80) for y in range(30) if 0 < sum(fb.pixel(x, y)) < 400 and fb.pixel(x, y)[0] < 200]
+        self.assertTrue(dark)                                                              # and they are darker than the face
+        gfx = (SDK_JS / "gfx.js").read_text()
+        self.assertIn("steps", gfx)
+        self.assertIn("the symbol is solid", gfx)
+
+    def test_blocks_can_be_switched_off_and_the_option_is_remembered_and_validated(self):
+        sh = self.shell3d()
+        self.layer(sh, "files", "window", (40, 60, 300, 200), ops=[["rect", 0, 0, 300, 170, "#143a5a"]])
+        sh.set_look(look="3d")
+        sh.render()
+        self.assertTrue(sh._blocks)
+        sh.set_look(blocks=False)
+        sh.render()
+        self.assertEqual(sh._blocks, [])
+        self.assertFalse(sh.cfg["blocks"])
+        validate_app_message({"cmd": "request", "action": "look", "op": "set", "blocks": False}, "graphical")
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "request", "action": "look", "op": "set", "blocks": "yes"}, "graphical")

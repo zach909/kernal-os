@@ -11,7 +11,7 @@ const G = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'gfx.js'));
 
 const LOOKS = [
   { id: 'normal', name: 'Normal', note: 'Glass, clean and flat. The default.' },
-  { id: '3d', name: '3D', note: 'Depth, a 3D pointer, bubbles on click, and the screen tilts toward your hand.' },
+  { id: '3d', name: '3D', note: 'Everything is a solid block - windows, panels, text and icons. Look down at one: a terminal rains on top.' },
   { id: 'vr', name: 'Virtual reality', note: 'A picture for each eye, side by side, with depth. Asks for your password.', lock: true },
   { id: 'mr', name: 'Mixed reality', note: 'The interface floats over a camera passthrough. Asks for your password.', lock: true },
   { id: 'neural', name: 'Neural', note: 'A highlight scans the buttons; a neural driver picks. Asks for your password.', lock: true },
@@ -20,6 +20,7 @@ const LOOKS = [
 ];
 const OPTIONS = [
   { id: 'cursor_direction', name: 'Pointer turns to point the way you move' },
+  { id: 'blocks', name: 'Every window and panel is a block you can go around: Alt + arrows, or drag with the middle button (3D look)' },
   { id: 'tilt', name: 'Screen tilts toward your movement and clicks (3D look)' },
   { id: 'bubbles', name: 'A bubble pops off every click (3D look)' },
 ];

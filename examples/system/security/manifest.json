@@ -7,7 +7,11 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:files",
+    "system:maintenance",
+    "system:os",
+    "system:updates"
   ],
   "description": "Security Center: administrator keyboard, kernel protections, what is owed, scans, audit trail.",
   "commands": [

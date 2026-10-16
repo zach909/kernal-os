@@ -66,7 +66,7 @@ app -> OS
     {"cmd": "request", "action": "signal", "pid": N, "sig": "TERM"|"KILL"|"STOP"|"CONT"}   (password)
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
     {"cmd": "request", "action": "animate", "on": bool}      (animate permission) ask for / stop ~24 'anim' events a second
-    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|mr|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles": bool}   (shell permission to set)
+    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|mr|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles"|"blocks": bool}   (shell permission to set)
     {"cmd": "request", "action": "intent", "name": next|prev|select|back|pause}   (neural permission, neural look only) one decision
                                                               a neural driver made from the wearer's signals - never the signals
     {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
@@ -326,7 +326,7 @@ def _request(msg: dict) -> dict:
                 if msg["look"] not in ("normal", "3d", "vr", "mr", "neural", "text", "terminal"):
                     raise ProtocolError("look.look must be normal, 3d, vr, mr, neural, text or terminal")
                 out["look"] = msg["look"]
-            for k in ("cursor_direction", "tilt", "bubbles"):
+            for k in ("cursor_direction", "tilt", "bubbles", "blocks"):
                 if k in msg:
                     if not isinstance(msg[k], bool):
                         raise ProtocolError(f"look.{k} must be true or false")

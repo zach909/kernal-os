@@ -7,7 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:files",
+    "system:os"
   ],
   "description": "File systems and permissions: mounts, capacity, who may read/write/run what, safe changes.",
   "commands": [

@@ -99,7 +99,8 @@ function icon(c, x, y, size, name, { hot = false } = {}) {
     roundRect(c, x + 1, y + 3, size, size, r, darken(base, 0.8));
     roundGradient(c, x, y, size, size, r, lighten(base, hot ? 0.35 : 0.22), darken(base, 0.18));
   }
-  const g = lighten(base, 0.9), d = darken(base, 0.6), s = size, cx = x + s / 2, cy = y + s / 2, u = s / 10;
+  let g = lighten(base, 0.9), d = darken(base, 0.6), cx = x + size / 2, cy = y + size / 2;
+  const s = size, u = s / 10, x0 = x, y0 = y;
   const R = (a, b, w, h, col) => c.rect(Math.round(x + a * u), Math.round(y + b * u), Math.max(1, Math.round(w * u)), Math.max(1, Math.round(h * u)), col);
   const P = {
     files: () => { R(2, 3.5, 6, 4.5, g); R(2, 2.5, 2.5, 1.5, g); R(2, 5, 6, 0.4, d); },
@@ -123,7 +124,17 @@ function icon(c, x, y, size, name, { hot = false } = {}) {
     clock: () => { ring(c, Math.round(cx), Math.round(cy), Math.round(3.2 * u), g); c.line(Math.round(cx), Math.round(cy), Math.round(cx), Math.round(cy - 2.2 * u), g); c.line(Math.round(cx), Math.round(cy), Math.round(cx + 1.8 * u), Math.round(cy), g); },
     'app-library': () => { for (let i = 0; i < 4; i++) R(2.4 + (i % 2) * 2.8, 2.4 + Math.floor(i / 2) * 2.8, 2.2, 2.2, g); },
   };
-  (P[name] || (() => { const L = (name[0] || '?').toUpperCase(); c.text(Math.round(cx - 3 * (s / 24)), Math.round(cy - 3.5 * (s / 24)), L, g, Math.max(1, Math.round(s / 12))); }))();
+  const glyph = P[name] || (() => { const L = (name[0] || '?').toUpperCase(); c.text(Math.round(cx - 3 * (s / 24)), Math.round(cy - 3.5 * (s / 24)), L, g, Math.max(1, Math.round(s / 12))); });
+  if (deep) {                                                   // 3D: the symbol is solid - drawn again and again, deeper and darker, then the face on top
+    const steps = Math.max(2, Math.round(s / 14));
+    for (let k = steps; k >= 1; k--) {
+      x = x0 + k * 0.7; y = y0 + k * 0.9; cx = x + s / 2; cy = y + s / 2;
+      g = darken(base, 0.42 + 0.08 * (steps - k)); d = darken(base, 0.3);
+      glyph();
+    }
+    x = x0; y = y0; cx = x + s / 2; cy = y + s / 2; g = lighten(base, 0.9); d = darken(base, 0.6);
+  }
+  glyph();
 }
 
 

@@ -7,7 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:backup",
+    "system:files"
   ],
   "description": "Backups of your documents: back up a file or folder, browse a backup, restore one file.",
   "commands": [

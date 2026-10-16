@@ -7,8 +7,10 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:heal",
+    "system:os"
   ],
   "description": "Error handling: hardware health, connectivity, faulty apps, and security events.",
   "commands": [

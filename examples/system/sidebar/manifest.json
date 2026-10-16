@@ -3,11 +3,34 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "shell"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "shell",
+    "system:apps",
+    "system:links",
+    "system:notify"
+  ],
   "description": "The right-hand panel: tabs for Notifications and Widgets, and a shelf of pinned links (apps, files, folders, web addresses).",
   "commands": [
-    {"id": "notifications", "title": "Show notifications", "keywords": ["notifications", "alerts", "messages"]},
-    {"id": "clear", "title": "Clear all notifications", "keywords": ["notifications", "dismiss", "clear"]}
+    {
+      "id": "notifications",
+      "title": "Show notifications",
+      "keywords": [
+        "notifications",
+        "alerts",
+        "messages"
+      ]
+    },
+    {
+      "id": "clear",
+      "title": "Clear all notifications",
+      "keywords": [
+        "notifications",
+        "dismiss",
+        "clear"
+      ]
+    }
   ]
 }

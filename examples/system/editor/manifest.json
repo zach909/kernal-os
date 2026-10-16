@@ -7,7 +7,8 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:files"
   ],
   "description": "File editor. Opening asks for your password; saving is a guarded write (admin keyboard, scan, optimize).",
   "commands": [

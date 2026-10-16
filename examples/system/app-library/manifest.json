@@ -8,7 +8,7 @@
     "graphical"
   ],
   "permissions": [
-    "system"
+    "system:apps"
   ],
   "description": "Every installed app. Pick one and the OS asks for your password to open it.",
   "commands": [

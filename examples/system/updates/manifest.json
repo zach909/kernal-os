@@ -7,7 +7,8 @@
     "tui"
   ],
   "permissions": [
-    "system"
+    "system:apps",
+    "system:updates"
   ],
   "description": "Software sources and updates: where every app and component came from, and installing newer versions.",
   "commands": [

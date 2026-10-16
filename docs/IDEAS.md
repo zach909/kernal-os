@@ -84,7 +84,7 @@ land instead of getting lost in chat.
   you look down, and the button-by-button view behind. Today the four looks are switched, and the tilt only shears the front frame.
 - **Verify the multiples on hardware.** Seats (per-device evdev state), several framebuffers, and a second display's hot-plug are exercised only with scripted
   devices and headless outputs. Per-seat passwords/sudo windows, window move between displays by drag with per-display scale, and a taskbar per display are not done.
-- **Real quantum drivers.** The device layer finds hardware and grants a driver one device node; the first vendor driver (and a real device to test it on) is the
+- **Real hardware drivers (quantum is optional, one kind among several).** The device layer finds hardware and grants a driver one device node; the first vendor driver (and a real device to test it on) is the
   missing half. Same for photonic and Majorana-based devices, which have no common interface - each needs its own driver written to the OpenQASM job protocol.
 - **A graphical display for converted programs.** `.deb`/AppImage programs run text-only. A nested X/Wayland server rendered into a window would let GUI AppImages run.
 - **Damage-rectangle compositing and a native blur.** Repaints are ~20 ms; most of that is re-rasterizing text and shapes in pure Python for every layer.

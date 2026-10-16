@@ -7,8 +7,9 @@
     "tui"
   ],
   "permissions": [
-    "system",
-    "ticks"
+    "ticks",
+    "system:apps",
+    "system:os"
   ],
   "description": "I/O devices: disks and their throughput, input devices, drivers, display, buffers and cache.",
   "commands": [

@@ -3,11 +3,33 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": ["graphical"],
-  "permissions": ["system", "ticks"],
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "ticks",
+    "system:passwords"
+  ],
   "description": "Password layers: interface, app, command and kernel each ask; open a timed sudo window to be asked less.",
   "commands": [
-    {"id": "sudo-5", "title": "Remember my password for 5 minutes (sudo)", "keywords": ["sudo", "remember", "elevate", "password"]},
-    {"id": "sudo-off", "title": "Close the sudo window (ask every time)", "keywords": ["sudo", "forget", "lock"]}
+    {
+      "id": "sudo-5",
+      "title": "Remember my password for 5 minutes (sudo)",
+      "keywords": [
+        "sudo",
+        "remember",
+        "elevate",
+        "password"
+      ]
+    },
+    {
+      "id": "sudo-off",
+      "title": "Close the sudo window (ask every time)",
+      "keywords": [
+        "sudo",
+        "forget",
+        "lock"
+      ]
+    }
   ]
 }

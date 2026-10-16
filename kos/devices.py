@@ -46,6 +46,7 @@ _NAMED = {1: "escape", 14: "backspace", 15: "tab", 28: "enter", 96: "enter",
           107: "end", 108: "down", 109: "pagedown", 111: "delete", 125: "super", 126: "super"}
 _SHIFT = {42, 54}
 _CTRL = {29, 97}
+_ALT = {56, 100}
 
 
 class DeviceError(RuntimeError):
@@ -134,7 +135,7 @@ class EvdevTranslator:
         self.w, self.h = width, height
         self.x, self.y = width // 2, height // 2
         self.moved = False
-        self.shift = self.ctrl = False
+        self.shift = self.ctrl = self.alt = False
 
     def feed(self, raw: bytes) -> list[dict]:
         out: list[dict] = []
@@ -159,6 +160,8 @@ class EvdevTranslator:
                     self.shift = value != 0
                 elif code in _CTRL:
                     self.ctrl = value != 0
+                elif code in _ALT:
+                    self.alt = value != 0
                 elif value in (1, 2):  # press or autorepeat
                     ev = self._key(code)
                     if ev:
@@ -170,6 +173,8 @@ class EvdevTranslator:
 
     def _key(self, code: int) -> Optional[dict]:
         if code in _NAMED:
+            if self.alt and _NAMED[code] in ("up", "down", "left", "right"):        # Alt + arrows: orbit the 3D look
+                return {"type": "key", "key": "alt-" + _NAMED[code]}
             if self.ctrl and _NAMED[code] in ("up", "down"):        # Ctrl-Up / Ctrl-Down: the stack of looks
                 return {"type": "key", "key": "ctrl-" + _NAMED[code]}
             return {"type": "key", "key": _NAMED[code]}
