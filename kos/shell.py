@@ -1597,7 +1597,7 @@ class Shell:
         return out
 
     def _top_faces_show(self) -> bool:
-        return self.cam[1] > 0.3 and any(self.shown(l) and l.kind == "window" and not l.minimized for l in self.layers.values())
+        return self.cam[1] > 0.3                                      # looking down: the ground and the tops are in view
 
     def _block_frame(self) -> Framebuffer:
         W, H, u = self.W, self.H, self.u
@@ -1620,7 +1620,8 @@ class Shell:
                     frame.poly([(cx + (p[0] - cx + 5 * u) + (k if p[0] > cx else -k), cy + (p[1] - cy + 7 * u) + (k if p[1] > cy else -k))
                                 for p in foot], "#000000", alpha)
 
-        blocks.render(out, blocks.Texture(self._wallpaper()), bl, cam, mt, u, shadow=shadows)
+        words = [w for b in bl for w in b.words][:200]                 # the ground rains the words of everything on the desktop
+        blocks.render(out, blocks.Texture(self._wallpaper()), bl, cam, mt, u, shadow=shadows, floor_words=words)
         self._blocks = bl
         for layer in sorted((l for l in self.layers.values() if self.shown(l) and l.kind == "overlay"), key=lambda l: l.z):
             self._paint_content(out, layer)                          # the click bubbles float in front of everything

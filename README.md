@@ -178,7 +178,7 @@ immersive ones, below). **Ctrl-Up** looks down at the looks as a stack of cards 
 
 * **normal** - glass, pills, smooth type.
 * **3d** - **everything is a solid block**. Every window, the menubar, the dock, the sidebar, each widget and the launcher is a box standing on the
-  wallpaper: the **front** is what the app draws (frosted glass and all), the **top** is a terminal - green characters made of that app's own words
+  wallpaper, and **the ground they stand on is a terminal** - tilt the camera down and the floor in front of the screen is a dark terminal with green characters (the words of everything on the desktop) raining through it: the **front** is what the app draws (frosted glass and all), the **top** is a terminal - green characters made of that app's own words
   fall through it, so *look down at a block and you see its terminal* - the **back** is the list of its buttons, and the **sides** are tinted glass
   edges. Blocks rest on what is beneath them (a widget on the sidebar). **Go around it**: Alt + arrow keys, or drag with the middle button
   (Alt-0 resets; `kos desktop shot --orbit YAW,PITCH`). Text is extruded (letters have depth), icon symbols are solid, the pointer is a 3D arrow that

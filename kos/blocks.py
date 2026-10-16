@@ -254,14 +254,14 @@ def side_texture(w: int, h: int, tint: str, k: float, label: str = "", u: int = 
 GLYPHS = "abcdefghijklmnopqrstuvwxyz0123456789#$%&*+-/<>=?@"
 
 
-def matrix_texture(block: Block, w: int, h: int, t: float, u: int = 1) -> Texture:
+def matrix_texture(block: Block, w: int, h: int, t: float, u: int = 1, px: Optional[int] = None) -> Texture:
     """The top of a block: green characters falling through a dark terminal. They are drawn from the block's own words -
     its title and the labels of its buttons - mixed with digits and symbols, so every block rains its own text."""
     w, h = max(8, w), max(8, h)
     fb = Framebuffer(w, h)
     fbgfx.gradient_v(fb, 0, 0, w, h, "#00120a", "#000a05")
     mono = ttf.load("mono")
-    px = max(6, 6 * u)
+    px = px or max(6, 6 * u)
     cw, lh = max(4, int(px * 0.6)), max(6, int(px * 1.15))
     cols, rows = max(1, w // cw), max(1, h // lh)
     corpus = [c for word in (block.words or [block.name]) for c in word if c.isprintable() and not c.isspace()] or list(GLYPHS)
@@ -327,7 +327,7 @@ def faces_of(b: Block, matrix_t: float, u: int):
 
 
 def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera, matrix_t: float, u: int,
-           shadow=None) -> None:
+           shadow=None, floor_words: Optional[list] = None) -> None:
     """Paint the wallpaper plane, then every block, farthest first. Fills in each block's projected front quad (``quad``, ``inv``)
     so a click on it can be traced back to the flat layer."""
     W, H = out.width, out.height
@@ -353,6 +353,18 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
         pad_fb.buf[y * pad_fb.width * 4:(y + 1) * pad_fb.width * 4] = bytes(line)
     plane = [cam.project(*c)[:2] for c in corners]
     fill_face(out, plane, Texture(pad_fb))
+    if floor_words is not None:
+        # the ground: a terminal. It runs from the bottom edge of the wall toward the viewer, and the same falling text rains on it
+        H0 = H
+        depth = int(1.5 * W)
+        fw, fh = int(2.6 * W) // 2, depth // 2
+        ground = Block("ground", "ground", (0, 0, fw, fh), 0, 1, None, words=floor_words or ["kos"])
+        gt = matrix_texture(ground, fw, fh, matrix_t, u, px=max(8, 7 * u))
+        ground_quad = [cam.project(*c)[:2] for c in ((-0.8 * W, H0, 0), (1.8 * W, H0, 0), (1.8 * W, H0, depth), (-0.8 * W, H0, depth))]
+        rc = cam.rotate(W / 2, H0, depth / 2)
+        nr = cam.normal_faces(0, -1, 0)
+        if nr[0] * (0 - rc[0]) + nr[1] * (0 - rc[1]) + nr[2] * (cam.dist - rc[2]) > 0:        # only when it faces the viewer
+            fill_face(out, ground_quad, gt)
     if shadow:
         shadow(out, cam)
     for b in blocks:
