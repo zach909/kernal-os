@@ -177,8 +177,16 @@ widget details still use the pixel font.
 immersive ones, below). **Ctrl-Up** looks down at the looks as a stack of cards (interface in front, text and terminal behind); click one to pick it.
 
 * **normal** - glass, pills, smooth type.
-* **3d** - deeper bevels and shadows, a 3D pointer that presses down, bubbles on click, and the **whole screen tilts** a little toward the
-  direction you move or click (options for each). The tilt is a cheap shear done with row and strip copies - an approximation of perspective, not a 3D transform.
+* **3d** - **everything is a solid block**. Every window, the menubar, the dock, the sidebar, each widget and the launcher is a box standing on the
+  wallpaper: the **front** is what the app draws (frosted glass and all), the **top** is a terminal - green characters made of that app's own words
+  fall through it, so *look down at a block and you see its terminal* - the **back** is the list of its buttons, and the **sides** are tinted glass
+  edges. Blocks rest on what is beneath them (a widget on the sidebar). **Go around it**: Alt + arrow keys, or drag with the middle button
+  (Alt-0 resets; `kos desktop shot --orbit YAW,PITCH`). Text is extruded (letters have depth), icon symbols are solid, the pointer is a 3D arrow that
+  presses down, clicks pop bubbles, and the screen tilts a little toward your movement (options for each; "blocks" turns the box model off). Clicks
+  still work through the camera: the point you aim at is traced back to the flat layer. *How:* each face is a flat quad, which a perspective camera
+  turns into a homography of its texture, so every face is filled scanline by scanline from its texture (`kos/blocks.py`). *Honest limits:* pure
+  Python - a frame is composed once and cached, so orbiting is a few frames a second, not smooth; blocks are boxes, not arbitrary meshes; there is no
+  colour-emoji font, so emoji are not drawn (icons and text are).
 * **vr** - virtual reality: **one picture per eye**, side by side (half-width each, the usual half side-by-side format). Every layer sits at a depth -
   the wallpaper far away, windows and the sidebar nearer, effects and the pointer nearest - and each eye sees it shifted by that depth's disparity;
   moving the pointer turns your head, which slides the far layers more than the near ones. *Not here:* head tracking from a headset's sensors, lens

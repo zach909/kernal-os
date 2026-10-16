@@ -126,6 +126,18 @@ its child - the child inherits Landlock, the empty network namespace and no_new_
 executable (`exec_scratch`) because their runtime unpacks there; the sandbox now also allows symlinks in scratch. The converter never executes anything,
 drops setuid bits, resolves symlinks inside the package only, ignores maintainer scripts, scans the result and refuses a flagged one.
 
+## The 3D look: blocks (`kos/blocks.py`, `kos/shell.py`)
+`Shell._layer_blocks` makes one `Block` per shown layer: its front texture (`_front_texture`: glass layers painted over the wallpaper and given a
+rounded alpha mask; layers with no glass painted over black and over white to recover transparency), its height (`BLOCK_HEIGHT`, windows by size) and
+`z_back` = the highest block beneath it that overlaps it (windows rest on panels, not on each other; they stack by a small step). `blocks.render` draws
+the wallpaper as a plane larger than the screen, then each block farthest first: for every face it tests the outward normal against the camera,
+projects the four corners, and `fill_face` walks the scanlines, computing texture coordinates from the inverse homography (exact at the ends of 8-pixel
+spans, linear between), halving the texture when the face is small. The top face is `matrix_texture` (drawn from the block's own words, animated by
+`Shell._matrix_t`, which only ticks while a top face can be seen), the back is `controls_texture`. `Shell.cam` is yaw/pitch; `orbit()` changes it, Alt+arrows
+and the middle-button drag call it; `_flat` unprojects a pointer position through the nearest block's inverse homography so `_route` hit-tests on flat
+coordinates while the cursor is drawn where the pointer really is. `Framebuffer.apply(extrude=True)` gives text depth in this look. Gap: speed
+(cached per scene and camera, ~0.3-1 s a frame), no arbitrary meshes, no emoji font.
+
 ## Scoped capabilities and the ledger (`kos/capabilities.py`, `kos/services.py`)
 `capabilities.ACTION_SCOPE` maps every OS request to one scope; a manifest holds `system:<scope>` permissions (`Manifest.scopes`; the bare `system` is
 `{"*"}` and fits no mod slot). `SystemBridge(scopes=...)` checks every request before dispatch, `Layer.allows(action)` gates the shell's own handlers and
