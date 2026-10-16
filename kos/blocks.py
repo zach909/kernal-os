@@ -339,14 +339,18 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
     pad_fb = Framebuffer(int(W * (1 + 2 * pad)) // 2, int(H * (1 + 2 * pad)) // 2)
     small = backdrop.halved() if backdrop.w >= 2 else backdrop
     ox, oy = (pad_fb.width - small.w) // 2, (pad_fb.height - small.h) // 2
+    def mirror(i: int, n: int) -> int:                       # beyond the wallpaper's edge it is reflected, not smeared
+        i %= 2 * n
+        return i if i < n else 2 * n - 1 - i
+
+    cols = [mirror(x - ox, small.w) for x in range(pad_fb.width)]
     for y in range(pad_fb.height):
-        sy = min(small.h - 1, max(0, y - oy))
-        row = small.fb.buf[sy * small.w * 4:(sy + 1) * small.w * 4]
-        line = bytearray(pad_fb.width * 4)
-        line[0:ox * 4] = row[0:4] * ox
-        line[ox * 4:(ox + small.w) * 4] = row
-        line[(ox + small.w) * 4:] = row[-4:] * (pad_fb.width - ox - small.w)
-        pad_fb.buf[y * pad_fb.width * 4:(y + 1) * pad_fb.width * 4] = line
+        sy = mirror(y - oy, small.h)
+        row = memoryview(small.fb.buf)[sy * small.w * 4:(sy + 1) * small.w * 4].cast("I")
+        line = memoryview(bytearray(pad_fb.width * 4)).cast("I")
+        for x, c in enumerate(cols):
+            line[x] = row[c]
+        pad_fb.buf[y * pad_fb.width * 4:(y + 1) * pad_fb.width * 4] = bytes(line)
     plane = [cam.project(*c)[:2] for c in corners]
     fill_face(out, plane, Texture(pad_fb))
     if shadow:
