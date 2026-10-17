@@ -5214,6 +5214,72 @@ class TestAgentBridge(Env):
         self.assertEqual(role(), "app")
 
 
+class TestRunsFromAPrivateFolder(Env):
+    """Apps never run from inside their zip: the verified archive is unpacked into a private read-only folder, checked, and run from there."""
+
+    def app(self):
+        src = Path(self.tmp.name) / "pyapp"
+        src.mkdir(exist_ok=True)
+        (src / "manifest.json").write_text(json.dumps({"name": "pyhello", "version": "1.0", "runtime": "python", "entry": "main:main", "modes": ["cmd"]}))
+        (src / "main.py").write_text("import os, sys\n\ndef main():\n    sys.stderr.write(os.environ['KOS_APP_DIR'])\n")
+        out = Path(self.tmp.name) / "pyhello.kapp"
+        pack(src, out)
+        return KApp.from_file(out)
+
+    def test_a_python_app_is_run_from_an_unpacked_private_folder_not_from_its_zip(self):
+        app = self.app()
+        a, b = socket.socketpair()
+        self.addCleanup(lambda: (a.close(), b.close()))
+        plan = loader.plan(app, b.fileno(), "tui")
+        try:
+            folder = Path(plan.env["KOS_APP_DIR"])
+            self.assertTrue(folder.is_dir())
+            self.assertFalse(any("/proc/self/fd" in part for part in plan.argv))      # nothing is imported from a zip in memory
+            self.assertNotIn("KOS_KAPP_FD", plan.env)
+            self.assertEqual(plan.ro_dirs, [str(folder)])                              # the app may read it, never write it
+            for f in folder.rglob("*"):
+                self.assertFalse(f.stat().st_mode & 0o222, f)                          # every file and folder is read-only
+            self.assertEqual(oct(plan.temp_dir.stat().st_mode & 0o777), oct(0o755 if os.geteuid() == 0 else 0o700))
+            self.assertEqual((folder / "main.py").read_bytes(), app.read("main.py"))
+        finally:
+            plan.close()
+            kcache.wipe(plan.temp_dir)
+        self.assertFalse(plan.temp_dir.exists())                                       # wiped
+
+    def test_the_unpacked_files_are_compared_with_the_archive_before_anything_runs(self):
+        app = self.app()
+        dest = Path(self.tmp.name) / "unpacked"
+        loader.unpack(app, dest)
+        loader.verify_unpacked(app, dest)                                              # exact: fine
+        victim = dest / "main.py"
+        os.chmod(dest, 0o755)
+        os.chmod(victim, 0o644)
+        victim.write_bytes(victim.read_bytes() + b"\nimport os\n")
+        with self.assertRaises(KAppError):
+            loader.verify_unpacked(app, dest)
+
+    def test_a_real_app_runs_from_the_folder_and_the_folder_is_gone_when_it_ends(self):
+        app = self.app()
+        a, b = socket.socketpair()
+        plan = loader.plan(app, b.fileno(), "cmd")
+        folder = plan.temp_dir
+        proc = loader.launch(plan, SandboxPolicy(), None)
+        try:
+            ch = Channel(a)
+            ch.send({"cmd": "hello", "mode": "cmd"})
+            deadline = _time.time() + 5
+            while _time.time() < deadline and proc.poll() is None and not os.path.exists(folder / "app"):
+                _time.sleep(0.05)
+            self.assertTrue((folder / "app" / "main.py").exists())
+        finally:
+            proc.kill()
+            proc.wait()
+            a.close()
+            b.close()
+            kcache.wipe(folder)
+        self.assertFalse(folder.exists())
+
+
 class TestCompilerPath(Env):
     """A line of C, C++, Go, JavaScript, Perl, ... is built and run by the machine's own toolchain inside the sandbox."""
 

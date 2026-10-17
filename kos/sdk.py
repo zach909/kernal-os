@@ -258,9 +258,9 @@ class App:
         return os.environ.get("KOS_DATA_DIR")
 
     def resource(self, name: str) -> bytes:
-        """Read a file from this app's own zip (still never extracted)."""
+        """Read a file from this app's own code: it was unpacked (and checked) into a private read-only folder when it started."""
         root = os.environ.get("KOS_APP_DIR")
-        if root:                              # npm apps are unpacked read-only into RAM
+        if root:
             full = os.path.realpath(os.path.join(root, name))
             if not full.startswith(os.path.realpath(root) + os.sep):
                 raise ValueError("outside the app")

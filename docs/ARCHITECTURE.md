@@ -20,7 +20,7 @@ exists only in mlock'd memory for the duration of one action.
 install: validate zip → **scan** (`kos/scan.py`; a flagged zip is quarantined
 and the password is never asked) → password → seal → store zip unchanged.
 run: permit check (`kos/permit.py`; refused before the password too) →
-password → verify seal *before* parsing → sealed memfd → sandboxed process
+password → verify seal *before* parsing → unpack into a private read-only folder (RAM when possible) and compare with the archive → sandboxed process run from that folder
 (nobody, no_new_privs, user/net/ipc/uts namespaces, rlimits, Landlock
 fs+net+signal scoping, one private writable cache dir) → only a command
 socket to the OS. The cache dir is securely wiped (`kos/cache.py`) the
@@ -248,8 +248,9 @@ writable directory and `app` + the Node prefix as read-only. Command:
 empty user/global npmrc files (npm refuses to load one file twice), `OPENSSL_CONF=/dev/null`
 (node reads `/etc/ssl/openssl.cnf` at start; the sandbox says no) and a 64 GiB address-space
 limit (V8 reserves address space it never touches). **npm closes inherited fds above 2**, so
-the command channel of an npm app is its **stdin** (`KOS_CHANNEL_FD=0`). Gap: the code is
-unpacked (RAM only) rather than run from a sealed memfd; npm startup costs ~0.25 s.
+the command channel of an npm app is its **stdin** (`KOS_CHANNEL_FD=0`). Every runtime now
+runs from a private unpacked folder (`loader.private_root`, `unpack`, `verify_unpacked`), wiped by the broker at exit; trade-off: a sealed memfd could not be swapped at all, while a folder
+owned by the same user could be - the 0700 mode, read-only files and the read-back check narrow that, they do not remove it. npm startup costs ~0.25 s.
 
 ## OS facts and control (`kos/osinfo.py`, `kos/proctl.py`, `kos/fschange.py`)
 Eight read-only readers over `/proc` and `/sys` (`sys` request; roots are parameters so

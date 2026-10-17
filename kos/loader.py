@@ -1,20 +1,11 @@
-"""Run an app straight out of its zip, without unzipping anything to disk.
+"""Run an app from a private folder - never from inside its zip.
 
-1. The verified zip bytes are copied into a ``memfd`` (an anonymous file that
-   exists only in RAM) and the memfd is *sealed*: after sealing, the kernel
-   refuses every write, shrink or grow, even from us. What runs is therefore
-   byte-for-byte what the seal check approved - there is no window in which
-   the file on disk could be swapped (no TOCTOU).
-2. Python apps: the interpreter imports modules directly from the zip in the
-   memfd (``zipimport`` on ``/proc/self/fd/N``).
-   Native apps: the ELF entry is read from the zip into a second sealed memfd
-   and executed with ``fexecve`` semantics (exec of ``/proc/self/fd/N``).
-   Native apps must be statically linked.
-   npm apps (``runtime: "npm"``): npm needs a real folder, so the verified zip
-   is unpacked into a private directory on **tmpfs (RAM, never the disk)**,
-   read-only to the app, with a separate writable scratch directory, and run as
-   ``npm run <script>`` (or ``npx --no-install <tool>``) - offline, no install,
-   inside the same sandbox. The whole directory is wiped when the app ends.
+1. The zip is checked against its seal first. Then **every runtime does the same**: the verified archive is unpacked into a fresh private directory
+   (in RAM, ``/dev/shm``, whenever programs may run from there, so unpacked code never touches the disk; mode 0700), every file read-only, and the
+   unpacked files are read back and compared with the archive before anything is started. The directory is wiped when the app ends.
+2. Python apps: the interpreter imports modules from that folder. Native apps: the ELF entry is executed from it (statically linked).
+   npm apps (``runtime: "npm"``): run as ``npm run <script>`` (or ``npx --no-install <tool>``) - offline, no install, inside the same sandbox, with a
+   separate writable scratch directory next to the read-only code. Bundles (a program tree from a .deb or AppImage) likewise.
 3. The app gets one inherited socket (``KOS_CHANNEL_FD``). Its stdin/stdout
    are ``/dev/null``: it cannot write to your terminal. Everything it wants to
    show goes through the session as validated commands.
@@ -33,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import cache
 from .kapp import KApp, KAppError
 from .sandbox import SandboxPolicy
 
@@ -76,6 +68,7 @@ class LaunchPlan:
     rw_dirs: list[str] = field(default_factory=list)    # what the sandbox must allow this app to write
     ro_dirs: list[str] = field(default_factory=list)    # ... and to read (its unpacked code, node)
     temp_dir: Optional[Path] = None                     # scratch we created because the caller gave none
+    big_address_space: bool = False                     # V8 and friends reserve far more address space than they use
 
     def close(self) -> None:
         for fd in self.owned_fds:
@@ -187,7 +180,7 @@ def _plan_npm(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path]) 
         argv = [node, npm_cli, "run", m.entry]
     return LaunchPlan(argv=argv, executable=node, env=env, pass_fds=[], cwd=str(app_dir),
                       stdin_fd=channel_fd, rw_dirs=[str(scratch)], ro_dirs=[str(app_dir), prefix],
-                      temp_dir=temp)
+                      temp_dir=temp, big_address_space=True)
 
 
 _HOST_BOOT_SH = ("import sys\nsdk = sys.argv[1]\ndel sys.argv[1:2]\nsys.path[:0] = [sdk]\n"
@@ -231,7 +224,7 @@ def _plan_bundle(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path
            **_npm_env(scratch)}
     ro = [str(app_dir), str(host), prefix] + ([str(scratch)] if m.exec_scratch else [])
     return LaunchPlan(argv=[node, npm_cli, "run", "start"], executable=node, env=env, pass_fds=[],
-                      cwd=str(host), stdin_fd=channel_fd, rw_dirs=[str(scratch)], ro_dirs=ro, temp_dir=temp)
+                      cwd=str(host), stdin_fd=channel_fd, rw_dirs=[str(scratch)], ro_dirs=ro, temp_dir=temp, big_address_space=True)
 
 
 def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None) -> LaunchPlan:
@@ -240,35 +233,55 @@ def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None
         return _plan_npm(app, channel_fd, mode, cache_dir)
     if m.runtime == "bundle":
         return _plan_bundle(app, channel_fd, mode, cache_dir)
-    kapp_fd = sealed_memfd(m.name, app.data)
-    owned = [kapp_fd]
-    env = {
-        "KOS_CHANNEL_FD": str(channel_fd),
-        "KOS_KAPP_FD": str(kapp_fd),
-        "KOS_APP": m.name,
-        "KOS_MODE": mode,
-        "LANG": "C.UTF-8",
-        "PATH": "/usr/bin:/bin",
-    }
-    if cache_dir is not None:
-        env["KOS_CACHE_DIR"] = str(cache_dir)
-    if m.runtime == "python":
-        exe = os.path.realpath(sys.executable)
-        argv = [exe, "-I", "-S", "-B", "-c", _BOOTSTRAP,
-                f"/proc/self/fd/{kapp_fd}", m.entry, SDK_DIR]
-    else:
-        exe_fd = sealed_memfd(f"{m.name}-bin", app.read(m.entry))
-        owned.append(exe_fd)
-        exe = f"/proc/self/fd/{exe_fd}"
-        argv = [m.name]
-    return LaunchPlan(argv=argv, executable=exe, env=env,
-                      pass_fds=[channel_fd, *owned], owned_fds=owned)
+    return _plan_unpacked(app, channel_fd, mode, cache_dir)
+
+
+def private_root(runtime_needs_exec: bool) -> Path:
+    """A fresh private directory for one run's unpacked code: in RAM (/dev/shm) when programs may run from there, so unpacked code never
+    touches the disk; mode 0700 (0755 only when developing as root, where the app runs as another user and must be able to reach it)."""
+    shm = "/dev/shm" if os.access("/dev/shm", os.W_OK) and (not runtime_needs_exec or cache.shm_executable()) else None
+    root = Path(tempfile.mkdtemp(prefix="kos-app-", dir=shm))
+    os.chmod(root, 0o755 if os.geteuid() == 0 else 0o700)
+    return root
+
+
+def verify_unpacked(app: KApp, dest: Path) -> None:
+    """The files on disk must be exactly the sealed archive's: read them back and compare, so nothing swapped in between is ever run."""
+    for name in app.names():
+        if not name.endswith("/") and (dest / name).read_bytes() != app.read(name):
+            raise KAppError(f"{name} changed while it was being unpacked; not running {app.manifest.name}")
+
+
+def _plan_unpacked(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path]) -> LaunchPlan:
+    """Python and native apps never run from inside their zip: the verified archive is unpacked into a private folder (read-only, in RAM when
+    possible), checked against the archive, and run from there. The folder is wiped when the app ends."""
+    m = app.manifest
+    root = private_root(runtime_needs_exec=m.runtime == "native")
+    app_dir = root / "app"
+    try:
+        unpack(app, app_dir)
+        verify_unpacked(app, app_dir)
+        env = {"KOS_CHANNEL_FD": str(channel_fd), "KOS_APP": m.name, "KOS_MODE": mode, "KOS_APP_DIR": str(app_dir),
+               "LANG": "C.UTF-8", "PATH": "/usr/bin:/bin"}
+        if cache_dir is not None:
+            env["KOS_CACHE_DIR"] = str(cache_dir)
+        if m.runtime == "python":
+            argv = [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", _BOOTSTRAP, str(app_dir), m.entry, SDK_DIR]
+            exe = argv[0]
+        else:
+            exe = str(app_dir / m.entry)
+            os.chmod(exe, 0o555)
+            argv = [m.name]
+    except BaseException:
+        cache.wipe(root)
+        raise
+    return LaunchPlan(argv=argv, executable=exe, env=env, pass_fds=[channel_fd], ro_dirs=[str(app_dir)], temp_dir=root)
 
 
 def launch(p: LaunchPlan, policy: SandboxPolicy, log_path: Optional[Path]) -> subprocess.Popen:
     policy.rw_dirs = [*policy.rw_dirs, *(d for d in p.rw_dirs if d not in policy.rw_dirs)]
     policy.read_paths = [*policy.read_paths, *(d for d in p.ro_dirs if d not in policy.read_paths)]
-    if p.ro_dirs:
+    if p.big_address_space:
         policy.max_memory = max(policy.max_memory, 64 << 30)
     if policy.data_dir:
         p.env = {**p.env, "KOS_DATA_DIR": policy.data_dir}
@@ -280,7 +293,6 @@ def launch(p: LaunchPlan, policy: SandboxPolicy, log_path: Optional[Path]) -> su
             stdout=subprocess.DEVNULL, stderr=log,
             cwd=p.cwd, start_new_session=True, preexec_fn=policy.preexec())
         if p.temp_dir is not None:
-            from . import cache
             weakref.finalize(proc, cache.wipe, p.temp_dir)
         return proc
     finally:

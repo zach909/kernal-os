@@ -1,8 +1,8 @@
-"""The ``.kapp`` app format: a plain zip file that is never unzipped.
+"""The ``.kapp`` app format: a plain zip file, sealed, and never *run* while zipped.
 
 An app is installed by copying the zip as-is into the store. At run time the
-zip bytes are loaded into a sealed in-memory file and executed from there
-(see ``loader.py``); no file inside the archive is ever written to disk.
+verified archive is unpacked into a private read-only folder (RAM when possible)
+and run from there (see ``loader.py``); the folder is wiped when the app ends.
 
 Why this is a security feature and not just a quirk:
 

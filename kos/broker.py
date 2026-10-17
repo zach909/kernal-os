@@ -50,12 +50,13 @@ def daemonize(log_path: Path) -> None:
 
 class Broker:
     def __init__(self, inst: Instance, registry: Registry, app_channel: socket.socket,
-                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None):
+                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None, also_wipe: Optional[Path] = None):
         self.inst = inst
         self.registry = registry
         self.app_channel = app_channel
         self.app_proc = app_proc
         self.cache_dir = cache_dir
+        self.also_wipe = also_wipe                       # the private folder the app's code was unpacked into
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             os.unlink(inst.sock_path)
@@ -166,6 +167,8 @@ class Broker:
             pass
         if self.cache_dir is not None:
             cache.wipe(self.cache_dir)
+        if self.also_wipe is not None and self.also_wipe != self.cache_dir:
+            cache.wipe(self.also_wipe)
         self.registry.remove(self.inst.id)
 
 
@@ -203,7 +206,7 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
         lp = loader.plan(app, b.fileno(), mode, cache_dir)
         proc = loader.launch(lp, policy, log_path)
         b.close()
-        Broker(inst, registry, a, proc, cache_dir or lp.temp_dir).run()
+        Broker(inst, registry, a, proc, cache_dir or lp.temp_dir, also_wipe=lp.temp_dir).run()
     except BaseException as e:  # pragma: no cover - last-resort broker crash path
         try:
             print(f"kos-broker: {e!r}", file=sys.stderr)
