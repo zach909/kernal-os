@@ -5099,6 +5099,121 @@ class TestClearBackgrounds(Env):
         self.assertIn(("Close", "hit"), got)                                        # and the app's own declared control
 
 
+class TestSwipeBetweenDesktops(Env):
+    """A quick horizontal drag on the bare desktop changes desktop: left for the next, right for the one before."""
+
+    layer = TestLooksAndControls.layer
+    make = TestLooksAndControls.make
+
+    def swipe(self, s, x0, x1, y0=300, y1=300):
+        s.route({"type": "button", "button": "left", "pressed": True, "x": x0, "y": y0})
+        s.route({"type": "pointer", "x": x1, "y": y1})
+        s.route({"type": "button", "button": "left", "pressed": False, "x": x1, "y": y1})
+
+    def test_swipe_left_goes_to_the_next_desktop_and_right_to_the_one_before(self):
+        s = self.make()
+        s.booted.add("mouse")
+        self.layer(s, "wallpaper", "wallpaper", (0, 0, s.W, s.H), [["rect", 0, 0, s.W, s.H, "#102030"]])
+        self.assertEqual(s.ws, 0)
+        self.swipe(s, 700, 300)
+        self.assertEqual(s.ws, 1)
+        self.swipe(s, 700, 300)
+        self.assertEqual(s.ws, 2)
+        self.swipe(s, 200, 700)
+        self.assertEqual(s.ws, 1)
+        for _ in range(6):
+            self.swipe(s, 200, 700)
+        self.assertEqual(s.ws, 0)                                                # no desktop before the first
+
+    def test_a_short_slow_or_diagonal_drag_and_a_drag_that_starts_on_a_window_are_not_swipes(self):
+        s = self.make()
+        s.booted.add("mouse")
+        self.layer(s, "wallpaper", "wallpaper", (0, 0, s.W, s.H), [])
+        self.swipe(s, 500, 460)                                                  # too short
+        self.swipe(s, 700, 300, 100, 400)                                        # more down than across
+        self.assertEqual(s.ws, 0)
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 700, "y": 300})
+        s._swipe = (700, 300, __import__("time").monotonic() - 5)                # held for five seconds: a drag, not a swipe
+        s.route({"type": "button", "button": "left", "pressed": False, "x": 300, "y": 300})
+        self.assertEqual(s.ws, 0)
+        self.layer(s, "files", "window", (400, 200, 300, 200))
+        self.swipe(s, 600, 100, 300, 300)                                        # began on a window
+        self.assertEqual(s.ws, 0)
+
+
+class TestAgentBridge(Env):
+    """An outside AI agent can only hand over a plan; the plan is checked twice (CLI and app) and the OS asks the password for it."""
+
+    ROOT = Path(__file__).resolve().parent.parent / "examples" / "optional" / "agent-bridge"
+    CASES = [
+        {"title": "ok", "steps": [{"action": "open", "app": "resources"}, {"action": "sys", "kind": "memory"}, {"action": "apps"}]},
+        {"title": "ok", "steps": [{"action": "open", "app": "files", "mode": "tui"}, {"action": "focus", "id": "files-0a1b2c"}, {"action": "netcheck"}]},
+        {"title": "", "steps": [{"action": "apps"}]},
+        {"title": "x" * 81, "steps": [{"action": "apps"}]},
+        {"title": "no steps", "steps": []},
+        {"title": "nine", "steps": [{"action": "apps"}] * 9},
+        {"title": "writes", "steps": [{"action": "save", "path": "/etc/passwd", "text": "x"}]},
+        {"title": "files", "steps": [{"action": "view", "path": "/etc/shadow"}]},
+        {"title": "line", "steps": [{"action": "line", "text": "rm -rf /"}]},
+        {"title": "sudo", "steps": [{"action": "sudo", "op": "open"}]},
+        {"title": "bad app", "steps": [{"action": "open", "app": "../x"}]},
+        {"title": "bad id", "steps": [{"action": "close", "id": "nope"}]},
+        {"title": "bad kind", "steps": [{"action": "sys", "kind": "stat"}]},
+        {"title": "not a list", "steps": {"action": "apps"}},
+        ["a list"], "text", None,
+    ]
+
+    def js_verdicts(self):
+        import subprocess
+        code = "const {plan}=require(process.argv[1]); const c=JSON.parse(process.argv[2]); console.log(JSON.stringify(c.map(x=>plan(x).ok)));"
+        out = subprocess.run(["node", "-e", code, str(self.ROOT / "plan.js"), json.dumps(self.CASES)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_python_and_the_app_agree_on_which_plans_are_allowed(self):
+        from kos import agentplan
+        py = [agentplan.check(c)[0] for c in self.CASES]
+        self.assertEqual(py[:2], [True, True])
+        self.assertFalse(any(py[2:]))
+        self.assertEqual(self.js_verdicts(), py)
+
+    def test_an_allowed_plan_is_a_valid_assistant_plan_for_the_os(self):
+        from kos import agentplan
+        for c in self.CASES[:2]:
+            ok, _, plan = agentplan.check(c)
+            msg = validate_app_message({"cmd": "request", "action": "propose", "title": plan["title"], "steps": plan["steps"]}, "graphical")
+            self.assertEqual(len(msg["steps"]), len(c["steps"]))
+
+    def test_submit_cleans_the_plan_and_never_overwrites_one_waiting(self):
+        from kos import agentplan
+        inbox = Path(self.tmp.name) / "box" / "inbox"
+        raw = json.dumps({"agent": "evil/../name", "title": "t", "steps": [{"action": "apps", "extra": "ignored"}]}).encode()
+        ok, _, a = agentplan.submit(inbox, raw, "my plan.json")
+        ok2, _, b = agentplan.submit(inbox, raw, "my plan.json")
+        self.assertTrue(ok and ok2)
+        self.assertNotEqual(a, b)
+        self.assertEqual(json.loads(a.read_text()), {"title": "t", "steps": [{"action": "apps"}], "agent": "evil..name"})
+        self.assertFalse(agentplan.submit(inbox, b"{not json", "x")[0])
+        self.assertFalse(agentplan.submit(inbox, b"x" * 30000, "x")[0])
+
+    def test_the_bridge_is_an_assistant_that_holds_only_apps_and_os(self):
+        m = Manifest.parse((self.ROOT / "manifest.json").read_bytes())
+        self.assertEqual((m.driver, set(m.scopes), m.runtime), ("assistant", {"apps", "os"}, "npm"))
+        self.assertIn("assist", m.permissions)
+        self.assertNotIn("network", m.permissions)                                        # it never reaches the internet
+
+    def test_the_services_report_gives_every_app_a_role(self):
+        from kos import services
+        from kos.kapp import Manifest as M
+        base = {"name": "x", "version": "1", "runtime": "python", "entry": "m", "modes": ["graphical"]}
+        role = lambda **kw: services.role_of(M.parse(json.dumps({**base, **kw}).encode()))
+        self.assertEqual(role(driver="interface", permissions=["compose"]), "interface")
+        self.assertEqual(role(driver="assistant", permissions=["assist"]), "assistant or agent")
+        self.assertEqual(role(driver="camera"), "hardware driver")
+        self.assertEqual(role(name="dock"), "desktop part")
+        self.assertEqual(role(), "app")
+
+
 class TestCompilerPath(Env):
     """A line of C, C++, Go, JavaScript, Perl, ... is built and run by the machine's own toolchain inside the sandbox."""
 

@@ -81,6 +81,21 @@ def scopes_needed(src_dir: Path) -> set[str]:
     return {capabilities.ACTION_SCOPE[a] for a in actions_used(src_dir) if a in capabilities.ACTION_SCOPE}
 
 
+ROLES = ("desktop part", "interface", "assistant or agent", "hardware driver", "app")
+
+
+def role_of(m) -> str:
+    """What kind of part of KOS an app is - every kind is an app, and each is sandboxed and holds only its own scopes."""
+    from .shell import CORE
+    if m.driver == "interface":
+        return "interface"
+    if m.driver == "assistant":
+        return "assistant or agent"
+    if m.driver:
+        return "hardware driver"
+    return "desktop part" if m.name in CORE or m.name in ("taskbar", "wallpaper") else "app"
+
+
 def report(paths, sandboxed: bool = True) -> dict:
     """Every installed app with the scopes it holds, and whether any holds the bare ``system`` permission."""
     from .kapp import KApp
@@ -94,6 +109,6 @@ def report(paths, sandboxed: bool = True) -> dict:
         scopes = sorted(m.scopes)
         if "*" in scopes:
             blanket.append(m.name)
-        apps.append({"name": m.name, "runtime": m.runtime, "scopes": scopes, "network": "network" in m.permissions,
+        apps.append({"name": m.name, "role": role_of(m), "runtime": m.runtime, "scopes": scopes, "network": "network" in m.permissions,
                      "devices": list(m.devices), "driver": m.driver, "slot": m.slot})
     return {"core": [{"part": p, "does": d, "cannot": c} for p, d, c in CORE], "apps": apps, "blanket": blanket}

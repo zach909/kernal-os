@@ -1,0 +1,17 @@
+{
+  "name": "agent-bridge",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "assist",
+    "ticks",
+    "system:apps",
+    "system:os"
+  ],
+  "driver": "assistant",
+  "description": "A mailbox for outside AI agents: they drop a plan, you see it and approve it with your password. The agent gets no access of its own."
+}

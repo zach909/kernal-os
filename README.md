@@ -178,6 +178,20 @@ pure-Python TrueType rasterizer (`kos/ttf.py`, exact-coverage anti-aliasing) usi
 the app windows' *content* is still the older text-mode pages (now drawn in a smooth monospace font), and a few
 widget details still use the pixel font.
 
+### Agents: an outside AI can propose, only you can approve
+
+An AI agent (Claude Code, a script, any program you run yourself) cannot live inside the OS and should not be trusted with it. The optional **agent bridge**
+(`kos desktop install --optional agent-bridge`) is a mailbox between the two: the agent drops a plan - `{"agent": "claude-code", "title": "...", "steps": [...]}` -
+into the bridge's inbox (or runs `kos agent propose plan.json`; `kos agent` prints the folders, `kos agent results` the answers). A plan is at most eight steps of
+*open, focus, close, apps, info, netcheck, sys* - launching and looking, no files, no commands, no writes. It is checked twice (`kos/agentplan.py` and the
+bridge's `plan.js`, which a test keeps identical), then proposed to the OS like any assistant's plan: the OS shows it and asks for **your password, never
+remembered** (a sudo window cannot approve it); only then does each step run, as the bridge, which holds `system:apps` and `system:os` and nothing else, no network.
+The answer goes to the outbox for the agent. *Honest limits:* the agent is outside the sandbox (it is whatever you run); the bridge cannot stop it writing
+to its own inbox, only from doing anything without you; there is no live chat with a model - a model that wants to plan from your words is an assistant app you
+give network access, as with `assistant`.
+
+**Swipe** a quick horizontal drag on the bare desktop: left for the next desktop, right for the one before (four desktops; it never fires from a window).
+
 ### Clear backgrounds: apps do not have to be square
 
 Colours can be see-through: `#rrggbbaa` (the last two digits are the opacity) in `clear`, `rect`, `line` and `poly` ops, so the desktop shows through

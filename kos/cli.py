@@ -5,6 +5,7 @@
     kos pack DIR -o APP.kapp        build an app zip from a directory
     kos install APP.kapp            install (the zip is stored as-is, sealed)
     kos quantum devices|run FILE    (optional) a thin helper over the hardware-driver mechanism, for quantum drivers
+    kos agent [propose PLAN.json|results]   a mailbox for outside AI agents: they propose plans, you approve each with your password
     kos autoupdate status|on|off|mode|every|run   keep apps current; see what KOS and the OS have waiting
     kos heal [--fix]                look for broken state and repair it (nothing lowers a gate)
     kos mod list|enable NAME|disable NAME   system mods: apps that replace a part of the interface
@@ -1038,6 +1039,33 @@ def cmd_doctor(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_agent(args, paths: Paths) -> int:
+    """`kos agent [path|propose FILE|results]`: the mailbox for outside AI agents (the optional agent-bridge app). An agent hands over a
+    plan; the bridge shows it and the OS asks the owner's password before any step runs. The agent gets no access of its own."""
+    from . import agentplan
+    box = paths.data_dir("agent-bridge")
+    if args.agent_cmd == "propose":
+        if not args.file:
+            raise KAppError("kos agent propose PLAN.json")
+        raw = Path(args.file).read_bytes() if args.file != "-" else sys.stdin.buffer.read()
+        ok, why, dest = agentplan.submit(box / "inbox", raw, "stdin" if args.file == "-" else args.file)
+        if not ok:
+            raise KAppError(f"plan refused: {why}")
+        print(f"queued {dest.name}: the agent bridge will show it and ask for your password (install it with: kos desktop install --optional agent-bridge)")
+        return 0
+    if args.agent_cmd == "results":
+        out = sorted((box / "outbox").glob("*.result.json")) if (box / "outbox").is_dir() else []
+        for f in out:
+            print(f"{f.name}: {f.read_text().strip()}")
+        if not out:
+            print("no answers yet")
+        return 0
+    print(f"inbox:  {box / 'inbox'}\noutbox: {box / 'outbox'}\n"
+          "An agent writes plan JSON into the inbox (or runs: kos agent propose PLAN.json) and reads its answer from the outbox.\n"
+          "A plan is at most 8 steps of: open, focus, close, apps, info, netcheck, sys. Nothing runs unless you type your password.")
+    return 0
+
+
 def cmd_services(args, paths: Paths) -> int:
     """`kos services`: what is the trusted core, and what every installed app may ask of the OS."""
     from . import services
@@ -1448,6 +1476,9 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    s = sub.add_parser("agent", help="a mailbox for outside AI agents: they propose plans, you approve each with your password")
+    s.add_argument("agent_cmd", nargs="?", choices=["path", "propose", "results"], default="path")
+    s.add_argument("file", nargs="?", help="propose: the plan JSON file (or - for stdin)")
     sub.add_parser("services", help="the trusted core, and what every app may ask of the OS (nothing has power over everything)")
     sub.add_parser("encryption", help="is everything encrypted? disk, swap, RAM, scratch, backups - honestly")
     s = sub.add_parser("audit", help="show the authorization log")
@@ -1491,7 +1522,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
-            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "heal": cmd_heal, "autoupdate": cmd_autoupdate, "quantum": cmd_quantum, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
+            "install": cmd_install, "convert": cmd_convert, "sudo": cmd_sudo, "policy": cmd_policy, "mod": cmd_mod, "heal": cmd_heal, "autoupdate": cmd_autoupdate, "quantum": cmd_quantum, "agent": cmd_agent, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,

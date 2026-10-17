@@ -204,6 +204,17 @@ class Shell(Compositor, SceneHost):
     down = property(lambda self: self._seat.down, lambda self, v: setattr(self._seat, "down", v))
     vel = property(lambda self: self._seat.vel)
 
+    SWIPE_PX, SWIPE_SECS = 90, 1.2                           # how far (in units of u) and how fast a drag on the bare desktop must be to count as a swipe
+
+    def _finish_swipe(self, x: int, y: int) -> None:
+        """A quick horizontal drag that began on the bare desktop: swipe left for the next desktop, right for the one before."""
+        start, self._swipe = getattr(self, "_swipe", None), None
+        if not start or self._seat.id != 0:
+            return
+        dx, dy, dt = x - start[0], y - start[1], time.monotonic() - start[2]
+        if dt <= self.SWIPE_SECS and abs(dx) >= self.SWIPE_PX * self.u and abs(dx) >= 2 * abs(dy):
+            self.set_workspace(self.ws + (1 if dx < 0 else -1))
+
     def set_workspace(self, n: int) -> None:
         n = max(0, min(WORKSPACES - 1, int(n)))
         if n == self.ws:
@@ -920,12 +931,14 @@ class Shell(Compositor, SceneHost):
                 return
             if not ev["pressed"]:
                 self.drag = None
+                self._finish_swipe(x, y)
                 hit = self.at(x, y)
                 if hit and not (hit.kind == "window" and self.chrome_hit(hit, x, y)):
                     lx, ly = self._local(hit, x, y)
                     hit.send({"cmd": "button", "button": ev["button"], "pressed": False, "x": lx, "y": ly})
                 return
             hit = self.at(x, y)
+            self._swipe = (x, y, time.monotonic()) if ev["button"] == "left" and (hit is None or hit.kind == "wallpaper") else None
             pop = next((l for l in self.layers.values() if l.kind == "popup" and l.visible), None)
             if pop is not None and hit is not pop:              # a click outside the launcher closes it
                 pop.visible = False

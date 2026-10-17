@@ -1,0 +1,7 @@
+{
+  "name": "agent-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A mailbox for outside AI agents' plans.",
+  "scripts": { "start": "node app.js" }
+}
