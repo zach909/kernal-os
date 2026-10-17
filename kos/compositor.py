@@ -47,6 +47,8 @@ class Surface:
     ws: Optional[int] = None
     rev: int = 0
     cache: Optional[tuple] = None
+    frameless: bool = False
+    cov: Optional[tuple] = None
 
 
 @dataclass
@@ -68,9 +70,32 @@ class Compositor:
 
     def content_rect(self, layer: Layer) -> tuple[int, int, int, int]:
         x, y, w, h = layer.rect
-        if layer.kind != "window":
+        if layer.kind != "window" or layer.frameless:
             return x, y, w, h
         return x + 1, y + self.titlebar, w - 2, h - self.titlebar - 1
+
+    def solid_at(self, layer: Layer, x: int, y: int) -> bool:
+        """Is the screen point (x, y) on something a frameless window drew? Found by drawing its ops on black and on white: where the two
+        differ the pixel is see-through. Computed once per picture, and only when a click or a pointer move needs it."""
+        lx, ly, lw, lh = layer.rect
+        px, py = x - lx, y - ly
+        if not (0 <= px < lw and 0 <= py < lh):
+            return False
+        if layer.cov is None or layer.cov[0] != layer.rev or layer.cov[1].width != lw or layer.cov[1].height != lh:
+            black, white = Framebuffer(lw, lh), Framebuffer(lw, lh)
+            white.buf[:] = b"\xff" * len(white.buf)
+            black.apply(layer.ops)
+            white.apply(layer.ops)
+            layer.cov = (layer.rev, black, white)
+        _, black, white = layer.cov
+        i = (py * lw + px) * 4
+        seen = sum(white.buf[i:i + 3]) - sum(black.buf[i:i + 3])             # 0 where solid, 765 where clear
+        return 255 - seen // 3 > 24
+
+    def drag_handle(self, layer: Layer, x: int, y: int) -> bool:
+        """Does the app declare a ``drag`` handle under the screen point (x, y)?"""
+        px, py = x - layer.rect[0], y - layer.rect[1]
+        return any(op[0] == "drag" and op[1] <= px < op[1] + op[3] and op[2] <= py < op[2] + op[4] for op in layer.ops)
 
     def tui_metrics(self, layer: Layer) -> tuple[int, int, int, int]:
         """(scale, columns, rows, padding) of a text-mode window."""
@@ -238,6 +263,9 @@ class Compositor:
         ordered = sorted((l for l in self.layers.values() if self.shown(l) and l.kind not in NOT_IN_BASE), key=lambda l: l.z)
         every = sorted(self.layers.values(), key=lambda l: l.z)
         for layer in ordered:
+            if layer.kind == "window" and layer.frameless:     # no frame, shadow or body: only what the app draws, over what is beneath
+                self._paint_content(fb, layer)
+                continue
             if layer.kind == "window":
                 self._paint_window(fb, layer, layer.id in self.focused_ids())
                 continue
@@ -268,7 +296,10 @@ class Compositor:
         r, u = 5 * self.u, self.u
         for layer in layers:
             x, y, w, h = layer.rect
-            if layer.kind == "window":
+            if layer.kind == "window" and layer.frameless:      # no frame to click: the window itself, and a way to close it
+                out.append(looks.Control(layer.id, layer.name, f"{layer.title or layer.name}", (x, y, w, h), "focus"))
+                out.append(looks.Control(layer.id, layer.name, "Close", (x, y, w, h), "close"))
+            elif layer.kind == "window":
                 cy = y + self.titlebar // 2
                 out.append(looks.Control(layer.id, layer.name, f"{layer.title or layer.name}", (x, y, w, self.titlebar), "focus"))
                 out.append(looks.Control(layer.id, layer.name, "Close", (x + 12 * u - r, cy - r, 2 * r, 2 * r), "close"))

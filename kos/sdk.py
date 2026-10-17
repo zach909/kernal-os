@@ -54,6 +54,11 @@ class Canvas:
         self.ops.append(["hit", int(x), int(y), int(w), int(h), str(label)])
         return self
 
+    def drag(self, x: int, y: int, w: int, h: int) -> "Canvas":
+        """Frameless window: pressing in this rectangle moves the window. Draws nothing."""
+        self.ops.append(["drag", int(x), int(y), int(w), int(h)])
+        return self
+
     def blit(self, x: int, y: int, w: int, h: int, rgb: bytes, scale: int = 1) -> "Canvas":
         """Raw RGB pixels (``w*h*3`` bytes), drawn ``scale`` times larger: a camera preview, say."""
         import base64

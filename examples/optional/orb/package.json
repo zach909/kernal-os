@@ -1,0 +1,7 @@
+{
+  "name": "orb",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A round, frameless clock.",
+  "scripts": { "start": "node app.js" }
+}

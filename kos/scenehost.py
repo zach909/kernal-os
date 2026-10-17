@@ -118,7 +118,7 @@ class SceneHost:
             if l is sc or l.kind in ("cursor", "scene"):
                 continue
             metas.append({"id": l.id, "name": l.name, "kind": l.kind, "mode": l.mode, "rect": list(l.rect), "z": l.z, "title": l.title,
-                          "visible": self.shown(l), "minimized": l.minimized, "ws": l.ws, "rev": l.rev, "slot": l.slot})
+                          "visible": self.shown(l), "minimized": l.minimized, "ws": l.ws, "rev": l.rev, "slot": l.slot, "frameless": l.frameless})
         state = {"cmd": "scene_state", "w": self.W, "h": self.H, "u": self.u, "titlebar": self.titlebar, "ws": self.ws,
                  "focus": sorted(self.focused_ids()), "look": self.cfg["look"], "layers": metas}
         sent = self._scene_sig.setdefault(sc.id, {"state": None, "revs": {}})

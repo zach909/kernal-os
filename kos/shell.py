@@ -103,6 +103,8 @@ class Layer:
     scene: bool = False            # an interface app: its frames are the screen (see scenehost.py)
     scratch: str = ""              # its scratch directory: where an interface app writes frame.bin
     neural: bool = False           # a neural driver: may send intents while the neural look is on
+    frameless: bool = False        # a window with no frame: it is whatever shape the app draws, and clicks pass through where it draws nothing
+    cov: Optional[tuple] = None    # (rev, painted-on-black, painted-on-white): where a frameless window is solid, found when a click needs it
     rev: int = 0                   # bumps whenever what this layer shows changes
     cache: Optional[tuple] = None  # (signature, region rows) of its glass, before content
 
@@ -462,7 +464,7 @@ class Shell(Compositor, SceneHost):
                       shell=getattr(inst, "shell", False), pointer=getattr(inst, "pointer", False),
                       animate=getattr(inst, "animate", False), neural=getattr(inst, "neural", False),
                       assistant=getattr(inst, "assistant", False), scene=getattr(inst, "compose", False),
-                      scratch=getattr(inst, "scratch", ""))
+                      scratch=getattr(inst, "scratch", ""), frameless=getattr(inst, "frameless", False) and kind == "window")
         if kind == "window":
             layer.ws = self.ws
         self.layers[layer.id] = layer
@@ -804,6 +806,8 @@ class Shell(Compositor, SceneHost):
         for layer in sorted(self.layers.values(), key=lambda l: -l.z):
             lx, ly, lw, lh = layer.rect
             if self.shown(layer) and layer.kind not in NO_HIT and lx <= x < lx + lw and ly <= y < ly + lh:
+                if layer.frameless and not self.solid_at(layer, x, y):
+                    continue                                    # a clear part of a shaped window: the click goes to what is behind it
                 return layer
         return None
 
@@ -817,7 +821,7 @@ class Shell(Compositor, SceneHost):
     def chrome_hit(self, layer: Layer, x: int, y: int) -> Optional[str]:
         """What part of a window frame is at (x, y): close | minimize | title | None (content)."""
         lx, ly, lw, lh = layer.rect
-        if y >= ly + self.titlebar:
+        if layer.frameless or y >= ly + self.titlebar:
             return None
         r, u = 5 * self.u, self.u
         cy = ly + self.titlebar // 2
@@ -934,6 +938,9 @@ class Shell(Compositor, SceneHost):
                 part = self.chrome_hit(hit, x, y)
                 if hit.id != self.focus or hit.minimized:
                     self.raise_window(hit)
+                if hit.frameless and self.drag_handle(hit, x, y):         # the app's own handle moves its window
+                    self.drag = (hit.id, x - hit.rect[0], y - hit.rect[1])
+                    return
                 if part == "close":
                     try:
                         self._closer(hit.id)

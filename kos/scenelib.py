@@ -49,6 +49,7 @@ class SceneModel(Compositor):
             s = self.layers.get(lid)
             if s is None:
                 s = self.layers[lid] = Surface(id=lid, name=m["name"], kind=m["kind"], mode=m["mode"], rect=list(m["rect"]))
+            s.frameless = bool(m.get("frameless"))
             s.name, s.kind, s.mode, s.rect, s.z = m["name"], m["kind"], m["mode"], list(m["rect"]), m["z"]
             s.title, s.visible, s.minimized, s.ws = m.get("title", ""), bool(m.get("visible", True)), bool(m.get("minimized")), None
         for gone in [i for i in self.layers if i not in keep]:

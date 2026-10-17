@@ -182,6 +182,15 @@ inside the app. `kos/scenehost.py` is the `SceneHost` mixin of the Shell:
 drivers (`driver: "neural"`, permission `neural`) may send exactly five decisions (`protocol.INTENTS`), rate limited. Gap: no real headset, camera or neural device was
 available; drivers for them are to be written against this contract.
 
+## Clear backgrounds and frameless windows (`kos/display.py`, `kos/compositor.py`, `kos/shell.py`)
+`protocol._COLOR_RE` accepts `#rrggbb[aa]`. `Framebuffer.apply` blends `clear`/`rect` through `fbgfx.blend` (lane-wise), `line` per pixel, and multiplies a poly's own alpha by the
+colour's; `text`/`stext` ignore alpha. The manifest key `frame: "none"` (graphical only) sets `Instance.frameless` -> `Layer.frameless` -> the `frameless` flag in `scene_state`.
+`Compositor.content_rect` is then the whole rect, `_compose_base` calls only `_paint_content` (no shadow/frost/body), `chrome_hit` finds no frame, and `controls()` lists the
+window plus a Close. `Compositor.solid_at` paints the layer's ops on black and on white (cached on `Layer.cov` by rev) and calls a pixel solid when the two differ by
+less than ~90% - `Shell.at` skips a frameless layer at a clear pixel, so the click goes to the next layer beneath. A `drag` op (protocol, no drawing) is collected by
+`Compositor.drag_handle`; a press inside it starts the shell's ordinary window drag. `interface-3d` paints such a layer like a `plain` one (alpha from the same
+black/white trick) and makes its block a thin sheet.
+
 ## App folders and encryption (`kos/paths.py`, `kos/loader.py`, `kos/vault.py`, `kos/encryption.py`)
 `Paths.data_dir(name)` makes `<state>/appdata/NAME` (0700). `loader.apply_to_policy(..., data_dir)` adds it to the Landlock write set and records it on the
 policy; `loader.launch` passes `KOS_DATA_DIR`. `vault` seals a file with AES-256-GCM in 1 MiB chunks (nonce = random prefix + counter, AAD = chunk index +

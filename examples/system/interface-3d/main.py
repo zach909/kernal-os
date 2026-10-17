@@ -105,9 +105,9 @@ class Blocks3D(Interface):
     def paint_isolated(self, fb: Framebuffer, layer) -> None:
         """One layer painted alone onto ``fb``, as it would be in the flat frame."""
         c = self.model
-        if layer.kind == "window":
+        if layer.kind == "window" and not layer.frameless:
             return c._paint_window(fb, layer, layer.id in c.focused_ids())
-        if layer.kind in ("plain", "top"):
+        if layer.kind in ("plain", "top") or layer.frameless:
             return c._paint_content(fb, layer)
         c._glass(fb, layer.rect, {"bar": BAR_GLASS, "dock": DOCK_GLASS, "popup": POPUP_GLASS}.get(layer.kind, GLASS),
                  radius=BLOCK_RADIUS.get(layer.kind, 7) * c.u)
@@ -134,7 +134,7 @@ class Blocks3D(Interface):
                 out.buf[r * cw * 4:(r + 1) * cw * 4] = src.buf[a:a + cw * 4]
             return out
 
-        if layer.kind in ("plain", "top"):
+        if layer.kind in ("plain", "top") or layer.frameless:
             black, white = Framebuffer(c.W, c.H), Framebuffer(c.W, c.H)
             white.buf[:] = b"\xff" * len(white.buf)
             self.paint_isolated(black, layer)
@@ -173,7 +173,9 @@ class Blocks3D(Interface):
             if w < 4 or h < 4:
                 continue
             rank = sum(1 for b in out if b.name_kind == "window")           # windows stack by a small step, not by their whole depth
-            if layer.kind == "window":
+            if layer.frameless:                                              # a shaped window is a thin sheet in the shape it drew
+                T = 6 * u
+            elif layer.kind == "window":
                 T = max(30 * u, min(70 * u, int(0.3 * min(w, h)))) + 8 * u * rank
             else:
                 T = BLOCK_HEIGHT.get(layer.kind, 8) * u

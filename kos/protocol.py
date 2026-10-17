@@ -46,6 +46,7 @@ app -> OS
            | ["poly", [[x, y], ...], color, alpha?]      smooth (anti-aliased) filled shape, alpha 0-255, up to 64 points
            | ["blit", x, y, w, h, scale, base64]        raw RGB pixels (w*h*3 bytes, at most 96000 pixels), drawn
                                                        scale times larger - a camera preview, say
+           | ["drag", x, y, w, h]                       draws nothing: in a frameless window, pressing here moves the window
            | ["hit", x, y, w, h, label]                 draws nothing: declares a clickable control, so the
                                                        interface can be listed, tabbed through, or shown as text
         color = "#rrggbb"
@@ -125,7 +126,7 @@ MAX_LINES = 500
 MAX_LINE_CHARS = 1000
 MAX_OPS = 12000
 MAX_COORD = 16384
-_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$")          # #rrggbb, or #rrggbbaa for a see-through colour
 _APP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}-[0-9a-f]{6}$")
 REQUEST_MODES = ("tui", "graphical", "cmd")
@@ -150,7 +151,7 @@ def _int(v: Any, lo: int = -MAX_COORD, hi: int = MAX_COORD) -> int:
 
 def _color(v: Any) -> str:
     if not isinstance(v, str) or not _COLOR_RE.match(v):
-        raise ProtocolError("expected a color like '#1e90ff'")
+        raise ProtocolError("expected a color like '#1e90ff' (or '#1e90ff80' for a see-through one)")
     return v.lower()
 
 
@@ -192,6 +193,8 @@ def _op(op: Any) -> list:
         if len(raw) != w * h * 3:
             raise ProtocolError("blit needs exactly width*height*3 bytes")
         return ["blit", _int(op[1]), _int(op[2]), w, h, scale, op[6]]
+    if kind == "drag" and len(op) == 5:
+        return ["drag", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0)]
     if kind == "hit" and len(op) == 6:
         return ["hit", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), clean_text(op[5], 60)]
     raise ProtocolError(f"bad draw op {kind!r}")

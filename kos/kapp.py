@@ -53,7 +53,7 @@ SLOTS = {"wallpaper", "menubar", "dock", "pins", "search", "widgets", "cursor", 
          "pins", "widget"}
 BUNDLE_ENTRY_RE = re.compile(r"^[A-Za-z0-9._+-][A-Za-z0-9._+/-]{0,199}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description", "commands",
-                  "args", "slot", "exec_scratch", "devices", "driver", "look"}
+                  "args", "slot", "exec_scratch", "devices", "driver", "look", "frame"}
 DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9_.*?/-]{1,60}$")
 DRIVER_KINDS = {"quantum", "xr", "camera", "neural", "assistant", "interface"}
 COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,60}$")
@@ -89,6 +89,7 @@ class Manifest:
     devices: tuple[str, ...] = ()       # device nodes (globs under /dev) it asks to open - asked again at every launch
     driver: str = ""                    # the kind of hardware it is a driver for (see DRIVER_KINDS)
     look: str = ""                      # an interface app: the look it provides ("normal", "3d", "vr", ...)
+    frame: str = "window"               # "none": no frame, shadow or body - the window is whatever shape the app draws (graphical only)
 
     @property
     def scopes(self) -> frozenset:
@@ -152,6 +153,11 @@ class Manifest:
         look = d.get("look", "")
         if look and (driver != "interface" or not isinstance(look, str) or not re.match(r"^[a-z0-9]{2,12}$", look)):
             raise KAppError("look names the look an interface app provides: \"driver\": \"interface\", \"look\": \"3d\"")
+        frame = d.get("frame", "window")
+        if frame not in ("window", "none"):
+            raise KAppError('frame is "window" (the usual frame) or "none" (a window shaped by what the app draws)')
+        if frame == "none" and modes != ("graphical",):
+            raise KAppError('a frameless window ("frame": "none") is graphical only: "modes": ["graphical"]')
         if "compose" in perms and driver != "interface":
             raise KAppError("the 'compose' permission (drawing the other apps) is only for an interface app: \"driver\": \"interface\"")
         if "assist" in perms and driver != "assistant":
@@ -160,7 +166,7 @@ class Manifest:
             raise KAppError("the 'neural' permission (sending intents to the interface) is only for a driver: \"driver\": \"neural\"")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
                    modes=modes, permissions=perms, description=desc, commands=_commands(d.get("commands", [])),
-                   args=tuple(args), slot=slot, exec_scratch=xs, devices=tuple(devices), driver=driver, look=look)
+                   args=tuple(args), slot=slot, exec_scratch=xs, devices=tuple(devices), driver=driver, look=look, frame=frame)
 
 
 def _commands(raw) -> tuple[Command, ...]:

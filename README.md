@@ -178,6 +178,17 @@ pure-Python TrueType rasterizer (`kos/ttf.py`, exact-coverage anti-aliasing) usi
 the app windows' *content* is still the older text-mode pages (now drawn in a smooth monospace font), and a few
 widget details still use the pixel font.
 
+### Clear backgrounds: apps do not have to be square
+
+Colours can be see-through: `#rrggbbaa` (the last two digits are the opacity) in `clear`, `rect`, `line` and `poly` ops, so the desktop shows through
+glass, glows and soft edges (text stays solid). A manifest can say `"frame": "none"` (graphical apps): the window then has **no frame, shadow or body** - it is
+exactly what the app draws, in any shape. Where it draws nothing, **a click goes through to whatever is behind it** (the OS finds the solid pixels by painting
+the app's ops on black and on white, once per picture, only when a pointer needs it). The app declares a `drag` rectangle that moves the window and a `hit` for
+its own controls; it closes itself by exiting. Frameless windows are drawn that way in the 3D and VR looks too (a thin sheet in its own shape), and the terminal
+look lists one as "the window" plus a Close. `examples/optional/orb` is a round, glowing clock you can drag and close: `kos desktop install --optional orb`.
+*Honest limits:* a frameless app has no OS chrome, so it can draw a fake title bar inside its own shape (as any app can inside its own window) - but it can
+never cover the password prompt, which the OS draws last, and it is capped at 70% of the screen. Text in a see-through colour is drawn solid.
+
 ### The interface is an app (and so are the looks)
 
 Only two things are the system's own interface: the **terminal** (every line typed is a command) and the **button selector** (the terminal look: every

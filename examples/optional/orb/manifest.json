@@ -1,0 +1,10 @@
+{
+  "name": "orb",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "frame": "none",
+  "permissions": ["ticks", "shell"],
+  "description": "A round clock with no frame: a window shaped by what it draws. See-through where it is clear (clicks go to what is behind it), drag it anywhere, the small x closes it."
+}

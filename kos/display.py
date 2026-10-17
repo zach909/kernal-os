@@ -33,6 +33,11 @@ def parse_color(c: str) -> bytes:
     return bytes((b, g, r, 0))
 
 
+def color_alpha(c: str) -> int:
+    """The opacity of '#rrggbb' (255) or '#rrggbbaa' (the last two digits)."""
+    return int(c[7:9], 16) if len(c) >= 9 else 255
+
+
 class Framebuffer:
     BPP = 4
 
@@ -70,12 +75,23 @@ class Framebuffer:
             i = (y * self.width + x) * self.BPP
             self.buf[i:i + 4] = color
 
-    def line(self, x0: int, y0: int, x1: int, y1: int, color: bytes) -> None:
+    def _tint(self, x: int, y: int, w: int, h: int, color: str, alpha: int) -> None:
+        """A rectangle in a see-through colour: each pixel moves toward the colour by ``alpha``/255."""
+        from . import fbgfx
+        if alpha > 0:
+            fbgfx.blend(self, x, y, w, h, color[:7], alpha / 255)
+
+    def line(self, x0: int, y0: int, x1: int, y1: int, color: bytes, alpha: int = 255) -> None:
         dx, dy = abs(x1 - x0), -abs(y1 - y0)
         sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
         err = dx + dy
         for _ in range(dx - dy + 1):
-            self.put(x0, y0, color)
+            if alpha >= 255:
+                self.put(x0, y0, color)
+            elif 0 <= x0 < self.width and 0 <= y0 < self.height:
+                i = (y0 * self.width + x0) * self.BPP
+                for k in range(3):
+                    self.buf[i + k] += ((color[k] - self.buf[i + k]) * alpha + 127) // 255
             if x0 == x1 and y0 == y1:
                 break
             e2 = 2 * err
@@ -171,11 +187,23 @@ class Framebuffer:
         for op in ops:
             kind = op[0]
             if kind == "clear":
-                self.clear(parse_color(op[1]))
+                a = color_alpha(op[1])
+                if a < 255:
+                    self._tint(0, 0, self.width, self.height, op[1], a)
+                else:
+                    self.clear(parse_color(op[1]))
             elif kind == "rect":
-                self.rect(op[1], op[2], op[3], op[4], parse_color(op[5]))
+                a = color_alpha(op[5])
+                if a < 255:                                   # a see-through colour lets what is beneath show
+                    self._tint(op[1], op[2], op[3], op[4], op[5], a)
+                else:
+                    self.rect(op[1], op[2], op[3], op[4], parse_color(op[5]))
             elif kind == "line":
-                self.line(op[1], op[2], op[3], op[4], parse_color(op[5]))
+                a = color_alpha(op[5])
+                if a < 255:
+                    self.line(op[1], op[2], op[3], op[4], parse_color(op[5]), a)
+                else:
+                    self.line(op[1], op[2], op[3], op[4], parse_color(op[5]))
             elif kind == "text":
                 if extrude:
                     for k in (2, 1):
@@ -188,10 +216,10 @@ class Framebuffer:
                         self.stext(op[1] + k, op[2] + k, op[3], _deepen(op[4], k / depth), op[5], op[6])
                 self.stext(op[1], op[2], op[3], op[4], op[5], op[6])
             elif kind == "poly":
-                self.poly(op[1], op[2], op[3])
+                self.poly(op[1], op[2], (op[3] if len(op) > 3 else 255) * color_alpha(op[2]) // 255)
             elif kind == "blit":
                 self.blit(op[1], op[2], op[3], op[4], op[5], op[6])
-            # "hit" declares a control and draws nothing
+            # "hit" and "drag" declare a control / a handle and draw nothing
 
 
 def _clip_polygon(pts, x0: float, y0: float, x1: float, y1: float) -> list:

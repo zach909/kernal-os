@@ -24,6 +24,7 @@ class Canvas {
   line(x0, y0, x1, y1, color) { this.ops.push(['line', Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1), color]); return this; }
   hit(x, y, w, h, label) { this.ops.push(['hit', Math.round(x), Math.round(y), Math.round(w), Math.round(h), String(label)]); return this; }
   blit(x, y, w, h, scale, rgb) { this.ops.push(['blit', Math.round(x), Math.round(y), w, h, scale, Buffer.from(rgb).toString('base64')]); return this; }
+  drag(x, y, w, h) { this.ops.push(['drag', Math.round(x), Math.round(y), Math.round(w), Math.round(h)]); return this; }   // frameless window: pressing here moves it
   poly(pts, color, alpha = 255) { this.ops.push(['poly', pts.map(([x, y]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100]), color, alpha]); return this; }
   stext(x, y, s, color, px = 14, face = 0) { this.ops.push(['stext', Math.round(x), Math.round(y), String(s), color, Math.round(px), face]); return this; }
   text(x, y, s, color, scale = 1) { this.ops.push(['text', Math.round(x), Math.round(y), String(s), color, scale]); return this; }

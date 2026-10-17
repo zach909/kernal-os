@@ -46,6 +46,7 @@ class Instance:
     animate: bool = False     # manifest has 'animate': may ask for ~24 animation ticks a second while it needs them
     scopes: list = field(default_factory=list)   # which system:<scope> permissions it holds (["*"] = the bare 'system')
     compose: bool = False     # manifest has 'compose': an interface app that draws the other apps (its frames are what the screen shows)
+    frameless: bool = False   # manifest "frame": "none": its window has no frame; clicks pass through where it draws nothing
     scratch: str = ""         # its private scratch directory (an interface app writes its frames here)
     assistant: bool = False   # manifest has 'assist' (an assistant): may propose plans, which run only if the owner approves
     neural: bool = False      # manifest has 'neural' (a neural driver): may send intents while the neural look is on

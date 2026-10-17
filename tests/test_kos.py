@@ -5002,6 +5002,90 @@ class TestInterfaceApps(Env):
         self.assertAlmostEqual(polygon_area(quad), 5000.0)
 
 
+class TestClearBackgrounds(Env):
+    """See-through colours and frameless windows: an app is whatever shape it draws, and a click goes through where it draws nothing."""
+
+    layer = TestLooksAndControls.layer
+    sent = TestLooksAndControls.sent
+    make = TestLooksAndControls.make
+
+    ORB = [["poly", [[50 + 40 * __import__("math").cos(i * 0.2), 50 + 40 * __import__("math").sin(i * 0.2)] for i in range(32)], "#3366ff"],
+           ["rect", 80, 5, 15, 15, "#ff0000"], ["drag", 0, 30, 100, 70], ["hit", 80, 5, 15, 15, "Close"]]
+
+    def test_alpha_colours_are_valid_and_blend_over_what_is_beneath(self):
+        for ok in ("#112233", "#11223380", "#AABBCCDD"):
+            validate_app_message({"cmd": "frame", "ops": [["rect", 0, 0, 5, 5, ok]]}, "graphical")
+        for bad in ("#1122", "#1122334", "#112233801", "112233", "#gg223344"):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message({"cmd": "frame", "ops": [["rect", 0, 0, 5, 5, bad]]}, "graphical")
+        fb = Framebuffer(10, 10)
+        fb.apply([["clear", "#ffffff"], ["rect", 0, 0, 5, 10, "#00000080"], ["rect", 5, 0, 5, 10, "#00000000"],
+                  ["line", 0, 9, 9, 9, "#ff000080"], ["poly", [[6, 0], [10, 0], [10, 4]], "#00000080", 255]])
+        left = fb.pixel(1, 1)[0]
+        self.assertTrue(120 <= left <= 135)                                       # about half way from white to black
+        self.assertEqual(fb.pixel(8, 8), (255, 255, 255))                         # alpha 0 changes nothing
+        self.assertTrue(fb.pixel(3, 9)[1] < 140 and fb.pixel(3, 9)[0] > 170)      # a half-red line blends
+        self.assertTrue(120 <= fb.pixel(9, 1)[0] <= 135)                          # a polygon's colour alpha is used too
+
+    def test_a_frameless_manifest_is_graphical_only_and_the_frame_key_is_checked(self):
+        base = {"name": "x", "version": "1", "runtime": "python", "entry": "m"}
+        self.assertEqual(Manifest.parse(json.dumps({**base, "modes": ["graphical"], "frame": "none"}).encode()).frame, "none")
+        self.assertEqual(Manifest.parse(json.dumps({**base, "modes": ["graphical"]}).encode()).frame, "window")
+        for bad in ({"modes": ["tui"], "frame": "none"}, {"modes": ["graphical", "tui"], "frame": "none"}, {"modes": ["graphical"], "frame": "round"}):
+            with self.assertRaises(KAppError, msg=str(bad)):
+                Manifest.parse(json.dumps({**base, **bad}).encode())
+        m = Manifest.parse((Path(__file__).resolve().parent.parent / "examples" / "optional" / "orb" / "manifest.json").read_bytes())
+        self.assertEqual((m.frame, m.runtime), ("none", "npm"))
+
+    def test_a_frameless_window_has_no_frame_and_the_whole_rect_is_its_content(self):
+        s = self.make()
+        w = self.layer(s, "orb", "window", (100, 100, 100, 100), self.ORB, frameless=True)
+        self.assertEqual(s.content_rect(w), (100, 100, 100, 100))
+        self.assertIsNone(s.chrome_hit(w, 105, 102))                              # no title bar, no traffic lights
+        framed = self.layer(s, "files", "window", (300, 100, 100, 100))
+        self.assertEqual(s.content_rect(framed)[1], 100 + s.titlebar)
+        before = s.compose().copy()
+        self.assertEqual(before.pixel(150, 150), (0x33, 0x66, 0xff))              # the disc
+        self.assertNotEqual(before.pixel(102, 102), (0x33, 0x66, 0xff))
+        wall = s._wallpaper()
+        self.assertEqual(before.pixel(102, 102), wall.pixel(102, 102))             # outside the disc: just the wallpaper (no shadow, no body)
+
+    def test_a_click_on_the_clear_part_goes_to_what_is_behind_and_on_the_shape_to_the_window(self):
+        s = self.make()
+        s.booted.add("mouse")
+        behind = self.layer(s, "pins", "plain", (0, 0, 400, 400), [["rect", 0, 0, 400, 400, "#202020"]])
+        w = self.layer(s, "orb", "window", (100, 100, 100, 100), self.ORB, frameless=True)
+        self.assertIs(s.at(150, 150), w)                                          # on the disc
+        self.assertIs(s.at(102, 102), behind)                                     # in the clear corner
+        self.assertIs(s.at(500, 500), None)
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 102, "y": 102})
+        self.assertTrue(any(m["cmd"] == "button" for m in self.sent(behind)))
+        self.assertEqual([m for m in self.sent(w) if m["cmd"] == "button"], [])
+
+    def test_the_apps_drag_handle_moves_the_window_and_other_clicks_reach_the_app(self):
+        s = self.make()
+        s.booted.add("mouse")
+        w = self.layer(s, "orb", "window", (100, 100, 100, 100), self.ORB, frameless=True)
+        s.route({"type": "button", "button": "left", "pressed": True, "x": 150, "y": 160})      # inside the declared drag rectangle
+        self.assertEqual(s.drag[0], w.id)
+        s.route({"type": "pointer", "x": 200, "y": 210})
+        self.assertEqual(w.rect[:2], [150, 150])
+        s.route({"type": "button", "button": "left", "pressed": False, "x": 200, "y": 210})
+        self.assertIsNone(s.drag)
+        self.sent(w)
+        s.route({"type": "button", "button": "left", "pressed": True, "x": w.rect[0] + 87, "y": w.rect[1] + 12})   # the close button: not a handle
+        self.assertIsNone(s.drag)
+        self.assertEqual([(m["x"], m["y"]) for m in self.sent(w) if m["cmd"] == "button"], [(87, 12)])
+
+    def test_the_terminal_look_lists_a_frameless_window_and_a_way_to_close_it(self):
+        s = self.make()
+        self.layer(s, "orb", "window", (100, 100, 100, 100), self.ORB, frameless=True)
+        got = [(c.label, c.kind) for c in s.controls()]
+        self.assertIn(("orb", "focus"), got)
+        self.assertIn(("Close", "close"), got)
+        self.assertIn(("Close", "hit"), got)                                        # and the app's own declared control
+
+
 class TestCompilerPath(Env):
     """A line of C, C++, Go, JavaScript, Perl, ... is built and run by the machine's own toolchain inside the sandbox."""
 
