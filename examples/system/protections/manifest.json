@@ -1,0 +1,33 @@
+{
+  "name": "protections",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "system:apps",
+    "system:os",
+    "system:security"
+  ],
+  "description": "Protections: the kernel protections, and which apps are permitted to run (Enter toggles, password).",
+  "commands": [
+    {
+      "id": "permit",
+      "title": "Allow or block an app from running",
+      "keywords": [
+        "permission",
+        "allow",
+        "deny"
+      ]
+    },
+    {
+      "id": "kernel",
+      "title": "Show kernel protections",
+      "keywords": [
+        "landlock"
+      ]
+    }
+  ]
+}

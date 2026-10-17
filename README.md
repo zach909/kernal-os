@@ -423,7 +423,8 @@ anything that changes something, your password in the OS's own prompt).
 | `files` | **File viewer**: browse folders and zips (never extracted); Enter on a file views it (password); `s` scans it. |
 | `editor` | **File editor**: opens a file (password), edit, Ctrl-S saves through the *guarded write* (admin keyboard, password, then a scan + optimize are owed). A file that would not round-trip exactly (tabs, CRLF, very long lines, binary, too big) opens **read-only**. |
 | `backup` | **Backups of your documents**: back up a file/folder into a zip that only KOS writes and scans; browse a backup without extracting; restore one file (guarded write); push to *your own* private GitHub. |
-| `settings` | Kernel protections; which apps are permitted to run (Enter toggles, password). |
+| `protections` | Kernel protections; which apps are permitted to run (Enter toggles, password). |
+| `settings` | The hub: choose the interface, and open every setting and monitor from one place. |
 | `updates` | **Where everything comes from** (every app's source, KOS's git origin and commit, Python/Node/npm/kernel and who updates them) and **installing newer versions** from sources you add - see below. |
 | `processes` | Process manager: every task, state, scheduling (nice, priority, context switches), pause/continue/terminate, lower priority, and the IPC channels. |
 | `memory` | Memory manager: RAM, cache, swap, paging, pressure, available-over-time history, biggest users. |

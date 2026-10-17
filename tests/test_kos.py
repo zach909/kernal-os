@@ -1537,9 +1537,9 @@ class TestSystemAppsRunForReal(DesktopSessionEnv):
                        "Landlock ABI", "nothing is owed", "Recent decisions"):
             self.assertIn(needle, out)
 
-    def test_settings_lists_apps_and_toggles_permission_with_a_password(self):
+    def test_protections_lists_apps_and_toggles_permission_with_a_password(self):
         AppStore(self.paths).install(self.kapp, self.authority(PW))
-        s = self.start(SYSTEM_DIR / "settings", "settings", bridge=SystemBridge(self.paths),
+        s = self.start(SYSTEM_DIR / "protections", "protections", bridge=SystemBridge(self.paths),
                        authority=Authority(self.paths, None, Throttle(self.paths, base=0)))
         self.boot_both()
         threading.Timer(3.0, lambda: self.devices.push(ENTER)).start()      # first app = hello
@@ -1550,6 +1550,19 @@ class TestSystemAppsRunForReal(DesktopSessionEnv):
         self.assertIn("Kernel protections", out)
         self.assertIn("NOT permitted", out)
         self.assertTrue(PermitStore(self.paths).is_permitted("hello"))
+
+    def test_the_settings_hub_opens_only_apps_that_exist_and_holds_no_power_of_its_own(self):
+        import re
+        from kos.desktop import SYSTEM_APPS
+        m = Manifest.parse((SYSTEM_DIR / "settings" / "manifest.json").read_bytes())
+        self.assertEqual((m.modes, set(m.permissions), set(m.scopes)), (("graphical",), {"shell", "system:apps"}, {"apps"}))   # change the look, open an app, nothing more
+        code = (SYSTEM_DIR / "settings" / "app.js").read_text()
+        ids = re.findall(r"\['([a-z-]+)', '[^']+', '[^']+'\]", code)
+        self.assertGreaterEqual(len(ids), 15)
+        for app_id in ids:
+            self.assertIn(app_id, SYSTEM_APPS, app_id)                                  # every card opens a real built-in app
+            self.assertTrue((SYSTEM_DIR / app_id / "manifest.json").exists(), app_id)
+        self.assertTrue((SYSTEM_DIR / "protections" / "manifest.json").exists())          # the old kernel-protections page kept its place under its own name
 
     def test_files_browses_the_filesystem_by_asking_the_os(self):
         out = self.go("files")

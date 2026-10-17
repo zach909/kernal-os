@@ -3,31 +3,11 @@
   "version": "1.0",
   "runtime": "npm",
   "entry": "start",
-  "modes": [
-    "tui"
-  ],
-  "permissions": [
-    "system:apps",
-    "system:os",
-    "system:security"
-  ],
-  "description": "Kernel protections and which apps are permitted to run.",
+  "modes": ["graphical"],
+  "permissions": ["shell", "system:apps"],
+  "description": "Settings: the one place to choose the interface (every installed interface app, plus the terminal) and to open every setting and monitor - security, apps and updates, the machine.",
   "commands": [
-    {
-      "id": "permit",
-      "title": "Allow or block an app from running",
-      "keywords": [
-        "permission",
-        "allow",
-        "deny"
-      ]
-    },
-    {
-      "id": "kernel",
-      "title": "Show kernel protections",
-      "keywords": [
-        "landlock"
-      ]
-    }
+    {"id": "interface", "title": "Choose the interface", "keywords": ["look", "3d", "vr", "terminal", "appearance"]},
+    {"id": "security", "title": "Passwords, permissions and protections", "keywords": ["password", "permission", "sudo", "encryption"]}
   ]
 }
