@@ -28,6 +28,7 @@ ticking clock re-draws a few shapes, not a blur.
 from __future__ import annotations
 
 import math
+import os
 import select
 import socket
 import time
@@ -68,6 +69,7 @@ NO_HIT = ("cursor", "overlay")                          # layers the pointer pas
 DEFAULT_CFG = {"look": "normal", "cursor_direction": True, "tilt": True, "bubbles": True, "blocks": True, "side_tab": "widgets"}
 BLOCK_HEIGHT = {"bar": 8, "dock": 14, "sidebar": 12, "widget": 10, "plain": 6, "popup": 16, "top": 6}   # in units of u; windows scale with their size
 BLOCK_TINT = {"bar": "#1b2740", "dock": "#2b3555", "sidebar": "#26324d", "widget": "#2d3a5c", "plain": "#3a4660", "popup": "#3a4a6e", "window": "#2f4a86"}
+FALLS = ("window", "dock", "sidebar", "popup")      # the kinds of layer an app's waterfall runs down from
 BLOCK_RADIUS = {"bar": 0, "dock": 12, "popup": 12, "window": 7, "sidebar": 7, "widget": 7}
 TILT_PX = 5                                              # at most this many px (times the UI scale) of tilt
 
@@ -935,6 +937,13 @@ class Shell:
             self.pointer = (ax, ay)
             self._place_pointer_layers()
             return
+        if t == "button" and ev.get("button") == "left" and ev.get("pressed") and self.cfg["look"] == "3d" and self.cfg["blocks"]:
+            go = self._block_action(ax, ay)              # a click on a waterfall, the Kernel or the Hardware goes somewhere
+            if go:
+                self.pointer = (ax, ay)
+                self._place_pointer_layers()
+                go()
+                return
         x, y = self._flat(x, y)                          # ...and where it lands on a block's flat layer
         if t == "pointer":
             self._note_motion(ax, ay)
@@ -1601,15 +1610,41 @@ class Shell:
             words = [layer.title or layer.name, layer.name, *ctl.get(layer.id, [])]
             out.append(blocks.Block(layer.id, layer.name, (x, y, w, h), z_back, z_back + T, self._front_texture(layer),
                                     BLOCK_TINT.get(layer.kind, "#2a3a55"), words, ctl.get(layer.id, []), layer.title or layer.name,
-                                    name_kind=layer.kind))
+                                    name_kind=layer.kind, fall=layer.kind in FALLS))
+        out += self._system_blocks()
         return out
 
-    def _top_faces_show(self) -> bool:
-        return self.cam[1] > 0.3                                      # looking down: the ground and the tops are in view
+    def _system_blocks(self) -> list:
+        """The two things the lake flows into: the Kernel, and beyond it the Hardware. They stand on the ground, on the river;
+        clicking one opens the app for it. (They show what a system call and a sysconf tell; no files are read.)"""
+        W, H, u = self.W, self.H, self.u
+        D = int(blocks.GROUND_DEPTH * W)
+        try:
+            un = os.uname()
+            kernel = [f"Linux {un.release}", f"{un.machine}, {os.cpu_count() or '?'} cpus", "every app below runs in a sandbox", "click: isolation"]
+            mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1 << 20)
+            hardware = [f"{os.cpu_count() or '?'} cpus, {mem} MiB RAM", "devices need your password", "click: devices"]
+        except (OSError, ValueError, AttributeError):
+            kernel, hardware = ["Linux"], ["the machine"]
+        out = []
+        for name, title, lines, app, wf, hf, z, depth in (("kernel", "KERNEL", kernel, "isolation", 0.34, 0.22, 0.32, 0.07),
+                                                          ("hardware", "HARDWARE", hardware, "devices", 0.24, 0.14, 0.68, 0.05)):
+            w, h = int(W * wf), int(H * hf)
+            x, y = (W - w) // 2, H - h
+            tex = blocks.info_texture(w, h, title, lines, "#06231a", u)
+            out.append(blocks.Block(f"{name}-system", name, (x, y, w, h), z * D, z * D + depth * W, tex, "#0b3a28", [title, *lines], [], title,
+                                    name_kind="system", opens=app))
+        return out
+
+    def _rain_visible(self) -> bool:
+        """Is there falling text to see? The waterfalls hang under the apps, the lake lies in front when the camera looks down."""
+        return self.cam[1] > 0.3 or any(b.fall_quad for b in self._blocks)
+
+    _top_faces_show = _rain_visible
 
     def _block_frame(self) -> Framebuffer:
         W, H, u = self.W, self.H, self.u
-        mt = round(self._matrix_t, 2) if self._top_faces_show() else 0.0
+        mt = round(self._matrix_t, 2) if self._rain_visible() else 0.0
         key = (self._base_signature(), round(self.cam[0], 3), round(self.cam[1], 3), mt, self.cfg["look"])
         if self._block_cache and self._block_cache[0] == key:
             return self._block_cache[1].copy()
@@ -1629,7 +1664,9 @@ class Shell:
                                 for p in foot], "#000000", alpha)
 
         words = [w for b in bl for w in b.words][:200]                 # the ground rains the words of everything on the desktop
+        t0 = time.monotonic()
         blocks.render(out, blocks.Texture(self._wallpaper()), bl, cam, mt, u, shadow=shadows, floor_words=words)
+        self._last_block_cost = time.monotonic() - t0
         self._blocks = bl
         for layer in sorted((l for l in self.layers.values() if self.shown(l) and l.kind == "overlay"), key=lambda l: l.z):
             self._paint_content(out, layer)                          # the click bubbles float in front of everything
@@ -1655,13 +1692,41 @@ class Shell:
         b, lx, ly = hit
         return int(b.rect[0] + lx), int(b.rect[1] + ly)
 
+    def _block_action(self, x: int, y: int):
+        """What a click at this screen point does in the 3D look, if it is on a waterfall, the Kernel or the Hardware: a function to call, else None.
+        A block's own front face wins over a waterfall hanging in front of it."""
+        if not self._blocks or self.stack_open:
+            return None
+        hit = blocks.unproject(self._blocks, x, y)
+        if hit is not None:
+            b = hit[0]
+            return (lambda: self._open_app_window(b.opens)) if b.opens else None
+        for b in sorted(self._blocks, key=lambda b: -b.depth):
+            if b.fall_quad and blocks.point_in_quad(b.fall_quad, x, y):
+                return lambda b=b: self.open_commands(b)
+        return None
+
+    def _open_app_window(self, name: str, command: Optional[dict] = None) -> None:
+        try:
+            self.open_window(name, command, new=bool(command))
+        except Exception as e:                                  # a refused password, a missing app: say so
+            self.notify("desktop", f"Could not open {name}", str(e)[:150])
+
+    def open_commands(self, block) -> None:
+        """A click on an app's waterfall: its commands, in the Commands app."""
+        layer = self.layers.get(block.layer_id)
+        app = layer.name if layer else block.name
+        self._open_app_window("commands", {"command": "list", "line": app})
+
     def _matrix_step(self, now: float) -> None:
         """While the top faces can be seen, the falling text moves on ~5 times a second."""
-        if self.cfg["look"] != "3d" or not self.cfg["blocks"] or not self._top_faces_show():
+        if self.cfg["look"] != "3d" or not self.cfg["blocks"] or not self._rain_visible():
             return
-        if now - getattr(self, "_matrix_at", 0.0) >= 0.2:
+        # the rain moves on at a pace the machine can afford: never more than about a third of the time spent drawing it
+        period = max(0.25, 3.0 * getattr(self, "_last_block_cost", 0.1))
+        if now - getattr(self, "_matrix_at", 0.0) >= period:
             self._matrix_at = now
-            self._matrix_t += 0.2
+            self._matrix_t += period
             self.surface_dirty = True
 
     def _draw_modal(self, fb: Framebuffer) -> None:

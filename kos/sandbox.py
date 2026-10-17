@@ -45,6 +45,8 @@ FS_EXECUTE = 1 << 0
 FS_WRITE_FILE = 1 << 1
 FS_READ_FILE = 1 << 2
 FS_READ_DIR = 1 << 3
+FS_REMOVE_DIR = 1 << 4
+FS_REMOVE_FILE = 1 << 5
 FS_MAKE_DIR = 1 << 7
 FS_MAKE_REG = 1 << 8
 FS_MAKE_SYM = 1 << 12
@@ -199,7 +201,7 @@ class SandboxPolicy:
             for p in self.device_paths:                      # exactly these nodes, not the rest of /dev
                 self._add_rule(ruleset, p, (FS_READ_FILE | FS_WRITE_FILE | FS_IOCTL_DEV) & handled)
             rw_dir_rights = (FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE | FS_READ_DIR
-                            | FS_MAKE_REG | FS_MAKE_DIR | FS_MAKE_SYM) & handled
+                            | FS_MAKE_REG | FS_MAKE_DIR | FS_MAKE_SYM | FS_REMOVE_FILE | FS_REMOVE_DIR) & handled   # an app may tidy up its own directories
             for p in self.rw_dirs:
                 self._add_rule(ruleset, p, rw_dir_rights)
             _syscall(SYS_landlock_restrict_self, ctypes.c_int(ruleset), ctypes.c_uint32(0))

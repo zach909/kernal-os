@@ -26,6 +26,32 @@ def alloc(paths: Paths, name: str, ram: bool = False) -> Path:
     return d
 
 
+def shm_executable() -> bool:
+    """Can a program be run from /dev/shm? (Some systems mount it noexec.)"""
+    try:
+        for line in Path("/proc/mounts").read_text().splitlines():
+            f = line.split()
+            if len(f) > 3 and f[1] == "/dev/shm":
+                return "noexec" not in f[3].split(",") and os.access("/dev/shm", os.W_OK)
+    except OSError:
+        pass
+    return False
+
+
+def alloc_exec(paths: Paths, name: str) -> Path:
+    """A scratch directory a *compiled program* can be written to and run from, owned by whoever the sandbox runs as. It is in RAM
+    (tmpfs) when programs may run from there, so what is built never touches the disk."""
+    d = alloc(paths, name, ram=shm_executable())
+    if os.geteuid() == 0:                                  # development as root: the app runs as 'nobody'
+        os.chown(d, 65534, 65534)
+        for parent in d.parents:
+            if str(parent).startswith(str(paths.root)) or parent == d.parent:
+                mode = parent.stat().st_mode
+                if not mode & 0o001:
+                    os.chmod(parent, mode | 0o001)         # search only: it can reach its own directory, not list the others
+    return d
+
+
 def wipe(cache_dir: Path) -> None:
     """Best-effort secure delete: overwrite every regular file's contents
     before unlinking, then remove the tree. Never raises - a wipe failure

@@ -25,7 +25,7 @@ from .kapp import KAppError
 from .registry import RegistryError
 
 SYSTEM_APPS = ("wallpaper", "pins", "search", "sidebar", "launcher", "widgets", "widget-clock", "widget-calendar",
-               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "autoupdate", "browser", "app-library", "files", "editor", "backup", "settings", "security",
+               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "autoupdate", "commands", "browser", "app-library", "files", "editor", "backup", "settings", "security",
                "terminal", "processes", "memory", "filesystem", "devices", "network", "isolation",
                "health", "resources", "updates")
 DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library

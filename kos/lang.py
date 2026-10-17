@@ -17,8 +17,10 @@ line at a time, in any language, and every line is a command:
 * **Code** (Python, C, JavaScript, SQL, shell...) is a command too: the
   command is *run this line*. It is never run on the host. ``kos exec``
   (``coderun.py``) scans it, asks for the password, and runs it as a one-shot
-  sandboxed app with a time limit. A language with no sandboxed runtime is
-  still understood and logged, and reports that nothing was run.
+  sandboxed app with a time limit. Python runs on the interpreter; C, C++, Go, Rust, JavaScript, Ruby,
+  Perl and PHP are built and run by the host toolchain inside the sandbox (``compiler.py``); ``c: ...``
+  style prefixes say which. A language with no toolchain is still understood and logged, and reports
+  that nothing was run.
 
 Resolution order for one line:
 
@@ -413,8 +415,9 @@ _STRONG_CODE: list[tuple[str, re.Pattern]] = [(name, re.compile(p, re.I if ci el
     ("python", r"^\s*(?:from\s+[\w.]+\s+)?import\s+[\w.*, ]+(?:\s+as\s+\w+)?\s*$", False),
     ("python", r"^\s*(?:if|elif|while|for|with|try|except|else|finally)\b.*:\s*$", False),
     ("python", r"^\s*(?:lambda\b|@\w+)", False),
+    ("c++", r"\bstd::|\bcout\s*<<|<iostream>|^\s*using\s+namespace\b", False),
     ("c", r"^\s*#\s*(?:include|define|ifdef|ifndef|pragma)\b", False),
-    ("c", r"^\s*(?:int|void|char|float|double|long|unsigned|static|struct|typedef)\s+\**\w+.*[;{(]\s*$", False),
+    ("c", r"^\s*(?:int|void|char|float|double|long|unsigned|static|struct|typedef)\s+\**\w+.*[;{(}]\s*$", False),
     ("javascript", r"^\s*(?:const|let|var)\s+\w+\s*=", False),
     ("javascript", r"^\s*(?:async\s+)?function\b.*[({]", False),
     ("javascript", r"=>|\bconsole\.\w+\(|\brequire\(", False),
@@ -433,8 +436,22 @@ _STRONG_CODE: list[tuple[str, re.Pattern]] = [(name, re.compile(p, re.I if ci el
 ]]
 
 
+_LANG_PREFIX = re.compile(r"^\s*(c|cpp|c\+\+|go|golang|rust|rs|js|node|javascript|ruby|rb|perl|pl|php|py|python)\s*:\s+(\S.*)$", re.I)
+
+
+def split_language_prefix(line: str) -> tuple[str | None, str]:
+    """``go: fmt.Println(1)`` -> ("go", "fmt.Println(1)"): saying which language a line is in. Otherwise (None, line)."""
+    m = _LANG_PREFIX.match(line)
+    if not m:
+        return None, line
+    name = m.group(1).lower()
+    return {"py": "python", "c++": "cpp"}.get(name, name), m.group(2)
+
+
 def detect_code(line: str) -> str | None:
     """Name the programming language a line looks like, or None for human text."""
+    if _LANG_PREFIX.match(line):
+        return split_language_prefix(line)[0]
     for name, pat in _STRONG_CODE:
         if pat.search(line):
             return name
@@ -552,6 +569,9 @@ def interpret(line: str) -> Line:
         return Line("empty")
     lang = detect_code(text)
     if lang:
+        said, body = split_language_prefix(text)
+        if said:
+            text = body
         return Line("code", argv=("exec", f"--lang={lang}", f"--code={text}"),
                     verb="exec", language=lang)
     tokens = _tokens(text)

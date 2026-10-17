@@ -35,8 +35,11 @@ Every line is a command. Human language becomes one structured argv for
 nothing to attach to. Code is a command too (`kos exec`), but is never run on
 the host: it is scanned, needs `code.run` (the password), and runs as an
 in-memory one-shot `.kapp` under the normal sandbox with a timeout and a
-wiped cache dir. Only Python has a runtime in the sandbox; other languages
-report that and run nothing. Everything the shell can start still passes
+wiped cache dir. Python runs on the interpreter; C, C++, Go, Rust, JavaScript, Ruby, Perl and PHP run through `kos/compiler.py`:
+`compiler.plan` wraps the line into a program, finds the host toolchain (refusing one the sandbox's user cannot read) and
+`coderun.compiler_kapp` packs it with `compiler.RUNNER` as a one-shot app; the sandbox gets read+exec on the toolchain's prefix and
+on a RAM scratch directory (`cache.alloc_exec`), where the compiled program runs; apps may now delete files in their own
+writable directories (Landlock REMOVE_FILE/REMOVE_DIR). Other languages report that and run nothing. Everything the shell can start still passes
 through the same `Authority.authorize` gates.
 
 ## Requires (`kos/requires.py`)

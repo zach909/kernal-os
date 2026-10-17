@@ -731,7 +731,7 @@ class TestLang(unittest.TestCase):
         self.assertIn("no apps installed", buf.getvalue())
         # code is a command too; one with no sandboxed runtime says so (66) and runs nothing
         with redirect_stdout(io.StringIO()):
-            self.assertEqual(kcli.main(["do", "const", "a", "=", "1"]), 66)
+            self.assertEqual(kcli.main(["do", "select", "*", "from", "users"]), 66)
 
 
 from unittest import mock  # noqa: E402
@@ -1400,9 +1400,9 @@ class TestCodeIsACommand(Env):
         self.assertIn("security scan", out)
 
     def test_language_without_a_runtime_is_a_command_that_runs_nothing(self):
-        status, out = self.run_line("const a = 1", "javascript")                    # no password asked
+        status, out = self.run_line("select * from users", "sql")                   # no password asked
         self.assertEqual(status, 66)
-        self.assertIn("no sandboxed javascript runtime", out)
+        self.assertIn("no sql compiler or interpreter wired in", out)
         status, out = self.run_line("run hello; rm -rf /", "shell")
         self.assertEqual(status, 66)
 
@@ -1516,7 +1516,7 @@ class TestSystemBridgeActions(Env):
         out = self.ask({"action": "line", "text": "print(6 * 7)"}, PW)["lines"]
         self.assertIn("42", out)
         out = self.ask({"action": "line", "text": "run hello; rm -rf /"})["lines"]
-        self.assertTrue(any("no sandboxed shell runtime" in l for l in out))
+        self.assertTrue(any("no shell compiler or interpreter wired in" in l for l in out))
 
 
 class TestSystemAppsRunForReal(DesktopSessionEnv):
@@ -4882,7 +4882,7 @@ class TestBlocks3D(Env):
         sh.set_look(look="3d")
         sh.render()
         bl = {b.layer_id: b for b in sh._blocks}
-        self.assertEqual(set(b.name for b in bl.values()), {"sidebar", "widget-clock", "menubar", "files"})
+        self.assertEqual(set(b.name for b in bl.values()), {"sidebar", "widget-clock", "menubar", "files", "kernel", "hardware"})
         side, clock = bl["sidebar-1"], bl["widget-clock-1"]
         self.assertEqual(clock.z_back, side.z_front)                      # the widget stands on the sidebar
         self.assertGreater(clock.z_front, side.z_front)
@@ -4920,6 +4920,49 @@ class TestBlocks3D(Env):
         self.assertEqual(len(msgs), 1)
         self.assertLessEqual(abs(msgs[0]["x"] - 130), 3)                                # content-local: where the button is
         self.assertLessEqual(abs(msgs[0]["y"] - 115), 3)
+
+    def test_apps_have_waterfalls_that_lead_to_their_commands_and_the_kernel_and_hardware_open_their_apps(self):
+        from kos import blocks
+        sh = self.shell3d(960, 540)
+        self.layer(sh, "menubar", "bar", (0, 0, 960, 20), ops=[["rect", 0, 0, 960, 20, "#112244"]])
+        self.layer(sh, "files", "window", (60, 60, 300, 160), ops=[["rect", 0, 0, 298, 130, "#143a5a"]])
+        sh.set_look(look="3d")
+        sh.render()
+        by = {b.name: b for b in sh._blocks}
+        self.assertTrue(by["files"].fall_quad)                                    # an app has a waterfall down to the ground
+        self.assertIsNone(by["menubar"].fall_quad)                                # the top bar does not
+        self.assertTrue(by["kernel"].opens == "isolation" and by["hardware"].opens == "devices")
+        self.assertLess(by["kernel"].z_back, by["hardware"].z_back)               # the lake flows to the kernel, then on to the hardware
+        opened = []
+        sh._open_app_window = lambda name, command=None: opened.append((name, command))
+        q = by["files"].fall_quad
+        cx, cy = sum(p[0] for p in q) / 4, sum(p[1] for p in q) / 4
+        self.assertIsNone(blocks.unproject(sh._blocks, cx, cy))                   # nothing solid in front of that spot
+        go = sh._block_action(int(cx), int(cy))
+        self.assertIsNotNone(go)
+        go()
+        self.assertEqual(opened, [("commands", {"command": "list", "line": "files"})])   # the waterfall goes to files' commands
+        opened.clear()
+        kq = by["kernel"].quad
+        sh._block_action(int(sum(p[0] for p in kq) / 4), int(sum(p[1] for p in kq) / 4))()
+        self.assertEqual(opened, [("isolation", None)])
+        hq = by["hardware"].quad
+        sh._block_action(int(sum(p[0] for p in hq) / 4), int(sum(p[1] for p in hq) / 4))()
+        self.assertEqual(opened[-1], ("devices", None))
+
+    def test_the_tops_of_blocks_are_plain_glass_and_the_rain_is_see_through(self):
+        from kos import blocks
+        b = blocks.Block("a-1", "files", (0, 0, 120, 60), 0, 40, None, words=["Files", "Open"], tint="#2f4a86")
+        top = next(f for f in blocks.faces_of(b, 0.0, 1) if f[0] == "top")[3]()
+        greens = sum(1 for x in range(top.w) for y in range(top.h) if top.fb.pixel(x, y)[1] > top.fb.pixel(x, y)[2] + 40)
+        self.assertEqual(greens, 0)                                               # no terminal on top of a block
+        rain = blocks.matrix_texture(b, 120, 80, 1.0, transparent=True)
+        solid = sum(1 for a in rain.alpha if a)
+        self.assertTrue(0 < solid < len(rain.alpha) * 0.5)                         # only the characters are solid: you see through the rest
+        river = blocks.matrix_texture(b, 200, 80, 1.0, river=(80, 120))
+        inside = sum(1 for x in range(80, 120) for y in range(80) if river.fb.pixel(x, y)[1] > 150)
+        outside = sum(1 for x in range(0, 40) for y in range(80) if river.fb.pixel(x, y)[1] > 150)
+        self.assertGreater(inside, outside)                                       # the river runs brighter than the lake around it
 
     def test_alt_arrows_and_middle_drag_orbit_and_only_in_the_3d_look(self):
         sh = self.shell3d()
@@ -5053,3 +5096,107 @@ class TestAddons(Env):
         self.assertIn("options.addons", js)
         sh = self.shell()
         self.assertEqual(sh._addon_looks(), frozenset())
+
+
+class TestCompilerPath(Env):
+    """A line of C, C++, Go, JavaScript, Perl, ... is built and run by the machine's own toolchain inside the sandbox."""
+
+    def run_line(self, language, code, timeout=30.0):
+        from kos import coderun
+        out = []
+        status = coderun.run_code(self.paths, lambda: self.authority(PW), code, language, out=out.append, timeout=timeout)
+        return status, "\n".join(out)
+
+    def need(self, language):
+        from kos import compiler
+        tool, why = compiler.find_tool(language)
+        if tool is None:
+            self.skipTest(why)
+
+    def test_fragments_are_wrapped_into_programs_and_languages_are_told_apart(self):
+        from kos import compiler, lang
+        self.assertIn("int main(void)", compiler._wrap("c", 'printf("hi\\n")'))
+        self.assertIn(";\nreturn 0;", compiler._wrap("c", 'printf("hi\\n")'))                     # a missing semicolon is supplied
+        self.assertEqual(compiler._wrap("c", "int main(){return 0;}").count("main"), 1)            # a whole program is left alone
+        self.assertIn("using namespace std", compiler._wrap("c++", "cout << 1;"))
+        go = compiler._wrap("go", 'fmt.Println(strings.ToUpper("x"))')
+        self.assertIn("package main", go)
+        self.assertIn('"fmt"', go)
+        self.assertIn('"strings"', go)
+        self.assertNotIn('"os"', go)                                                               # only the packages it names
+        self.assertIn("fn main()", compiler._wrap("rust", 'println!("x");'))
+        self.assertTrue(compiler._wrap("php", "echo 1;").startswith("<?php"))
+        self.assertEqual(compiler.canonical("rust/go", "func main() {}"), "go")
+        self.assertEqual(compiler.canonical("rust/go", "fn main() {}"), "rust")
+        self.assertEqual(compiler.canonical("c", "std::cout << 1;"), "c++")
+        self.assertEqual(lang.split_language_prefix("go: fmt.Println(1)"), ("go", "fmt.Println(1)"))
+        self.assertEqual(lang.split_language_prefix("go home now"), (None, "go home now"))        # ordinary words are not a prefix
+        self.assertEqual(lang.interpret("js: console.log(1)").argv[-1], "--code=console.log(1)")
+        self.assertEqual(lang.interpret("std::cout << 1;").language, "c++")
+
+    def test_c_runs_in_the_sandbox_and_prints(self):
+        self.need("c")
+        status, out = self.run_line("c", 'printf("hello from C %d\\n", 6 * 7);')
+        self.assertEqual(status, 0, out)
+        self.assertIn("hello from C 42", out)
+
+    def test_other_languages_run_too(self):
+        for language, code, want in (("c++", 'cout << "cpp " << 6 * 7 << endl;', "cpp 42"),
+                                     ("javascript", "console.log('js', 6 * 7)", "js 42"),
+                                     ("perl", 'print "perl ", 6 * 7, "\\n";', "perl 42"),
+                                     ("php", 'echo "php " . 6 * 7;', "php 42")):
+            self.need(language)
+            status, out = self.run_line(language, code)
+            self.assertIn(want, out, (language, out))
+
+    def test_go_builds_and_runs_with_its_cache_in_the_scratch_directory(self):
+        self.need("go")
+        status, out = self.run_line("go", 'fmt.Println("go", 6*7)', timeout=60)
+        self.assertIn("go 42", out)
+
+    def test_a_compile_error_is_an_answer_not_a_crash(self):
+        self.need("c")
+        status, out = self.run_line("c", "this is not c;")
+        self.assertIn("error", out)
+        self.assertIn("[build failed", out)
+
+    def test_what_the_program_does_stays_inside_the_sandbox(self):
+        self.need("c")
+        code = ('''#include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+int main(void) {
+  FILE *f = fopen("/var/lib/kos/secret-test", "r"); printf("read-state:%d\\n", f != NULL);
+  FILE *g = fopen("/usr/kos-escape", "w"); printf("write-usr:%d\\n", g != NULL);
+  FILE *h = fopen("scratch-ok.txt", "w"); printf("write-scratch:%d\\n", h != NULL);
+  int s = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in a = {0}; a.sin_family = AF_INET; a.sin_port = htons(53);
+  inet_pton(AF_INET, "1.1.1.1", &a.sin_addr); printf("network:%d\\n", s >= 0 && connect(s, (struct sockaddr*)&a, sizeof a) == 0);
+  return 0; }''')
+        status, out = self.run_line("c", code)
+        for line in ("read-state:0", "write-usr:0", "write-scratch:1", "network:0"):
+            self.assertIn(line, out, out)
+
+    def test_a_program_that_never_ends_is_stopped(self):
+        from kos import compiler
+        self.need("c")
+        with mock.patch.object(compiler, "RUN_LIMIT", 2):
+            status, out = self.run_line("c", "for (;;) {}")
+        self.assertIn("stopped", out)
+
+    def test_a_toolchain_the_sandbox_cannot_read_is_reported_not_widened_for(self):
+        from kos import compiler
+        with mock.patch("kos.compiler.shutil.which", lambda name: "/root/.cargo/bin/rustc"):
+            with self.assertRaises(compiler.CompilerError) as ctx:
+                compiler.plan("rust", 'println!("x");')
+        self.assertIn("cannot read", str(ctx.exception))
+        with self.assertRaises(compiler.CompilerError):
+            compiler.plan("cobol", "DISPLAY 1.")
+        status, out = self.run_line("java", "public static void main(String[] a) {}")
+        self.assertEqual(status, 66)
+        self.assertIn("nothing was run", out)
+
+    def test_the_security_scan_and_the_password_still_come_first(self):
+        status, out = self.run_line("c", 'FILE *f = fopen("/etc/shadow", "r");')
+        self.assertEqual(status, 3)
+        self.assertIn("blocked by the security scan", out)

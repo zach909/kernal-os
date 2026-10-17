@@ -3,9 +3,13 @@
 Each layer - a window, the menubar, the dock, the sidebar, a widget, the launcher - is a solid box:
 
 * the **front** is what the app draws (frosted glass and all);
-* the **top** is a terminal, a "matrix" of the app's own words falling through it - look down at a block and that is what you see;
+* the **top** and **sides** are tinted glass edges;
 * the **back** is the list of its buttons (the "select each button and press Enter" view);
-* the **sides** are tinted glass edges.
+* from the bottom edge of an app a **waterfall** of its own words - a falling terminal - runs down to the ground; click it and you are
+  taken to that app's commands.
+
+The **ground is a lake of terminal**: the same falling text, flowing along a bright river toward the viewer into the **Kernel**, and from
+the kernel on into the **Hardware**. Clicking the Kernel or the Hardware opens the app for it (Isolation, Devices).
 
 The camera orbits the whole desktop (Alt + arrows, or drag with the middle button), so you can go around it. Blocks sit on whatever is
 beneath them - a widget on the sidebar, a window on the wallpaper - and rise by their own height.
@@ -27,7 +31,8 @@ from . import fbgfx, ttf
 from .display import Framebuffer, parse_color
 
 SPAN = 8                                                       # pixels between exact texture lookups along a scanline
-DEFAULT_YAW, DEFAULT_PITCH = 0.30, 0.20                         # radians: a little from the side and from above
+DEFAULT_YAW, DEFAULT_PITCH = 0.26, 0.32                         # radians: a little from the side, and enough from above to see the lake
+GROUND_DEPTH = 1.0                                              # how far the lake runs toward the viewer, in screen widths                         # radians: a little from the side and from above
 
 
 # ----------------------------------------------------------------------------------------------- geometry
@@ -212,6 +217,9 @@ def fill_face(out: Framebuffer, quad, tex: Texture) -> None:
             x = xe
 
 
+_PLANE: dict = {}                                              # the padded wallpaper plane, kept between frames
+
+
 # ----------------------------------------------------------------------------------------- the blocks
 @dataclass
 class Block:
@@ -226,6 +234,9 @@ class Block:
     controls: list[str] = field(default_factory=list)    # its buttons, for the back face
     title: str = ""
     name_kind: str = ""                            # the layer's kind (window, bar, ...)
+    opens: str = ""                                # clicking this block opens that app (the Kernel and Hardware blocks)
+    fall: bool = False                             # a waterfall runs from its bottom edge to the ground
+    fall_quad: Optional[list] = None               # ...and where it is on screen
     quad: Optional[list] = None                    # the projected front face, filled in by render()
     inv: Optional[tuple] = None
     depth: float = 0.0
@@ -254,12 +265,18 @@ def side_texture(w: int, h: int, tint: str, k: float, label: str = "", u: int = 
 GLYPHS = "abcdefghijklmnopqrstuvwxyz0123456789#$%&*+-/<>=?@"
 
 
-def matrix_texture(block: Block, w: int, h: int, t: float, u: int = 1, px: Optional[int] = None) -> Texture:
-    """The top of a block: green characters falling through a dark terminal. They are drawn from the block's own words -
-    its title and the labels of its buttons - mixed with digits and symbols, so every block rains its own text."""
+def matrix_texture(block: Block, w: int, h: int, t: float, u: int = 1, px: Optional[int] = None, *,
+                   transparent: bool = False, river: Optional[tuple[int, int]] = None) -> Texture:
+    """Green characters falling through a dark terminal, drawn from the block's own words - its title and the labels of its
+    buttons - mixed with digits and symbols, so every block rains its own text. ``transparent``: only the characters are solid (a
+    waterfall you can see through). ``river``: a band of columns (x0, x1 in texels) that runs brighter and denser - the current
+    the lake flows along."""
     w, h = max(8, w), max(8, h)
     fb = Framebuffer(w, h)
-    fbgfx.gradient_v(fb, 0, 0, w, h, "#00120a", "#000a05")
+    if not transparent:
+        fbgfx.gradient_v(fb, 0, 0, w, h, "#00120a", "#000a05")
+        if river:
+            fbgfx.blend(fb, river[0], 0, river[1] - river[0], h, "#00ff90", 0.10)
     mono = ttf.load("mono")
     px = px or max(6, 6 * u)
     cw, lh = max(4, int(px * 0.6)), max(6, int(px * 1.15))
@@ -268,19 +285,47 @@ def matrix_texture(block: Block, w: int, h: int, t: float, u: int = 1, px: Optio
     seed = sum(map(ord, block.layer_id)) + 17
     rng = random.Random(seed)
     for ci in range(cols):
-        speed = 0.6 + rng.random() * 1.4
-        phase = rng.random() * (rows + 8)
-        head = (phase + t * speed * 6) % (rows + 8)
+        in_river = bool(river) and river[0] <= ci * cw < river[1]
+        speed = (0.6 + rng.random() * 1.4) * (1.8 if in_river else 1.0)
+        trail = 14 if in_river else 9
+        phase = rng.random() * (rows + trail)
+        head = (phase + t * speed * 6) % (rows + trail)
         for r in range(rows):
             dist = head - r
-            if 0 <= dist < 9:                                # a trail 9 characters long, fading
-                level = 1 - dist / 9
-                col = "#e8fff0" if dist < 1 else "#%02x%02x%02x" % (int(30 + 40 * level), int(90 + 165 * level), int(50 + 60 * level))
+            if 0 <= dist < trail:                            # a trail of characters, fading
+                level = 1 - dist / trail
+                if dist < 1:
+                    col = "#e8fff0"
+                elif in_river:
+                    col = "#%02x%02x%02x" % (int(60 + 120 * level), int(180 + 75 * level), int(120 + 100 * level))
+                else:
+                    col = "#%02x%02x%02x" % (int(30 + 40 * level), int(90 + 165 * level), int(50 + 60 * level))
                 ch = corpus[(ci * 7 + r * 13 + int(t * 3)) % len(corpus)] if rng.random() < 0.65 else rng.choice(GLYPHS)
                 if mono:
                     fb.stext(ci * cw, r * lh, ch, col, px, 2)
-    fb.rect(0, 0, w, 1, parse_color("#2cff8a"))
-    fb.rect(0, h - 1, w, 1, parse_color("#04301a"))
+    alpha = None
+    if transparent:
+        words = memoryview(fb.buf).cast("I")
+        alpha = bytearray(len(words))
+        for i, wd in enumerate(words):
+            if wd & 0xFFFFFF:
+                alpha[i] = 255
+    return Texture(fb, alpha)
+
+
+def info_texture(w: int, h: int, title: str, lines: list[str], tint: str = "#06231a", u: int = 1) -> Texture:
+    """The front of the Kernel and Hardware blocks: a dark terminal-green panel with a heading and a few facts."""
+    fb = Framebuffer(max(8, w), max(8, h))
+    fbgfx.gradient_v(fb, 0, 0, fb.width, fb.height, tint, "#02100b")
+    fb.rect(0, 0, fb.width, 2, parse_color("#2cff8a"))
+    bold, mono = ttf.load("bold"), ttf.load("mono")
+    if bold:
+        fb.stext(10 * u, 8 * u, title, "#9dffc8", 12 * u, 1)
+    y = 8 * u + 18 * u
+    for line in lines:
+        if mono and y < fb.height - 6 * u:
+            fb.stext(10 * u, y, line[:int(fb.width / (6 * u * 0.6)) or 1], "#4ce08c", 7 * u, 2)
+        y += 11 * u
     return Texture(fb)
 
 
@@ -311,7 +356,7 @@ def faces_of(b: Block, matrix_t: float, u: int):
     T = max(1, int(zf - zb))
 
     def top():
-        return matrix_texture(b, w, T, matrix_t, u)
+        return side_texture(w, T, b.tint, 1.1)
 
     def back():
         return controls_texture(b, w, h, u)
@@ -335,31 +380,39 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
     pad = 0.8
     corners = [(-pad * W, -pad * H, 0), ((1 + pad) * W, -pad * H, 0), ((1 + pad) * W, (1 + pad) * H, 0), (-pad * W, (1 + pad) * H, 0)]
     out.rect(0, 0, W, H, parse_color("#05070b"))
-    # texture of the padded plane: the wallpaper centred, edges stretched by clamping (fill_face clamps coordinates)
-    pad_fb = Framebuffer(int(W * (1 + 2 * pad)) // 2, int(H * (1 + 2 * pad)) // 2)
-    small = backdrop.halved() if backdrop.w >= 2 else backdrop
-    ox, oy = (pad_fb.width - small.w) // 2, (pad_fb.height - small.h) // 2
-    def mirror(i: int, n: int) -> int:                       # beyond the wallpaper's edge it is reflected, not smeared
-        i %= 2 * n
-        return i if i < n else 2 * n - 1 - i
+    # texture of the padded plane: the wallpaper centred, reflected beyond its edge (cached: it only changes with the wallpaper)
+    key = (id(backdrop.fb), len(backdrop.fb.buf), W, H, pad)
+    cached = _PLANE.get("k") == key and _PLANE.get("fb")
+    if cached:
+        pad_fb = _PLANE["fb"]
+    else:
+        pad_fb = Framebuffer(int(W * (1 + 2 * pad)) // 2, int(H * (1 + 2 * pad)) // 2)
+        small = backdrop.halved() if backdrop.w >= 2 else backdrop
+        ox, oy = (pad_fb.width - small.w) // 2, (pad_fb.height - small.h) // 2
 
-    cols = [mirror(x - ox, small.w) for x in range(pad_fb.width)]
-    for y in range(pad_fb.height):
-        sy = mirror(y - oy, small.h)
-        row = memoryview(small.fb.buf)[sy * small.w * 4:(sy + 1) * small.w * 4].cast("I")
-        line = memoryview(bytearray(pad_fb.width * 4)).cast("I")
-        for x, c in enumerate(cols):
-            line[x] = row[c]
-        pad_fb.buf[y * pad_fb.width * 4:(y + 1) * pad_fb.width * 4] = bytes(line)
+        def mirror(i: int, n: int) -> int:
+            i %= 2 * n
+            return i if i < n else 2 * n - 1 - i
+
+        cols = [mirror(x - ox, small.w) for x in range(pad_fb.width)]
+        for y in range(pad_fb.height):
+            sy = mirror(y - oy, small.h)
+            row = memoryview(small.fb.buf)[sy * small.w * 4:(sy + 1) * small.w * 4].cast("I")
+            line = memoryview(bytearray(pad_fb.width * 4)).cast("I")
+            for x, c in enumerate(cols):
+                line[x] = row[c]
+            pad_fb.buf[y * pad_fb.width * 4:(y + 1) * pad_fb.width * 4] = bytes(line)
+        _PLANE["k"], _PLANE["fb"] = key, pad_fb
     plane = [cam.project(*c)[:2] for c in corners]
     fill_face(out, plane, Texture(pad_fb))
     if floor_words is not None:
         # the ground: a terminal. It runs from the bottom edge of the wall toward the viewer, and the same falling text rains on it
         H0 = H
-        depth = int(1.5 * W)
+        depth = int(GROUND_DEPTH * W)
         fw, fh = int(2.6 * W) // 2, depth // 2
         ground = Block("ground", "ground", (0, 0, fw, fh), 0, 1, None, words=floor_words or ["kos"])
-        gt = matrix_texture(ground, fw, fh, matrix_t, u, px=max(8, 7 * u))
+        river = (int((0.5 - 0.07 + 0.8) / 2.6 * fw), int((0.5 + 0.07 + 0.8) / 2.6 * fw))          # the current runs down the middle
+        gt = matrix_texture(ground, fw, fh, matrix_t, u, px=max(8, 7 * u), river=river)
         ground_quad = [cam.project(*c)[:2] for c in ((-0.8 * W, H0, 0), (1.8 * W, H0, 0), (1.8 * W, H0, depth), (-0.8 * W, H0, depth))]
         rc = cam.rotate(W / 2, H0, depth / 2)
         nr = cam.normal_faces(0, -1, 0)
@@ -369,6 +422,7 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
         shadow(out, cam)
     for b in blocks:
         b.depth = cam.rotate((b.rect[0] + b.rect[2] / 2), (b.rect[1] + b.rect[3] / 2), (b.z_back + b.z_front) / 2)[2]
+        b.fall_quad = None
     camera_pos = (0.0, 0.0, cam.dist)
     for b in sorted(blocks, key=lambda b: b.depth):            # smallest rotated z = farthest from the viewer
         for name, n, corners, tex in faces_of(b, matrix_t, u):
@@ -389,6 +443,16 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
             while t.w > 2.2 * span and t.w > 8:                   # far away or foreshortened: use a smaller copy
                 t = t.halved()
             fill_face(out, quad, t)
+    # the waterfalls: each app's own words falling from its bottom edge to the ground, over everything behind them
+    for b in sorted((b for b in blocks if b.fall and b.rect[1] + b.rect[3] < H - 4), key=lambda b: b.depth):
+        x0, y0, w, h = b.rect
+        zf = b.z_front
+        quad = [cam.project(x0, y0 + h, zf)[:2], cam.project(x0 + w, y0 + h, zf)[:2], cam.project(x0 + w, H, zf)[:2], cam.project(x0, H, zf)[:2]]
+        b.fall_quad = quad
+        if polygon_area(quad) ** 2 < 4:
+            continue
+        fh = max(8, (H - (y0 + h)) // 2)
+        fill_face(out, quad, matrix_texture(b, max(8, w // 2), fh, matrix_t, u, px=max(6, 6 * u), transparent=True))
 
 
 def unproject(blocks: list[Block], x: float, y: float) -> Optional[tuple[Block, float, float]]:

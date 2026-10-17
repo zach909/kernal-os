@@ -117,6 +117,8 @@ log.
 kos> run hello                  kos> abre hello                kos> 运行 hello
 kos> please scan notes.kapp     kos> lance l'app hello         kos> write notes.txt "hi there."
 kos> print(6 * 7)               -> asks your password, runs in a sandbox, prints 42
+kos> c: printf("hi %d\n", 6*7);   -> built by the machine's C compiler *inside the sandbox*, then run: hi 42
+kos> go: fmt.Println(6 * 7)     -> the same for go:, cpp:, rust:, js:, ruby:, perl:, php:
 kos> run hello; rm -rf /        -> a command too: shell code, but there is no sandboxed
                                    shell runtime, so nothing runs (and it never touches the host)
 ```
@@ -129,9 +131,14 @@ command" with a did-you-mean. Shell command names (`ls`, `cat`, `kill`) are
 not words in the lexicon - they are code.
 
 Code: detected by syntax, scanned, then run as a one-shot sandboxed app with a
-password and a 10 s limit. Only Python has a sandboxed runtime here; any
-other language is still a command - understood, scanned, logged - and says
-it has no runtime. `kos line --explain` shows how each line was understood.
+password and a time limit. **Python** runs on the OS's own interpreter. **C, C++, Go, Rust, JavaScript, Ruby, Perl and PHP** go through the
+compiler path (`kos/compiler.py`): KOS writes no compiler of its own, it drives the toolchain the machine already has - *as an app*: the line becomes
+a one-shot app that, in the same sandbox as every other app (unprivileged user, no network, none of your files, Landlock), writes the source into
+its RAM scratch directory, calls the compiler, runs what it built and prints the output; the scratch is wiped afterwards. A fragment is wrapped
+into a program (`printf(...)` gets `main` and the includes; `fmt.Println(1)` gets `package main` and the packages it names). Which language a line is
+in is guessed, or say it: `c:`, `cpp:`, `go:`, `rust:`, `js:`, `ruby:`, `perl:`, `php:`. The sandbox may read the toolchain's own install
+directory and nothing else; a toolchain under `/root` or `/home` (like a rustup install) is reported as unavailable rather than widened for. A language
+with no toolchain (Java here) is still a command - understood, scanned, logged - and says so. `kos line --explain` shows how each line was understood.
 Honest limits: it is a verb lexicon, not language understanding; the verb comes
 first; each code line is its own app, so variables do not persist.
 
