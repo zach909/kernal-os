@@ -1,2 +1,0 @@
-{ "name": "addons", "version": "1.0", "runtime": "npm", "entry": "start", "modes": ["graphical"], "permissions": ["system:addons"],
-  "description": "Add-on features, off by default: virtual reality, augmented reality, neural interface. Turning one on or off asks for your password." }

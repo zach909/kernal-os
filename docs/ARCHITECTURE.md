@@ -129,22 +129,22 @@ its child - the child inherits Landlock, the empty network namespace and no_new_
 executable (`exec_scratch`) because their runtime unpacks there; the sandbox now also allows symlinks in scratch. The converter never executes anything,
 drops setuid bits, resolves symlinks inside the package only, ignores maintainer scripts, scans the result and refuses a flagged one.
 
-## The 3D look: blocks, waterfalls, the lake (`kos/blocks.py`, `kos/shell.py`)
+## The 3D look: blocks, waterfalls, the lake (`kos/blocks.py`, `examples/system/interface-3d`)
 Block tops are plain glass; the terminal lives in `matrix_texture`: **waterfalls** (`transparent=True`, alpha only where a character is) hang from the bottom edge of
 each window/dock/sidebar/popup block at its front plane down to the ground (`Block.fall`, `fall_quad`), the **ground** is a matrix plane running toward the viewer
-with a brighter, denser `river` down the middle, and `Shell._system_blocks` puts the **Kernel** and **Hardware** blocks on that river (`Block.opens` = the app a
-click opens). `Shell._block_action` resolves a click: a block's front face wins, else a waterfall (-> `open_commands` -> the `commands` app with the app name as its line),
+with a brighter, denser `river` down the middle, and `interface-3d`'s `system_blocks` puts the **Kernel** and **Hardware** blocks on that river (`Block.opens` = the app a
+click opens). the app resolves a region click: a block's front face wins, else a waterfall (-> `open_commands` -> the `commands` app with the app name as its line),
 else the normal flat mapping. The camera pivot slides toward the lake as the pitch rises so the lake stays in view; the rain advances at `max(0.25 s, 3 x the last frame cost)`.
 The 3D pointer is the cursor app drawing a cone and a cylinder (`poly` facets), snapping to point down while a button is held.
 
-`Shell._layer_blocks` makes one `Block` per shown layer: its front texture (`_front_texture`: glass layers painted over the wallpaper and given a
+`Blocks3D.layer_blocks` makes one `Block` per shown layer: its front texture (`_front_texture`: glass layers painted over the wallpaper and given a
 rounded alpha mask; layers with no glass painted over black and over white to recover transparency), its height (`BLOCK_HEIGHT`, windows by size) and
 `z_back` = the highest block beneath it that overlaps it (windows rest on panels, not on each other; they stack by a small step). `blocks.render` draws
 the wallpaper as a plane larger than the screen, then each block farthest first: for every face it tests the outward normal against the camera,
 projects the four corners, and `fill_face` walks the scanlines, computing texture coordinates from the inverse homography (exact at the ends of 8-pixel
 spans, linear between), halving the texture when the face is small. The top face is `matrix_texture` (drawn from the block's own words, animated by
-`Shell._matrix_t`, which only ticks while a top face can be seen), the back is `controls_texture`. `Shell.cam` is yaw/pitch; `orbit()` changes it, Alt+arrows
-and the middle-button drag call it; `_flat` unprojects a pointer position through the nearest block's inverse homography so `_route` hit-tests on flat
+`Blocks3D.matrix_t`, which only ticks while a top face can be seen), the back is `controls_texture`. `Blocks3D.cam` is yaw/pitch; `orbit()` changes it, Alt+arrows
+and the middle-button drag call it; the OS's `_flat` unprojects a pointer position through the nearest block's inverse homography so `_route` hit-tests on flat
 coordinates while the cursor is drawn where the pointer really is. `Framebuffer.apply(extrude=True)` gives text depth in this look. Gap: speed
 (cached per scene and camera, ~0.3-1 s a frame), no arbitrary meshes, no emoji font.
 
@@ -161,19 +161,26 @@ what is pushed to an app (window list: `apps`; notifications: `notify`; links: `
 reads an app's source for the requests it makes, so the test that each built-in manifest equals the scopes its code needs cannot be fooled by an
 understated manifest. `kos services` prints `services.CORE` (what must stay outside the app model, and what each piece cannot do) and the app ledger.
 
-## Immersive looks and neural intents (`kos/looks.py`, `kos/shell.py`, `kos/protocol.py`)
-`looks.IMMERSIVE = (vr, ar, neural)` are **add-ons** (`kos/addons.py`): `<state>/addons.json` lists the enabled ones; `addon.enable`/`addon.disable` are
-kernel-layer, never-remembered actions; `Shell._addon_looks` is what may be entered, `_addon_step` leaves a look whose add-on was switched off, and the
-Appearance app is told (`options.addons`) which cards to show. Nothing is loaded into the compositor: an add-on only unlocks a look it already draws.
-`Shell.set_look` refuses them unless `authorized=True` and the add-on is on, which only `Shell.authorize_immersive` (the
-`look.immersive` action: interface layer, in `NEVER_REMEMBERED`, not in `KEYLESS`) gives; the saved layout never restores them. `render_stereo`
-shifts every layer's rect by `eye * depth * u` (plus a head-turn term from the pointer), composes each eye once (cached on the base signature and the
-quantised yaw), restores the rects, paints the pointer per eye (never cached) and squeezes each eye to half width. Augmented reality is the same with the
-wallpaper layer's `blit` pixels as the backdrop (`has_passthrough`). The neural look is the normal frame plus the focus ring and a card; `_neural_step`
-advances the scan on a dwell timer; `Shell.intent` accepts one of `protocol.INTENTS` from a layer whose app holds the `neural` permission - which a
-manifest may only have with `"driver": "neural"` - and only while the look is on, rate limited. The `blit` op (raw RGB, <= 96000 px, scaled up to 32x) is
-how a camera driver's frames reach the screen. Gap: no real headset, camera or neural device was available; drivers for them are to be written against
-this contract.
+## Interface apps and the scene transport (`kos/compositor.py`, `kos/scenehost.py`, `kos/scenelib.py`, `kos/quad.py`)
+The OS keeps one look of its own - the terminal look (terminal + button selector, `looks.render_terminal`) - plus the password prompt. Every other look is an
+**interface app**: `"driver": "interface"`, `"look": NAME`, permission `compose` (the manifest parser refuses `compose` anywhere else). `kos/compositor.py` is the
+drawing library both sides share (`Compositor` mixin: glass, chrome, wallpaper, `compose`); the `Shell` uses it for the flat fallback, `scenelib.SceneModel` uses it
+inside the app. `kos/scenehost.py` is the `SceneHost` mixin of the Shell:
+* `scene_state` (the list of layers: id, name, kind, rect, z, title, focus...) and `scene_layer` (a layer's ops, only when its rev changed) go to the
+  *active* interface app; `Shell.pump` calls `_scene_sync` so it is told even when nothing is painted. The app itself and the cursor layer are never in its scene.
+* the app writes `frame.bin` (W x H x 4) into its scratch (`Instance.scratch`, RAM, `cache.alloc_exec`) and sends `scene {rev,w,h,hits,regions,pointer,captures}`;
+  `_on_scene` refuses a frame of the wrong size and ignores one from an app that is not active. `scene`/`press` from any other layer drop the layer.
+* clicks: `hits` are quads, nearest first; `_flat` runs `quad.unproject_quad` (the inverse homography) to get the flat position and `_route` goes on as for a flat
+  click (`ev["flat"]` skips the mapping). A click on a region (quad with an id) and on no face is sent back as `input {type: region, id}`. `_scene_wants` forwards only
+  declared `captures` (keys, buttons, pointer moves; a held captured button takes the drag).
+* `Shell.set_look` -> `_switch_interface(look)`: the look's app comes from `interfaces_of()` (`desktop.interface_apps`: installed manifests with a look); a running one is
+  reused, otherwise the opener starts it (password). `desktop.boot_core` also starts the app for the saved look in the single boot password. No app for a look
+  means the OS draws the flat desktop; the terminal look never uses one.
+* An app acts only through ordinary requests with the scopes it holds (`interface-3d` holds `system:apps`; it cannot read files or run anything). `intent` is forwarded to
+  the active scene app for the neural interface; the `blit` op (raw RGB, <= 96000 px) is how a camera driver's frames reach the screen.
+`examples/system/interface-{normal,3d}` ship with the desktop; `examples/optional/interface-{vr,ar,neural}` install with `kos desktop install --optional`. Neural
+drivers (`driver: "neural"`, permission `neural`) may send exactly five decisions (`protocol.INTENTS`), rate limited. Gap: no real headset, camera or neural device was
+available; drivers for them are to be written against this contract.
 
 ## App folders and encryption (`kos/paths.py`, `kos/loader.py`, `kos/vault.py`, `kos/encryption.py`)
 `Paths.data_dir(name)` makes `<state>/appdata/NAME` (0700). `loader.apply_to_policy(..., data_dir)` adds it to the Landlock write set and records it on the

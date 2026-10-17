@@ -1,0 +1,15 @@
+{
+  "name": "interface-vr",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "main:main",
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "compose"
+  ],
+  "driver": "interface",
+  "look": "vr",
+  "description": "Virtual reality interface: one picture per eye, side by side, with depth. Optional."
+}

@@ -1,0 +1,15 @@
+{
+  "name": "interface-neural",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "main:main",
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "compose"
+  ],
+  "driver": "interface",
+  "look": "neural",
+  "description": "Neural interface: a highlight scans the buttons; a neural driver app picks. Optional."
+}

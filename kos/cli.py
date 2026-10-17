@@ -578,6 +578,17 @@ def _boot_shell(args, paths: Paths) -> int:
     return 0
 
 
+def _settle(shell, timeout: float = 6.0) -> None:
+    """Give an interface app time to take in every layer and draw (at least a few seconds: its animation never stops, so the
+    picture is never 'steady'; the first frames come before the apps' own first drawings have crossed over)."""
+    import time as _t
+    if shell.scene is None:
+        return
+    start = _t.monotonic()
+    while _t.monotonic() - start < min(timeout, 3.5) or getattr(shell, "_scene_rev", -1) < 0 and _t.monotonic() - start < timeout:
+        shell.pump(0.1)
+
+
 def _shot(args, paths: Paths) -> int:
     """`kos desktop shot OUT.png`: boot the desktop headless, optionally open apps and type
     into search, and save what it looks like. Useful for pictures and for testing."""
@@ -602,13 +613,8 @@ def _shot(args, paths: Paths) -> int:
         while _t.monotonic() < end:
             shell.pump(0.1)                                  # let the apps draw; paint only once, at the end
         if args.look:
-            if args.look in looks.IMMERSIVE:                  # the same password a person is asked for
-                ok, why = shell.authorize_immersive(args.look)
-                if not ok:
-                    raise KAppError(why)
-                shell.set_look(look=args.look, authorized=True)
-            else:
-                shell.set_look(look=args.look)
+            shell.set_look(look=args.look)                    # starts that look's interface app, if one is needed (the password)
+            _settle(shell)
         if args.demo_notes:
             for title, body in (("Update available", "Files 1.1 is ready to install from your sources."),
                                 ("Backup finished", "Documents were backed up and scanned: 214 files, nothing flagged."),
@@ -616,10 +622,6 @@ def _shot(args, paths: Paths) -> int:
                 shell.notify("demo", title, body)
             shell.cfg["side_tab"] = "notifications"
             shell.relayout()
-        if args.orbit:                                       # "yaw,pitch" in degrees: go around the blocks, look down at them
-            yaw, _, pitch = args.orbit.partition(",")
-            shell.orbit(reset=True)
-            shell.cam[0], shell.cam[1] = math.radians(float(yaw)), math.radians(float(pitch or 0))
         for ch in args.search or "":
             devices.push({"type": "key", "key": ch})
         end = _t.monotonic() + 1.5
@@ -638,6 +640,7 @@ def _shot(args, paths: Paths) -> int:
         while _t.monotonic() < end:
             shell.pump(0.05)
             shell._update_motion(_t.monotonic())
+        _settle(shell)
         shell.render()
         fb = shell.backend.frames[-1] if getattr(shell.backend, "frames", None) else shell.compose()
         png.save(fb, args.out)
@@ -753,15 +756,23 @@ def cmd_desktop(args, paths: Paths) -> int:
     src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "examples" / "system"
     authority, _ = _authority(paths)
     store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
-    need = [n for n in SYSTEM_APPS if n not in have]
-    for n in SYSTEM_APPS:
+    optional = [n for n in (args.optional or "").split(",") if n]
+    where = {n: src for n in SYSTEM_APPS}
+    for n in optional:                                         # add-on apps (VR, AR, neural, ...) live in examples/optional
+        opt = Path(loader.SDK_DIR) / "examples" / "optional"
+        if not (opt / n / "manifest.json").exists():
+            raise KAppError(f"no optional app called {n!r} (have: {', '.join(sorted(p.name for p in opt.iterdir() if p.is_dir()))})")
+        where[n] = opt
+    names = list(where)
+    need = [n for n in names if n not in have]
+    for n in names:
         if n in have:
             print(f"{n}: already installed")
     with tempfile.TemporaryDirectory() as tmp:
         kapps = {}
         for name in need:
             kapps[name] = Path(tmp) / f"{name}.kapp"
-            pack(src / name, kapps[name])
+            pack(where[name] / name, kapps[name])
         if need:   # ONE password installs them all (each is scanned first; the prompt names the batch)
             from .scan import scan_bytes
             for name, kapp in kapps.items():
@@ -770,10 +781,10 @@ def cmd_desktop(args, paths: Paths) -> int:
             grants = authority.authorize_batch([("app.install", n) for n in need],
                                                f"install {len(need)} desktop apps")
             for (name, kapp), grant in zip(kapps.items(), grants):
-                m = store.install(kapp, authority, origin={"source": "built-in", "location": str(src / name)}, grant=grant)
+                m = store.install(kapp, authority, origin={"source": "built-in", "location": str(where[name] / name)}, grant=grant)
                 print(f"installed {m.name} {m.version}")
     permits = PermitStore(paths)
-    need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
+    need = [n for n in names if not permits.is_permitted(n)]
     if need:
         with authority.authorize("app.permit", " ".join(need)):
             for n in need:
@@ -1022,25 +1033,6 @@ def cmd_doctor(args, paths: Paths) -> int:
     print(f"framebuffer /dev/fb0  : {ok(r['framebuffer'])}")
     print(f"evdev /dev/input      : {ok(r['evdev'])}")
     print(f"password configured   : {ok(PasswordStore(paths).exists())}")
-    return 0
-
-
-def cmd_addon(args, paths: Paths) -> int:
-    """`kos addon list|enable NAME|disable NAME`: the add-ons (virtual reality, augmented reality, neural interface)."""
-    from .addons import ADDONS, Addons
-    ad = Addons(paths)
-    if args.addon_cmd == "list":
-        on = ad.enabled()
-        for name, a in ADDONS.items():
-            print(f"{'on ' if name in on else 'off'}  {name:<7} {a['title']}: {a['about']}")
-        print("\nAdd-ons are off by default. Enabling or disabling one needs your password every time.")
-        return 0
-    if not args.name:
-        raise KAppError(f"usage: kos addon {args.addon_cmd} NAME")
-    authority, prompter = _authority(paths)
-    (ad.enable if args.addon_cmd == "enable" else ad.disable)(authority, args.name)
-    prompter.close()
-    print(f"{args.name}: {'on' if args.addon_cmd == 'enable' else 'off'}")
     return 0
 
 
@@ -1413,6 +1405,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("desktop_cmd", choices=["install", "shot", "bench"])
     s.add_argument("out", nargs="?", default="desktop.png", help="shot: the PNG to write")
     s.add_argument("--from", dest="src", help="install: directory holding the apps (examples/system)")
+    s.add_argument("--optional", help="install: comma-separated add-on apps from examples/optional, e.g. interface-vr,interface-ar")
     s.add_argument("--size", default="960x540", help="shot: screen size, e.g. 1280x720; several, comma-separated, are several displays")
     s.add_argument("--open", help="shot: comma-separated apps to open as windows")
     s.add_argument("--search", help="shot: text to type into the desktop search")
@@ -1420,7 +1413,6 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--look", choices=["normal", "3d", "vr", "ar", "neural", "text", "terminal"], help="shot: the look to render in")
     s.add_argument("--point", help="shot: move the pointer to X,Y")
     s.add_argument("--click", help="shot: click at X,Y (the shot is taken a moment later, mid-effect)")
-    s.add_argument("--orbit", help="shot: the 3D look's camera as YAW,PITCH in degrees (pitch 80 looks straight down at the blocks)")
     s.add_argument("--keys", help="shot: comma-separated key names to press, e.g. tab,tab")
     s.add_argument("--demo-notes", action="store_true", help="shot: post three sample notifications and show that tab")
     s = sub.add_parser("ls", help="list a directory or a zip, without extracting")
@@ -1454,9 +1446,6 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
-    s = sub.add_parser("addon", help="add-on features, off by default: virtual reality, augmented reality, neural interface")
-    s.add_argument("addon_cmd", nargs="?", choices=["list", "enable", "disable"], default="list")
-    s.add_argument("name", nargs="?")
     sub.add_parser("services", help="the trusted core, and what every app may ask of the OS (nothing has power over everything)")
     sub.add_parser("encryption", help="is everything encrypted? disk, swap, RAM, scratch, backups - honestly")
     s = sub.add_parser("audit", help="show the authorization log")
@@ -1505,7 +1494,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "services": cmd_services, "addon": cmd_addon, "audit": cmd_audit,
+            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "services": cmd_services, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "provenance": cmd_provenance, "sources": cmd_sources, "updates": cmd_updates, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 

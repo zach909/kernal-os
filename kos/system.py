@@ -129,8 +129,12 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     if release:
         release()                          # e.g. close the TTY before forking the broker
     paths.ensure()
-    cache_dir = cache.alloc(paths, name, ram=app.manifest.runtime in ("npm", "bundle"))
+    composes = "compose" in app.manifest.permissions
+    cache_dir = (cache.alloc_exec(paths, name) if composes
+                 else cache.alloc(paths, name, ram=app.manifest.runtime in ("npm", "bundle")))
     loader.apply_to_policy(policy, app, cache_dir, paths.data_dir(name))
+    if composes and app.manifest.runtime not in ("npm", "bundle"):
+        policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]            # an interface app writes its frames here (python apps get no scratch otherwise)
     registry = Registry(paths)
     registry.prune()
     inst_id = registry.new_id(name)
@@ -144,7 +148,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     pointer="pointer" in app.manifest.permissions,
                     animate="animate" in app.manifest.permissions,
                     neural="neural" in app.manifest.permissions,
-                    assistant="assist" in app.manifest.permissions)
+                    assistant="assist" in app.manifest.permissions,
+                    compose=composes, scratch=str(cache_dir) if composes else "")
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
@@ -257,19 +262,6 @@ class SystemBridge:
                 reply({"cmd": "services", "core": [{k: clean_text(v, 200) for k, v in c.items()} for c in r["core"]],
                        "apps": [{"name": a["name"], "scopes": a["scopes"], "network": a["network"], "devices": a["devices"], "driver": a["driver"],
                                  "slot": a["slot"]} for a in r["apps"]], "blanket": r["blanket"]})
-                return None
-            if action == "addons":
-                from .addons import ADDONS, AddonError, Addons
-                ad = Addons(self.paths)
-                try:
-                    if req["op"] == "enable":
-                        ad.enable(authority, req["name"])
-                    elif req["op"] == "disable":
-                        ad.disable(authority, req["name"])
-                except AddonError as e:
-                    return result(False, str(e))
-                on = ad.enabled()
-                reply({"cmd": "addons", "addons": [{"name": n, "title": a["title"], "about": a["about"], "enabled": n in on} for n, a in ADDONS.items()]})
                 return None
             if action == "mods":
                 from .mods import Mods, ModError

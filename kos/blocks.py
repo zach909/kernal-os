@@ -29,6 +29,7 @@ from typing import Optional
 
 from . import fbgfx, ttf
 from .display import Framebuffer, parse_color
+from .quad import point_in_quad, polygon_area, unit_to_quad, unproject_quad  # noqa: F401
 
 SPAN = 8                                                       # pixels between exact texture lookups along a scanline
 DEFAULT_YAW, DEFAULT_PITCH = 0.26, 0.32                         # radians: a little from the side, and enough from above to see the lake
@@ -63,43 +64,6 @@ class Camera:
         """A direction (a face normal) turned the same way as the scene."""
         x1, z1 = nx * self._cy + nz * self._sy, -nx * self._sy + nz * self._cy
         return x1, ny * self._cp + z1 * self._sp, -ny * self._sp + z1 * self._cp
-
-
-def unit_to_quad(q) -> Optional[tuple]:
-    """The homography taking the unit square (0,0),(1,0),(1,1),(0,1) onto the quad ``q``, and its inverse as 9 numbers
-    (screen -> unit square). None for a degenerate quad."""
-    (x0, y0), (x1, y1), (x2, y2), (x3, y3) = q
-    dx1, dx2, sx = x1 - x2, x3 - x2, x0 - x1 + x2 - x3
-    dy1, dy2, sy = y1 - y2, y3 - y2, y0 - y1 + y2 - y3
-    den = dx1 * dy2 - dx2 * dy1
-    if abs(den) < 1e-9:
-        return None
-    g = (sx * dy2 - sy * dx2) / den
-    h = (dx1 * sy - dy1 * sx) / den
-    a, b, c = x1 - x0 + g * x1, x3 - x0 + h * x3, x0
-    d, e, f = y1 - y0 + g * y1, y3 - y0 + h * y3, y0
-    # inverse of [[a,b,c],[d,e,f],[g,h,1]] by the adjugate
-    A, B, C = e - f * h, c * h - b, b * f - c * e
-    D, E, F = f * g - d, a - c * g, c * d - a * f
-    G, H, I = d * h - e * g, b * g - a * h, a * e - b * d
-    return (A, B, C, D, E, F, G, H, I)
-
-
-def polygon_area(q) -> float:
-    return 0.5 * sum(q[i][0] * q[(i + 1) % len(q)][1] - q[(i + 1) % len(q)][0] * q[i][1] for i in range(len(q)))
-
-
-def point_in_quad(q, x: float, y: float) -> bool:
-    sign = 0
-    for i in range(4):
-        (ax, ay), (bx, by) = q[i], q[(i + 1) % 4]
-        cr = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
-        if cr:
-            s = 1 if cr > 0 else -1
-            if sign and s != sign:
-                return False
-            sign = s
-    return True
 
 
 # ---------------------------------------------------------------------------------------------- textures
@@ -425,7 +389,7 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
         shadow(out, cam)
     for b in blocks:
         b.depth = cam.rotate((b.rect[0] + b.rect[2] / 2), (b.rect[1] + b.rect[3] / 2), (b.z_back + b.z_front) / 2)[2]
-        b.fall_quad = None
+        b.fall_quad = b.quad = b.inv = None
     camera_pos = (0.0, 0.0, cam.dist)
     for b in sorted(blocks, key=lambda b: b.depth):            # smallest rotated z = farthest from the viewer
         for name, n, corners, tex in faces_of(b, matrix_t, u):

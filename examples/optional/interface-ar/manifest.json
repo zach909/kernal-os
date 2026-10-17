@@ -1,0 +1,15 @@
+{
+  "name": "interface-ar",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "main:main",
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "compose"
+  ],
+  "driver": "interface",
+  "look": "ar",
+  "description": "Augmented reality interface: floats over a camera passthrough. Optional."
+}

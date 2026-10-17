@@ -19,7 +19,6 @@ included. So the permission is now a list of **scopes**, each opening a few rela
     "system:links"      the pinned links
     "system:notify"     post to and read the notifications
     "system:hardware"   run a job on a hardware driver
-    "system:addons"     list, enable and disable add-ons (virtual reality, augmented reality, neural interface)
 
 Whatever an app is allowed to ask, the action still needs its own password where it changes anything. A scope only decides
 whether the question reaches the OS. The bare ``system`` permission still exists (every scope) for old apps; the built-in apps do not
@@ -31,7 +30,7 @@ from __future__ import annotations
 ACTION_SCOPE: dict[str, str] = {
     "apps": "apps", "open": "apps", "focus": "apps", "close": "apps",
     "info": "os", "sys": "os", "netcheck": "os", "encryption": "os",
-    "services": "security", "addons": "addons",
+    "services": "security",
     "ls": "files", "view": "files", "scan": "files", "save": "files", "fschange": "files",
     "backups": "backup", "backup": "backup", "restore": "backup", "push": "backup", "remote": "backup",
     "signal": "processes", "renice": "processes",

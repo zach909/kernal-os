@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from . import fbgfx, ttf
+from . import fbgfx, looks, ttf
 from .display import Framebuffer, parse_color
 
 ACCENT = "#0078d4"                  # KOS Blue: active states, selection, focus
@@ -24,7 +24,7 @@ DOCK_GLASS = {"tint": "#e9eff8", "alpha": 0.20, "radius": 5}
 POPUP_GLASS = {"tint": "#141820", "alpha": 0.80, "radius": 5}
 WINDOW_BODY = {"tint": "#12151b", "alpha": 0.84, "radius": 4}
 TITLE_TINT = ("#4a505c", "#20242c")
-Z = {"wallpaper": 0, "plain": 4, "sidebar": 9, "widget": 10, "window": 20, "bar": 90, "dock": 91, "top": 92, "overlay": 95, "popup": 96, "cursor": 99}
+Z = {"wallpaper": 0, "scene": 1, "plain": 4, "sidebar": 9, "widget": 10, "window": 20, "bar": 90, "dock": 91, "top": 92, "overlay": 95, "popup": 96, "cursor": 99}
 NOT_IN_BASE = ("wallpaper", "overlay", "cursor")        # painted separately: the base frame is cached without them
 NO_HIT = ("cursor", "overlay")                          # layers the pointer passes through
 
@@ -259,3 +259,24 @@ class Compositor:
         return fb
 
     # ----------------------------------------------------------------- the main loop
+
+    def controls(self) -> list["looks.Control"]:
+        """Every clickable thing on screen, front to back: apps' declared ``hit`` ops and window frames."""
+        out: list[looks.Control] = []
+        layers = sorted((l for l in self.layers.values() if self.shown(l) and l.kind not in ("wallpaper", "cursor", "overlay")),
+                        key=lambda l: (0 if l.kind == "window" else 1, -l.z))
+        r, u = 5 * self.u, self.u
+        for layer in layers:
+            x, y, w, h = layer.rect
+            if layer.kind == "window":
+                cy = y + self.titlebar // 2
+                out.append(looks.Control(layer.id, layer.name, f"{layer.title or layer.name}", (x, y, w, self.titlebar), "focus"))
+                out.append(looks.Control(layer.id, layer.name, "Close", (x + 12 * u - r, cy - r, 2 * r, 2 * r), "close"))
+                out.append(looks.Control(layer.id, layer.name, "Minimize", (x + 26 * u - r, cy - r, 2 * r, 2 * r), "minimize"))
+            cx, cy, _, _ = self.content_rect(layer)
+            for op in layer.ops:
+                if op[0] == "hit" and op[5] and op[3] > 0 and op[4] > 0:
+                    rect = (cx + op[1], cy + op[2], op[3], op[4])
+                    if rect[0] < self.W and rect[1] < self.H and rect[0] + rect[2] > 0 and rect[1] + rect[3] > 0:
+                        out.append(looks.Control(layer.id, layer.name, op[5], rect))
+        return out

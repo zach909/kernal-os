@@ -4567,76 +4567,8 @@ class TestQuantumHardwareLayer(Env):
 from kos.kapp import Manifest  # noqa: E402
 
 
-class TestImmersiveLooks(Env):
-    """Virtual reality, augmented reality and the neural look: each asks for the password, none is restored at start, and a neural
-    driver can only ever say next / prev / select / back / pause."""
-
-    layer = TestLooksAndControls.layer
-
-    def shell_with(self, *answers, w=640, h=360, addons=("vr", "ar", "neural")):
-        from kos.shell import Shell
-        self.paths.ensure()
-        (self.paths.state / "addons.json").write_text(json.dumps({"enabled": list(addons)}))
-        return Shell(self.paths, self.authority(*answers), HeadlessBackend(w, h), ScriptedDevices(), preboot=(),
-                     keep_prompter=True)
-
-    def test_every_action_has_a_layer_and_the_immersive_ones_always_ask(self):
-        from kos import auth
-        self.assertEqual(set(auth.ACTIONS) - set(auth.LAYER_OF), set())          # nothing is outside the layers
-        self.assertIn("look.immersive", auth.NEVER_REMEMBERED)
-        self.assertNotIn("look.immersive", auth.KEYLESS)                         # "interface: don't ask" does not skip it
-
-    def test_an_immersive_look_needs_the_password_and_is_not_restored(self):
-        sh = self.shell_with(PW)
-        sh.set_look(look="vr")
-        self.assertEqual(sh.cfg["look"], "normal")                               # refused without the password
-        ok, _ = sh.authorize_immersive("vr")
-        self.assertTrue(ok)
-        sh.set_look(look="vr", authorized=True)
-        self.assertEqual(sh.cfg["look"], "vr")
-        again = self.shell_with()                                                # a new session starts in a normal look
-        self.assertNotIn(again.cfg["look"], ("vr", "ar", "neural"))
-        wrong = self.shell_with("not the password", "still not", "no")
-        ok, why = wrong.authorize_immersive("neural")
-        self.assertFalse(ok)
-        self.assertIn("password", why)
-
-    def test_a_sudo_window_does_not_stand_in_for_the_password(self):
-        sh = self.shell_with(PW, "x", "x", "x")                                  # one answer opens the window; none left for the look
-        sh.authority.sudo_open(5, ("interface", "app", "command"))
-        ok, _ = sh.authorize_immersive("ar")
-        self.assertFalse(ok)
-
-    def test_vr_renders_one_picture_per_eye_with_depth_and_leaves_the_layers_alone(self):
-        sh = self.shell_with(PW)
-        dock = self.layer(sh, "dock", "dock", (100, 280, 200, 50), ops=[["rect", 0, 0, 200, 50, "#ff0000"]])
-        win = self.layer(sh, "win", "window", (200, 60, 200, 120), ops=[["rect", 0, 0, 200, 120, "#00ff00"]])
-        before = (list(dock.rect), list(win.rect))
-        sh.set_look(look="vr", authorized=True)
-        sh.render()
-        frame = sh.backend.frames[-1]
-        self.assertEqual((frame.width, frame.height), (640, 360))
-        half = frame.width // 2
-        left = [frame.pixel(x, 300) for x in range(0, half)]
-        right = [frame.pixel(half + x, 300) for x in range(0, half)]
-        red = lambda row: [i for i, p in enumerate(row) if p[0] > 200 and p[1] < 80]
-        self.assertTrue(red(left) and red(right))                                # the dock is in both eyes...
-        self.assertNotEqual(red(left)[0], red(right)[0])                         # ...at different places: disparity
-        self.assertEqual((list(dock.rect), list(win.rect)), before)              # layer positions were restored
-        sh.render()                                                              # the second frame comes from the cache
-        self.assertIs(sh._stereo[1][0], sh._stereo[1][0])
-
-    def test_augmented_reality_says_whether_there_is_a_passthrough(self):
-        sh = self.shell_with(PW)
-        sh.set_look(look="ar", authorized=True)
-        from kos import looks
-        self.assertFalse(looks.has_passthrough(sh))
-        wall = self.layer(sh, "wallpaper", "wallpaper", (0, 0, 640, 360),
-                          ops=[["blit", 0, 0, 2, 1, 160, __import__("base64").b64encode(b"\x10\x20\x30\x40\x50\x60").decode()]])
-        self.assertTrue(looks.has_passthrough(sh))
-        sh.render()                                                              # the camera pixels are the backdrop
-        frame = sh.backend.frames[-1]
-        self.assertEqual(frame.pixel(40, 100), (0x10, 0x20, 0x30))
+class TestEmulatorsAndPolygons(Env):
+    """Libraries and emulators that survived the move of the looks into interface apps."""
 
     def test_a_polygon_larger_than_the_screen_or_half_off_it_is_clipped_not_a_crash(self):
         fb = Framebuffer(40, 40)
@@ -4648,51 +4580,6 @@ class TestImmersiveLooks(Env):
         none = Framebuffer(40, 40)
         none.poly([[100, 100], [200, 100], [200, 200]], "#ffffff", 255)                                  # entirely off
         self.assertEqual(none.pixel(20, 20), (0, 0, 0))
-
-    def test_the_neural_look_scans_on_its_own_and_a_driver_can_only_send_five_decisions(self):
-        sh = self.shell_with(PW)
-        pressed = []
-        btn = self.layer(sh, "dock", "dock", (10, 300, 300, 40), ops=[["hit", 0, 0, 60, 30, "One"], ["hit", 70, 0, 60, 30, "Two"],
-                                                                      ["hit", 140, 0, 60, 30, "Three"]])
-        drv = self.layer(sh, "neurosim", "plain", (0, 0, 10, 10), neural=True)
-        stranger = self.layer(sh, "stranger", "plain", (0, 0, 10, 10))
-        self.assertFalse(sh.intent(drv, "next")[0])                              # not in the neural look yet
-        sh.set_look(look="neural", authorized=True)
-        self.assertTrue(sh.ring)
-        self.assertFalse(sh.intent(stranger, "next")[0])                         # a layer without the permission is refused
-        start = sh.nav
-        sh._neural_step(sh.neural["last_step"] + sh.NEURAL_DWELL + 0.01)         # time passes: the scan moves on its own
-        self.assertEqual(sh.nav, (start + 1) % len(sh.controls()))
-        sh.neural["last_intent_t"] = 0.0
-        self.assertTrue(sh.intent(drv, "prev")[0])
-        self.assertEqual(sh.nav, start)
-        sh.neural["last_intent_t"] = 0.0
-        self.assertTrue(sh.intent(drv, "pause")[0])
-        before = sh.nav
-        sh._neural_step(sh.neural["last_step"] + 100)
-        self.assertEqual(sh.nav, before)                                         # paused: it does not move
-        self.assertFalse(sh.intent(drv, "next")[0])                              # ...and decisions are rate limited
-        sh.render()
-        card = sh.backend.frames[-1]                                             # the card is drawn near the bottom, over the interface
-        self.assertNotEqual([card.pixel(x, 330) for x in range(200, 440, 8)], [card.pixel(x, 20) for x in range(200, 440, 8)])
-        sh.set_look(look="normal")                                               # leaving needs no password
-        self.assertEqual(sh.cfg["look"], "normal")
-
-    def test_protocol_accepts_five_intents_and_bounded_blits_and_nothing_else(self):
-        import base64
-        ok = validate_app_message({"cmd": "request", "action": "intent", "name": "select"}, "graphical")
-        self.assertEqual(ok["name"], "select")
-        for bad in ("raw", "eeg", "", None, 5, "SELECT"):
-            with self.assertRaises(ProtocolError, msg=repr(bad)):
-                validate_app_message({"cmd": "request", "action": "intent", "name": bad}, "graphical")
-        px = base64.b64encode(bytes(12)).decode()
-        validate_app_message({"cmd": "frame", "ops": [["blit", 0, 0, 2, 2, 1, px]]}, "graphical")
-        for op in (["blit", 0, 0, 2, 2, 1, "!!"], ["blit", 0, 0, 3, 2, 1, px], ["blit", 0, 0, 400, 400, 1, px],
-                   ["blit", 0, 0, 2, 2, 99, px], ["blit", 0, 0, 2, 2, 1, 5]):
-            with self.assertRaises(ProtocolError, msg=str(op)[:40]):
-                validate_app_message({"cmd": "frame", "ops": [op]}, "graphical")
-        for look in ("vr", "ar", "neural"):
-            validate_app_message({"cmd": "request", "action": "look", "op": "set", "look": look}, "graphical")
 
     def test_only_a_neural_driver_may_hold_the_neural_permission(self):
         base = {"name": "x", "version": "1", "runtime": "python", "entry": "m", "modes": ["graphical"]}
@@ -4821,24 +4708,15 @@ class TestScopedCapabilities(Env):
         from kos import services
         AppStore(self.paths).install(self.kapp, self.authority(PW))
         r = services.report(self.paths)
-        self.assertEqual({c["part"].split(" ")[0] for c in r["core"]}, {"authority", "store", "sandbox", "registry", "compositor"})
+        self.assertEqual({c["part"].split(" ")[0] for c in r["core"]}, {"authority", "store", "sandbox", "registry", "the", "scene"})
         self.assertEqual(r["blanket"], [])
         out = _sp.run([sys.executable, "-m", "kos", "services"], cwd=str(Path(__file__).resolve().parent.parent),
                       env={**os.environ, "KOS_ROOT": str(self.paths.root)}, capture_output=True, text=True)
         self.assertIn("Trusted core", out.stdout, out.stderr)
 
 
-class TestBlocks3D(Env):
-    """The 3D look: every layer is a block with a front, a matrix terminal on top, sides and a back; the camera orbits."""
-
-    layer = TestLooksAndControls.layer
-    sent = TestLooksAndControls.sent
-
-    def shell3d(self, w=640, h=360):
-        from kos.shell import Shell
-        sh = Shell(self.paths, self.authority(PW), HeadlessBackend(w, h), ScriptedDevices(), preboot=())
-        sh.booted.add("mouse")
-        return sh
+class TestBlocksLibrary(Env):
+    """Libraries and emulators that survived the move of the looks into interface apps."""
 
     def test_a_homography_maps_the_unit_square_onto_a_quad_and_back(self):
         from kos import blocks
@@ -4884,229 +4762,187 @@ class TestBlocks3D(Env):
         side = blocks.Camera(0.6, 0, 320, 180, 0, 1000)
         self.assertTrue(side.normal_faces(-1, 0, 0)[2] > 0 or side.normal_faces(1, 0, 0)[2] > 0)   # turned: one side comes into view
 
-    def test_every_layer_becomes_a_block_stacked_on_what_is_beneath_it(self):
-        sh = self.shell3d()
-        self.layer(sh, "sidebar", "sidebar", (400, 30, 200, 300), ops=[["rect", 0, 0, 200, 300, "#223355"]])
-        self.layer(sh, "widget-clock", "widget", (410, 40, 180, 80), ops=[["rect", 0, 0, 180, 80, "#335577"]])
-        self.layer(sh, "menubar", "bar", (0, 0, 640, 20), ops=[["rect", 0, 0, 640, 20, "#112244"]])
-        self.layer(sh, "files", "window", (40, 60, 300, 200), ops=[["rect", 0, 0, 300, 170, "#143a5a"]])
-        sh.set_look(look="3d")
-        sh.render()
-        bl = {b.layer_id: b for b in sh._blocks}
-        self.assertEqual(set(b.name for b in bl.values()), {"sidebar", "widget-clock", "menubar", "files", "kernel", "hardware"})
-        side, clock = bl["sidebar-1"], bl["widget-clock-1"]
-        self.assertEqual(clock.z_back, side.z_front)                      # the widget stands on the sidebar
-        self.assertGreater(clock.z_front, side.z_front)
-        self.assertEqual(bl["files-1"].z_back, 0.0)                       # a window on the bare wallpaper
-        self.assertGreater(bl["files-1"].z_front - bl["files-1"].z_back, bl["menubar-1"].z_front)   # windows are deeper than the bar
+class TestInterfaceApps(Env):
+    """Normal, 3D, VR, AR and the neural interface are apps: the OS keeps only the terminal look, the password prompt and the plumbing that
+    tells an interface app what is running, shows its frame and maps clicks back."""
 
-    def test_a_click_on_a_rotated_front_face_reaches_the_app_where_it_was_aimed(self):
-        sh = self.shell3d(960, 540)
-        win = self.layer(sh, "files", "window", (100, 80, 400, 300), ops=[["rect", 0, 0, 398, 270, "#143a5a"], ["hit", 100, 100, 60, 30, "Open"]])
-        sh.set_look(look="3d")
-        sh.orbit(reset=True)
-        sh.cam[0], sh.cam[1] = 0.5, 0.35
-        sh.render()
-        b = next(b for b in sh._blocks if b.name == "files")
-        # aim at the middle of the "Open" button as drawn: find the screen point whose flat position is that button
-        from kos import blocks
-        rect, quad = win.rect, b.quad
-        found = None
-        for x in range(int(min(p[0] for p in quad)), int(max(p[0] for p in quad))):
-            for y in range(int(min(p[1] for p in quad)) , int(max(p[1] for p in quad)), 3):
-                u, v = blocks.unproject([b], x, y)[1:] if blocks.unproject([b], x, y) else (None, None)
-                if u is not None and abs(u - (130 + 1)) < 1.5 and abs(v - (sh.titlebar + 115)) < 1.5:
-                    found = (x, y)
-                    break
-            if found:
-                break
-        self.assertIsNotNone(found)
-        self.assertNotEqual(found, (rect[0] + 131, rect[1] + sh.titlebar + 115))     # the camera really moved it on screen
-        self.sent(win)
-        sh.pending.append({"type": "pointer", "x": found[0], "y": found[1]})
-        sh.pending.append({"type": "button", "button": "left", "pressed": True, "x": found[0], "y": found[1]})
-        while sh.pending:
-            sh.route(sh.pending.popleft())
-        msgs = [m for m in self.sent(win) if m.get("cmd") == "button"]
-        self.assertEqual(len(msgs), 1)
-        self.assertLessEqual(abs(msgs[0]["x"] - 130), 3)                                # content-local: where the button is
-        self.assertLessEqual(abs(msgs[0]["y"] - 115), 3)
+    layer = TestLooksAndControls.layer
+    sent = TestLooksAndControls.sent
+    ROOT = Path(__file__).resolve().parent.parent / "examples"
 
-    def test_apps_have_waterfalls_that_lead_to_their_commands_and_the_kernel_and_hardware_open_their_apps(self):
-        from kos import blocks
-        sh = self.shell3d(960, 540)
-        self.layer(sh, "menubar", "bar", (0, 0, 960, 20), ops=[["rect", 0, 0, 960, 20, "#112244"]])
-        self.layer(sh, "files", "window", (60, 60, 300, 160), ops=[["rect", 0, 0, 298, 130, "#143a5a"]])
-        sh.set_look(look="3d")
-        sh.render()
-        by = {b.name: b for b in sh._blocks}
-        self.assertTrue(by["files"].fall_quad)                                    # an app has a waterfall down to the ground
-        self.assertIsNone(by["menubar"].fall_quad)                                # the top bar does not
-        self.assertTrue(by["kernel"].opens == "isolation" and by["hardware"].opens == "devices")
-        self.assertLess(by["kernel"].z_back, by["hardware"].z_back)               # the lake flows to the kernel, then on to the hardware
-        opened = []
-        sh._open_app_window = lambda name, command=None: opened.append((name, command))
-        q = by["files"].fall_quad
-        cx, cy = sum(p[0] for p in q) / 4, sum(p[1] for p in q) / 4
-        self.assertIsNone(blocks.unproject(sh._blocks, cx, cy))                   # nothing solid in front of that spot
-        go = sh._block_action(int(cx), int(cy))
-        self.assertIsNotNone(go)
-        go()
-        self.assertEqual(opened, [("commands", {"command": "list", "line": "files"})])   # the waterfall goes to files' commands
-        opened.clear()
-        kq = by["kernel"].quad
-        sh._block_action(int(sum(p[0] for p in kq) / 4), int(sum(p[1] for p in kq) / 4))()
-        self.assertEqual(opened, [("isolation", None)])
-        hq = by["hardware"].quad
-        sh._block_action(int(sum(p[0] for p in hq) / 4), int(sum(p[1] for p in hq) / 4))()
-        self.assertEqual(opened[-1], ("devices", None))
-
-    def test_the_tops_of_blocks_are_plain_glass_and_the_rain_is_see_through(self):
-        from kos import blocks
-        b = blocks.Block("a-1", "files", (0, 0, 120, 60), 0, 40, None, words=["Files", "Open"], tint="#2f4a86")
-        top = next(f for f in blocks.faces_of(b, 0.0, 1) if f[0] == "top")[3]()
-        greens = sum(1 for x in range(top.w) for y in range(top.h) if top.fb.pixel(x, y)[1] > top.fb.pixel(x, y)[2] + 40)
-        self.assertEqual(greens, 0)                                               # no terminal on top of a block
-        rain = blocks.matrix_texture(b, 120, 80, 1.0, transparent=True)
-        solid = sum(1 for a in rain.alpha if a)
-        self.assertTrue(0 < solid < len(rain.alpha) * 0.5)                         # only the characters are solid: you see through the rest
-        river = blocks.matrix_texture(b, 200, 80, 1.0, river=(80, 120))
-        inside = sum(1 for x in range(80, 120) for y in range(80) if river.fb.pixel(x, y)[1] > 150)
-        outside = sum(1 for x in range(0, 40) for y in range(80) if river.fb.pixel(x, y)[1] > 150)
-        self.assertGreater(inside, outside)                                       # the river runs brighter than the lake around it
-
-    def test_alt_arrows_and_middle_drag_orbit_and_only_in_the_3d_look(self):
-        sh = self.shell3d()
-        sh.set_look(look="3d")
-        sh.orbit(reset=True)
-        y0, p0 = sh.cam
-        sh._route({"type": "key", "key": "alt-right"})
-        sh._route({"type": "key", "key": "alt-up"})
-        self.assertGreater(sh.cam[0], y0)
-        self.assertGreater(sh.cam[1], p0)
-        sh._route({"type": "key", "key": "alt-0"})
-        self.assertEqual(sh.cam, [y0, p0])
-        sh._route({"type": "button", "button": "middle", "pressed": True, "x": 100, "y": 100})
-        sh._route({"type": "pointer", "x": 160, "y": 100})
-        self.assertGreater(sh.cam[0], y0)                                                  # dragged right: turned
-        sh._route({"type": "button", "button": "middle", "pressed": False, "x": 160, "y": 100})
-        before = list(sh.cam)
-        sh._route({"type": "pointer", "x": 300, "y": 200})
-        self.assertEqual(sh.cam, before)                                                   # released: the pointer no longer turns it
-        for _ in range(60):
-            sh.orbit(0, 0.2)
-        self.assertLessEqual(sh.cam[1], 1.45)                                              # never past straight down
-        sh.set_look(look="normal")
-        sh.orbit(reset=True)
-        sh._route({"type": "key", "key": "alt-right"})
-        self.assertEqual(sh.cam, [y0, p0])                                                 # other looks ignore the keys
-
-    def test_the_top_face_rains_only_when_it_can_be_seen(self):
-        sh = self.shell3d()
-        self.layer(sh, "files", "window", (40, 60, 300, 200), ops=[["rect", 0, 0, 300, 170, "#143a5a"]])
-        sh.set_look(look="3d")
-        sh.cam[1] = 0.1
-        t0 = sh._matrix_t
-        sh._matrix_step(100.0)
-        self.assertEqual(sh._matrix_t, t0)                                                 # looking from the side: no animation
-        sh.cam[1] = 0.9
-        sh._matrix_step(200.0)
-        self.assertGreater(sh._matrix_t, t0)                                               # looking down: it moves on
-        from kos import blocks
-        tex = blocks.matrix_texture(blocks.Block("a-1", "files", (0, 0, 120, 40), 0, 40, None, words=["Files", "Open"]), 120, 40, 1.0)
-        greens = sum(1 for x in range(120) for y in range(40) if tex.fb.pixel(x, y)[1] > 120 and tex.fb.pixel(x, y)[0] < 120)
-        self.assertGreater(greens, 20)                                                     # there are green characters
-        again = blocks.matrix_texture(blocks.Block("a-1", "files", (0, 0, 120, 40), 0, 40, None, words=["Files", "Open"]), 120, 40, 2.0)
-        self.assertNotEqual(bytes(tex.fb.buf), bytes(again.fb.buf))                        # and they fall
-
-    def test_text_is_extruded_in_the_3d_look_and_icons_have_depth(self):
-        flat, deep = Framebuffer(80, 30), Framebuffer(80, 30)
-        flat.apply([["stext", 4, 4, "Hi", "#ffffff", 18, 1]])
-        deep.apply([["stext", 4, 4, "Hi", "#ffffff", 18, 1]], extrude=True)
-        self.assertNotEqual(bytes(flat.buf), bytes(deep.buf))
-        count = lambda fb: sum(1 for x in range(80) for y in range(30) if fb.pixel(x, y) != (0, 0, 0))
-        self.assertGreater(count(deep), count(flat))                                       # the sides add pixels
-        dark = [fb for fb in (deep,) for x in range(80) for y in range(30) if 0 < sum(fb.pixel(x, y)) < 400 and fb.pixel(x, y)[0] < 200]
-        self.assertTrue(dark)                                                              # and they are darker than the face
-        gfx = (SDK_JS / "gfx.js").read_text()
-        self.assertIn("steps", gfx)
-        self.assertIn("the symbol is solid", gfx)
-
-    def test_blocks_can_be_switched_off_and_the_option_is_remembered_and_validated(self):
-        sh = self.shell3d()
-        self.layer(sh, "files", "window", (40, 60, 300, 200), ops=[["rect", 0, 0, 300, 170, "#143a5a"]])
-        sh.set_look(look="3d")
-        sh.render()
-        self.assertTrue(sh._blocks)
-        sh.set_look(blocks=False)
-        sh.render()
-        self.assertEqual(sh._blocks, [])
-        self.assertFalse(sh.cfg["blocks"])
-        validate_app_message({"cmd": "request", "action": "look", "op": "set", "blocks": False}, "graphical")
-        with self.assertRaises(ProtocolError):
-            validate_app_message({"cmd": "request", "action": "look", "op": "set", "blocks": "yes"}, "graphical")
-
-
-class TestAddons(Env):
-    """VR, AR and the neural interface are add-ons: absent by default, enabled only with the kernel-layer password."""
-
-    def shell(self):
+    def shell(self, w=320, h=180, interfaces=None):
         from kos.shell import Shell
-        return Shell(self.paths, self.authority(PW), HeadlessBackend(320, 180), ScriptedDevices(), preboot=(), keep_prompter=True)
+        self.opened = []
 
-    def test_nothing_is_enabled_by_default_and_the_looks_are_refused(self):
-        from kos.addons import Addons
-        self.assertEqual(Addons(self.paths).enabled(), frozenset())
+        def opener(name, mode, new=False, taken=frozenset()):
+            self.opened.append(name)
+            raise RuntimeError("no process in this test")
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(w, h), ScriptedDevices(), preboot=(), opener=opener,
+                     interfaces_of=lambda: dict(interfaces if interfaces is not None else {"3d": "interface-3d", "vr": "interface-vr"}))
+
+    def scene_layer(self, sh, name="interface-3d"):
+        scratch = tempfile.mkdtemp(dir=self.tmp.name)
+        L = self.layer(sh, name, "scene", (0, 0, 0, 0), scene=True, scratch=scratch)
+        L.visible = False
+        sh.scenes["3d"] = L
+        sh._activate_scene(L)
+        return L
+
+    def frame(self, sh, L, w=None, h=None, rev=1, hits=(), regions=(), caps=None, color=b"\x10\x20\x30\x00"):
+        w, h = w or sh.W, h or sh.H
+        (Path(L.scratch) / "frame.bin").write_bytes(color * (w * h))
+        sh._on_scene(L, {"cmd": "scene", "rev": rev, "w": w, "h": h, "hits": list(hits), "regions": list(regions), "pointer": False,
+                         "captures": caps or {"keys": [], "buttons": [], "pointer": False}})
+
+    def test_every_look_but_the_terminal_has_an_interface_app_and_each_is_valid(self):
+        for where, name, look in (("system", "interface-normal", "normal"), ("system", "interface-3d", "3d"), ("optional", "interface-vr", "vr"),
+                                  ("optional", "interface-ar", "ar"), ("optional", "interface-neural", "neural")):
+            m = Manifest.parse((self.ROOT / where / name / "manifest.json").read_bytes())
+            self.assertEqual((m.driver, m.look), ("interface", look))
+            self.assertIn("compose", m.permissions)
+            self.assertNotIn("system:files", m.permissions)                      # it draws; it cannot read files or run things
+        self.assertEqual(set(looks_module().LOOKS), {"normal", "3d", "vr", "ar", "neural", "text", "terminal"})
+
+    def test_only_an_interface_app_may_compose_and_it_must_name_its_look(self):
+        base = {"name": "x", "version": "1", "runtime": "python", "entry": "m", "modes": ["graphical"]}
+        Manifest.parse(json.dumps({**base, "permissions": ["compose"], "driver": "interface", "look": "3d"}).encode())
+        for extra in ({"permissions": ["compose"]}, {"permissions": ["compose"], "driver": "camera"},
+                      {"driver": "interface", "look": "Not A Look"}, {"look": "3d"}):
+            with self.assertRaises(KAppError, msg=str(extra)):
+                Manifest.parse(json.dumps({**base, **extra}).encode())
+
+    def test_the_active_interface_app_is_told_what_is_running_and_only_what_changed(self):
         sh = self.shell()
-        for look in ("vr", "ar", "neural"):
-            ok, why = sh.authorize_immersive(look)
-            self.assertFalse(ok)
-            self.assertIn(f"kos addon enable {look}", why)
-            sh.set_look(look=look, authorized=True)                                    # even a typed password cannot skip the add-on
-            self.assertEqual(sh.cfg["look"], "normal")
+        L = self.scene_layer(sh)
+        w = self.layer(sh, "files", "window", (10, 10, 120, 80), ops=[["rect", 0, 0, 120, 80, "#335577"]])
+        sh._scene_sync()
+        got = self.sent(L)
+        state = next(m for m in got if m["cmd"] == "scene_state")
+        self.assertEqual([l["name"] for l in state["layers"]], ["files"])        # the interface app itself is never in its own scene
+        self.assertEqual(next(m for m in got if m["cmd"] == "scene_layer")["ops"], [["rect", 0, 0, 120, 80, "#335577"]])
+        sh._scene_sync()
+        self.assertEqual(self.sent(L), [])                                       # nothing changed: nothing sent
+        w.ops, w.rev = [["rect", 0, 0, 5, 5, "#ffffff"]], w.rev + 1
+        sh._scene_sync()
+        self.assertIn("scene_layer", [m["cmd"] for m in self.sent(L)])
 
-    def test_enabling_asks_the_kernel_password_every_time_even_in_a_sudo_window(self):
-        from kos import auth
-        from kos.addons import Addons, AddonError
-        self.assertEqual(auth.LAYER_OF["addon.enable"], "kernel")
-        self.assertIn("addon.enable", auth.NEVER_REMEMBERED)
-        self.assertIn("addon.disable", auth.NEVER_REMEMBERED)
-        a = self.authority(PW, PW)
-        ad = Addons(self.paths)
-        ad.enable(a, "vr")
-        self.assertEqual(ad.enabled(), {"vr"})
-        self.assertEqual(ad.looks(), {"vr"})
-        a.sudo_open(5, ("interface", "app", "command"))                                  # a sudo window answered the PW above
-        with self.assertRaises(Exception):
-            ad.disable(a, "vr")                                                          # still asks: there is no answer left
-        self.assertEqual(ad.enabled(), {"vr"})
-        with self.assertRaises(AddonError):
-            ad.enable(self.authority(PW), "toaster")
-
-    def test_an_enabled_addon_allows_its_look_with_the_look_password_and_disabling_leaves_it(self):
-        from kos.addons import Addons
-        Addons(self.paths).enable(self.authority(PW), "neural")
-        sh2 = self.shell()
-        self.assertEqual(sh2._addon_looks(), {"neural"})
-        ok, _ = sh2.authorize_immersive("neural")                                        # the look itself still asks for the password
-        self.assertTrue(ok)
-        sh2.set_look(look="neural", authorized=True)
-        self.assertEqual(sh2.cfg["look"], "neural")
-        self.assertFalse(sh2.authorize_immersive("vr")[0])                               # the other add-ons stay off
-        Addons(self.paths).disable(self.authority(PW), "neural")
-        sh2._addon_step(1e9)
-        self.assertEqual(sh2.cfg["look"], "normal")                                      # turned off: back to normal at once
-
-    def test_the_cli_lists_them_off_and_the_appearance_app_hides_their_looks(self):
-        out = _sp.run([sys.executable, "-m", "kos", "addon", "list"], cwd=str(Path(__file__).resolve().parent.parent),
-                      env={**os.environ, "KOS_ROOT": str(self.paths.root)}, capture_output=True, text=True)
-        self.assertIn("off  vr", out.stdout, out.stderr)
-        self.assertIn("off  ar", out.stdout)
-        self.assertIn("off  neural", out.stdout)
-        js = (SYSTEM_DIR / "appearance" / "app.js").read_text()
-        self.assertIn("options.addons", js)
+    def test_its_frame_is_the_screen_but_only_at_exactly_the_screen_size(self):
         sh = self.shell()
-        self.assertEqual(sh._addon_looks(), frozenset())
+        L = self.scene_layer(sh)
+        self.frame(sh, L, w=10, h=10)
+        self.assertIsNone(sh._scene_frame)                                       # a frame of the wrong size is refused
+        self.assertTrue(any("wrong size" in l for l in sh.log))
+        self.frame(sh, L)
+        self.assertIsNotNone(sh._scene_frame)
+        sh.render()
+        self.assertEqual(sh.backend.frames[-1].pixel(100, 100), (0x30, 0x20, 0x10))
+        other = self.layer(sh, "interface-vr", "scene", (0, 0, 0, 0), scene=True, scratch=tempfile.mkdtemp(dir=self.tmp.name))
+        before = sh._scene_rev
+        self.frame(sh, other, rev=99, color=b"\xff\xff\xff\x00")
+        self.assertEqual(sh._scene_rev, before)                                  # an interface app that is not on screen cannot draw on it
+
+    def test_only_an_interface_app_may_say_scene_or_press(self):
+        sh = self.shell()
+        stranger = self.layer(sh, "stranger", "plain", (0, 0, 10, 10))
+        stranger._peer.sendall(json.dumps({"cmd": "scene", "rev": 1, "w": 320, "h": 180, "hits": [], "regions": [], "pointer": False,
+                                           "captures": {"keys": [], "buttons": [], "pointer": False}}).encode() + b"\n")
+        sh._handle_app(stranger)
+        self.assertNotIn(stranger.id, sh.layers)                                 # dropped, like any protocol violation
+
+    def test_a_click_on_a_face_reaches_the_layer_where_it_was_aimed_and_a_region_goes_back_to_the_app(self):
+        sh = self.shell()
+        L = self.scene_layer(sh)
+        w = self.layer(sh, "files", "window", (20, 20, 100, 60))
+        quad = [[200, 40], [300, 50], [300, 120], [200, 110]]
+        region = {"quad": [[10, 140], [60, 140], [60, 170], [10, 170]], "id": "kernel"}
+        self.frame(sh, L, hits=[{"id": w.id, "quad": quad}], regions=[region])
+        fx, fy = sh._flat(250, 80)
+        self.assertTrue(20 <= fx <= 120 and 20 <= fy <= 80)                      # inside the flat rectangle
+        self.assertEqual(sh._flat(5, 5), (5, 5))                                 # off every face: unchanged
+        self.assertFalse(sh._scene_region(250, 80))                              # a face is in front of any region there
+        self.assertTrue(sh._scene_region(30, 150))
+        self.assertEqual([m for m in self.sent(L) if m["cmd"] == "input"], [{"cmd": "input", "ev": {"type": "region", "id": "kernel"}}])
+
+    def test_the_os_forwards_only_the_inputs_the_interface_app_declared(self):
+        sh = self.shell()
+        L = self.scene_layer(sh)
+        self.frame(sh, L, caps={"keys": ["alt-left"], "buttons": ["middle"], "pointer": False})
+        self.assertTrue(sh._scene_wants({"type": "key", "key": "alt-left"}))
+        self.assertFalse(sh._scene_wants({"type": "key", "key": "a"}))           # an ordinary key never goes to it
+        self.assertFalse(sh._scene_wants({"type": "button", "button": "left", "pressed": True, "x": 1, "y": 1}))
+        self.assertFalse(sh._scene_wants({"type": "pointer", "x": 3, "y": 3}))   # it did not ask for pointer moves
+        self.assertTrue(sh._scene_wants({"type": "button", "button": "middle", "pressed": True, "x": 1, "y": 1}))
+        self.assertTrue(sh._scene_wants({"type": "pointer", "x": 9, "y": 9}))    # held: the drag is taken
+        sh._scene_wants({"type": "button", "button": "middle", "pressed": False, "x": 9, "y": 9})
+        self.assertFalse(sh._scene_wants({"type": "pointer", "x": 4, "y": 4}))
+        sent = [m["ev"]["type"] for m in self.sent(L) if m["cmd"] == "input"]
+        self.assertEqual(sent, ["key", "button", "pointer", "button"])
+
+    def test_press_from_the_active_interface_app_becomes_a_flat_click(self):
+        sh = self.shell()
+        L = self.scene_layer(sh)
+        sh._scene_press(L, {"cmd": "press", "x": 40, "y": 50})
+        self.assertEqual([(e["pressed"], e["x"], e["y"], e["flat"]) for e in sh.pending], [(True, 40, 50, True), (False, 40, 50, True)])
+
+    def test_choosing_a_look_starts_its_interface_app_and_a_look_with_no_app_is_the_terminal(self):
+        sh = self.shell()
+        sh.set_look(look="3d")
+        self.assertEqual(self.opened, ["interface-3d"])                          # the opener (the password) was asked for it
+        self.assertEqual(sh.cfg["look"], "normal")                               # it would not start: the look did not change
+        sh.set_look(look="vr")
+        self.assertEqual(self.opened, ["interface-3d", "interface-vr"])
+        sh.set_look(look="terminal")                                             # the OS's own look: no app, no password
+        self.assertEqual((sh.cfg["look"], sh.scene), ("terminal", None))
+        bare = self.shell(interfaces={})
+        bare.set_look(look="3d")
+        self.assertEqual(bare.cfg["look"], "3d")                                 # nobody installed an app for it: the OS draws it flat
+
+    def test_the_flat_desktop_is_the_fallback_when_an_interface_app_has_not_drawn_yet(self):
+        sh = self.shell()
+        self.scene_layer(sh)
+        self.layer(sh, "dock", "dock", sh.core_rect("dock")[1], [["rect", 0, 0, 50, 20, "#ff0000"]])
+        sh.render()
+        self.assertGreater(len(sh.backend.frames), 0)                            # a picture exists even before the app's first frame
+
+    def test_the_interface_apps_render_a_frame_of_the_screens_size_and_declare_where_things_are(self):
+        import importlib.util
+        from kos.scenelib import SceneModel
+
+        def load(where, name):
+            spec = importlib.util.spec_from_file_location(name.replace("-", "_"), self.ROOT / where / name / "main.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        class Fake:
+            def send(self, *_):
+                pass
+            press = send
+        for where, name, cls in (("system", "interface-normal", "Flat"), ("system", "interface-3d", "Blocks3D"),
+                                 ("optional", "interface-vr", "Stereo"), ("optional", "interface-neural", "Neural")):
+            mod = load(where, name)
+            model = SceneModel()
+            model.apply_state({"w": 320, "h": 180, "u": 1, "titlebar": 24, "ws": 0, "focus": ["w1"], "look": "3d", "layers": [
+                {"id": "w1", "name": "files", "kind": "window", "mode": "graphical", "rect": [20, 30, 160, 100], "z": 20, "title": "Files",
+                 "visible": True, "minimized": False, "ws": 0, "rev": 1, "slot": "files"},
+                {"id": "d1", "name": "dock", "kind": "dock", "mode": "graphical", "rect": [60, 150, 200, 24], "z": 30, "title": "",
+                 "visible": True, "minimized": False, "ws": 0, "rev": 1, "slot": "dock"}]})
+            model.apply_layer({"id": "w1", "rev": 1, "ops": [["rect", 0, 0, 160, 100, "#223355"], ["hit", 5, 5, 40, 20, "Open"]], "screen": None})
+            model.apply_layer({"id": "d1", "rev": 1, "ops": [["rect", 0, 0, 200, 24, "#334466"]], "screen": None})
+            iface = getattr(mod, cls)(model, Fake(), *((False,) if cls == "Stereo" else ()))
+            frame, hits, regions = iface.render()
+            self.assertEqual((frame.width, frame.height), (320, 180), name)
+            for h in hits:
+                self.assertIn(h["id"], {"w1", "d1"}, name)
+                self.assertEqual(len(h["quad"]), 4, name)
+
+    def test_a_homography_inverse_finds_where_in_a_quad_a_point_is(self):
+        from kos.quad import point_in_quad, polygon_area, unproject_quad
+        quad = [(100, 100), (200, 100), (200, 150), (100, 150)]
+        self.assertEqual(unproject_quad(quad, 150, 125, 100, 50), (50.0, 25.0))
+        self.assertIsNone(unproject_quad(quad, 10, 10, 100, 50))
+        self.assertTrue(point_in_quad(quad, 150, 125) and not point_in_quad(quad, 99, 125))
+        self.assertAlmostEqual(polygon_area(quad), 5000.0)
 
 
 class TestCompilerPath(Env):

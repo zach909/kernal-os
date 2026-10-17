@@ -25,7 +25,7 @@ from .kapp import KAppError
 from .registry import RegistryError
 
 SYSTEM_APPS = ("wallpaper", "pins", "search", "sidebar", "launcher", "widgets", "widget-clock", "widget-calendar",
-               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "autoupdate", "commands", "encryption", "services", "addons", "browser", "app-library", "files", "editor", "backup", "settings", "security",
+               "widget-network", "widget-system", "menubar", "dock", "effects", "cursor", "taskbar", "appearance", "passwords", "mods", "autoupdate", "commands", "encryption", "services", "interface-normal", "interface-3d", "browser", "app-library", "files", "editor", "backup", "settings", "security",
                "terminal", "processes", "memory", "filesystem", "devices", "network", "isolation",
                "health", "resources", "updates")
 DESKTOP_CORE = ("taskbar", "app-library")      # what `boot desktop` opens; the rest launch from the library
@@ -81,6 +81,9 @@ def boot_core(paths, authority, *, mode: str = "graphical", devices: tuple = ("m
     quick(paths)                                              # corrupt preference files aside, dead records dropped: no password needed
     installed = {a.name for a in AppStore(paths).installed()}
     wanted = core_names(paths, CORE, installed)               # the built-in core, each slot swapped for its enabled mod
+    iface = interface_apps(paths).get(saved_look(paths))      # the interface app that draws the look the person last chose
+    if iface and iface in installed and iface not in wanted:
+        wanted = list(wanted) + [iface]
     running = {i.name: i for i in Registry(paths).list() if i.status == "running" and i.mode == mode}
     need = [n for n in wanted if n not in running]
     missing = [n for n in need if n not in installed]
@@ -97,6 +100,28 @@ def boot_core(paths, authority, *, mode: str = "graphical", devices: tuple = ("m
         for grant in grants[len(need):]:
             grant.close()
     return {n: running[n] for n in wanted if n in running}
+
+
+def interface_apps(paths) -> dict:
+    """{look: app name} for every installed interface app (driver kind ``interface``): the apps that draw the running apps."""
+    from .kapp import KApp
+    out = {}
+    for f in sorted(paths.apps.glob("*.kapp")):
+        try:
+            m = KApp.from_file(f).manifest
+        except Exception:
+            continue
+        if m.driver == "interface" and m.look:
+            out.setdefault(m.look, m.name)
+    return out
+
+
+def saved_look(paths) -> str:
+    import json
+    try:
+        return json.loads((paths.state / "shell.json").read_text()).get("look", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
 
 
 def slot_of(paths, name: str) -> str:
@@ -157,6 +182,7 @@ def make_shell(paths, authority, backend, devices, **kw):
         return open_background(paths, holder["shell"].authority, name, "graphical")
 
     shell = Shell(paths, authority, backend, devices, opener=opener, closer=closer, restarter=restarter,
-                  modes_of=modes_of, commands_of=commands_of, **kw)
+                  modes_of=modes_of, commands_of=commands_of,
+                  interfaces_of=lambda: interface_apps(paths), **kw)
     holder["shell"] = shell
     return shell

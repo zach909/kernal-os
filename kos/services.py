@@ -41,8 +41,11 @@ CORE = (
     ("sandbox launcher and broker (kos/sandbox.py, kos/loader.py, kos/broker.py)", "confine a process and relay its messages",
      "hold your files, draw, or widen a permission"),
     ("registry (kos/registry.py)", "the list of what is running", "start or stop anything by itself"),
-    ("compositor (kos/shell.py)", "draws what apps send; routes input; shows the password prompt",
-     "read files, run commands, use the network"),
+    ("the system's own interface: the terminal and the button selector (kos/shell.py, kos/looks.py)",
+     "every line typed is a command; every control in a numbered list; shows the password prompt, always on top",
+     "read files, run commands behind your back, use the network"),
+    ("scene plumbing (kos/scenehost.py)", "tells the interface app what is running, shows its one picture, maps clicks back",
+     "let an interface app read files, run anything or draw over the password prompt"),
 )
 
 _METHOD_ACTION = {
@@ -51,7 +54,7 @@ _METHOD_ACTION = {
     "Backups": "backups", "Restore": "restore", "Push": "push", "Remote": "remote", "Sys": "sys", "Signal": "signal",
     "Renice": "renice", "FsChange": "fschange", "Updates": "updates", "Notify": "notify", "NotifyClear": "notify",
     "NotifyDismiss": "notify", "Links": "links", "OpenLink": "openlink", "Quantum": "quantum", "AutoUpdate": "autoupdate",
-    "Heal": "heal", "Mods": "mods", "Encryption": "encryption", "Services": "services", "Addons": "addons", "Policy": "policy", "Sudo": "sudo", "NetCheck": "netcheck", "Revoke": "revoke",
+    "Heal": "heal", "Mods": "mods", "Encryption": "encryption", "Services": "services", "Policy": "policy", "Sudo": "sudo", "NetCheck": "netcheck", "Revoke": "revoke",
 }
 
 

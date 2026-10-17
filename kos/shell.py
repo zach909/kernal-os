@@ -36,13 +36,14 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import blocks, capabilities, fbgfx, looks, ttf
+from . import capabilities, fbgfx, looks, ttf
 from .compositor import (ACCENT, BAR_GLASS, DOCK_GLASS, GLASS, NO_HIT, NOT_IN_BASE, POPUP_GLASS, TITLE_TINT, WINDOW_BODY, Z,  # noqa: F401
                          Compositor)
 from .auth import Authority, AuthorizationDenied
 from .display import Framebuffer, Modal, crop, draw_cursor, draw_modal, parse_color
 from .protocol import Channel, ProtocolError, validate_app_message
 from .registry import Registry
+from .scenehost import SceneHost
 from .session import SessionPrompter
 
 # The interface is a series of separate apps. The OS composites them; it does not draw them.
@@ -58,11 +59,7 @@ WIDGET_HEIGHTS = {"widget-clock": 56, "widget-calendar": 112, "widget-network": 
 SIDE_TAB_H, SHELF_H = 24, 56                              # sidebar: tab strip on top, link shelf at the bottom (units of u)
 KINDS = {"wallpaper": "wallpaper", "pins": "plain", "search": "plain", "sidebar": "sidebar", "launcher": "popup", "widgets": "widget", "menubar": "bar",
          "dock": "dock", "cursor": "cursor", "effects": "overlay", **{w: "widget" for w in WIDGETS}}
-DEFAULT_CFG = {"look": "normal", "cursor_direction": True, "tilt": True, "bubbles": True, "blocks": True, "side_tab": "widgets"}
-BLOCK_HEIGHT = {"bar": 8, "dock": 14, "sidebar": 12, "widget": 10, "plain": 6, "popup": 16, "top": 6}   # in units of u; windows scale with their size
-BLOCK_TINT = {"bar": "#1b2740", "dock": "#2b3555", "sidebar": "#26324d", "widget": "#2d3a5c", "plain": "#3a4660", "popup": "#3a4a6e", "window": "#2f4a86"}
-FALLS = ("window", "dock", "sidebar", "popup")      # the kinds of layer an app's waterfall runs down from
-BLOCK_RADIUS = {"bar": 0, "dock": 12, "popup": 12, "window": 7, "sidebar": 7, "widget": 7}
+DEFAULT_CFG = {"look": "normal", "cursor_direction": True, "tilt": True, "bubbles": True, "side_tab": "widgets"}
 TILT_PX = 5                                              # at most this many px (times the UI scale) of tilt
 
 
@@ -103,6 +100,8 @@ class Layer:
     pointer: bool = False          # is told about the pointer and where clicks land
     animate: bool = False          # may ask for animation ticks
     assistant: bool = False        # an assistant: may propose plans (run only after the owner's password)
+    scene: bool = False            # an interface app: its frames are the screen (see scenehost.py)
+    scratch: str = ""              # its scratch directory: where an interface app writes frame.bin
     neural: bool = False           # a neural driver: may send intents while the neural look is on
     rev: int = 0                   # bumps whenever what this layer shows changes
     cache: Optional[tuple] = None  # (signature, region rows) of its glass, before content
@@ -139,11 +138,12 @@ class Seat:
     vel: list = field(default_factory=lambda: [0.0, 0.0])
 
 
-class Shell(Compositor):
+class Shell(Compositor, SceneHost):
     def __init__(self, paths, authority: Authority, backend, devices, *,
                  connect: Optional[Callable] = None, opener: Optional[Callable] = None,
                  closer: Optional[Callable] = None, modes_of: Optional[Callable] = None,
                  commands_of: Optional[Callable] = None, restarter: Optional[Callable] = None, keep_prompter: bool = False,
+                 interfaces_of: Optional[Callable] = None,
                  preboot: tuple[str, ...] = ("mouse", "keyboard"), now: Callable[[], float] = time.time):
         self.paths, self.authority, self.backend, self.devices = paths, authority, backend, devices
         self.W, self.H = backend.width, backend.height      # the whole screen: every output side by side
@@ -151,6 +151,8 @@ class Shell(Compositor):
         _, _, self.PW, self.PH = self.outputs[0]            # the primary output: the panel, dock and sidebar live here
         self.u = max(1, self.PH // 360)                     # UI scale: 1 at 640x360, 2 at 720p, 3 at 1080p
         self.layers: dict[str, Layer] = {}
+        self._interfaces_of = interfaces_of or (lambda: {})   # look -> the installed interface app that draws it
+        self._scene_init()
         self.seats: dict[int, Seat] = {0: Seat(0, (self.PW // 2, self.PH // 2))}
         self._seat = self.seats[0]          # the seat whose event is being handled (seat 0 otherwise)
         self.modal: Optional[Modal] = None
@@ -183,14 +185,6 @@ class Shell(Compositor):
         self._cur_dirty = True
         self.anim_ids: set[str] = set()
         self.nav, self.ring, self.typed = -1, False, ""
-        self.neural: dict = {"last_step": 0.0, "paused": False, "last": "", "last_intent_t": 0.0}
-        self._stereo = None                                      # cached eyes of the virtual / augmented-reality look
-        self.cam = [blocks.DEFAULT_YAW, blocks.DEFAULT_PITCH]    # the 3D look's camera: yaw, pitch (radians)
-        self._blocks: list = []                                  # the blocks of the last 3D frame (for clicks)
-        self._block_cache: Optional[tuple] = None                # (key, frame)
-        self._tex: dict = {}                                     # layer id -> (key, texture)
-        self._matrix_t = 0.0                                     # the falling-text clock of the blocks' top faces
-        self._orbit_drag: Optional[tuple] = None
         self.stack_open = False                                  # the looks shown as a stack of cards (Ctrl-Up)
         self._stack_rects: list = []
         self.notes: list[dict] = []
@@ -342,7 +336,7 @@ class Shell(Compositor):
             d = json.loads(f.read_text()) if f else {}
         except (OSError, ValueError):
             return cfg
-        if d.get("look") in looks.LOOKS and d["look"] not in looks.IMMERSIVE:     # a virtual, mixed or neural look is never restored: entering it asks
+        if d.get("look") in looks.LOOKS:
             cfg["look"] = d["look"]
         for k in ("cursor_direction", "tilt", "bubbles", "blocks"):
             if isinstance(d.get(k), bool):
@@ -367,48 +361,27 @@ class Shell(Compositor):
         self._save()
         self.relayout()
 
-    def set_look(self, authorized: bool = False, **opts) -> dict:
-        """Change the look or one of its options. Remembered across restarts (except the immersive looks). Every app is
-        sent a fresh ``hello`` so it redraws in the new look. The virtual-reality, augmented-reality and neural looks (add-ons) need
-        ``authorized=True``, which only a typed password gives (see ``_authorize_immersive``)."""
+    def set_look(self, **opts) -> dict:
+        """Change the look or one of its options. Remembered across restarts. Every app is sent a fresh ``hello`` so it redraws in the new
+        look. A look drawn by an interface app (3D, virtual reality, ...) starts that app if it is not running - which asks for the password,
+        like starting any app - and a look nobody provides an app for is drawn by the OS itself (the terminal look always is)."""
         changed = False
         for k, v in opts.items():
-            if k == "look" and v in looks.IMMERSIVE and v != self.cfg["look"] and (not authorized or v not in self._addon_looks()):
-                self.log.append(f"refused the {v} look: " + ("its add-on is not enabled" if v not in self._addon_looks() else "it needs the password"))
-                continue
             if k == "look" and v in looks.LOOKS and v != self.cfg["look"]:
+                if not self._switch_interface(v):                    # the interface app for this look would not start
+                    continue
                 self.cfg["look"], changed = v, True
-            elif k in ("cursor_direction", "tilt", "bubbles", "blocks") and isinstance(v, bool) and v != self.cfg[k]:
+            elif k in ("cursor_direction", "tilt", "bubbles") and isinstance(v, bool) and v != self.cfg[k]:
                 self.cfg[k], changed = v, True
         if changed:
             self._save()
             self._base_sig = self._look_cache = None
             self.nav, self.ring, self.typed = -1, False, ""
-            self._stereo = None
-            if self.cfg["look"] == "neural":                    # the scan starts on the first control and moves on its own
-                self.ring, self.nav = True, 0
-                self.neural = {"last_step": time.monotonic(), "paused": False, "last": "", "last_intent_t": 0.0}
             for layer in self.layers.values():
                 if layer.mode == "graphical":
                     self._hello(layer)
             self._touch_all()
         return dict(self.cfg)
-
-    def _addon_looks(self) -> frozenset:
-        from .addons import Addons
-        return Addons(self.paths).looks()
-
-    def authorize_immersive(self, look: str) -> tuple[bool, str]:
-        """Entering a virtual-reality, augmented-reality or neural look always asks for the password (never remembered by a
-        sudo window, not skipped when the interface layer is set to not ask): these looks reach for a headset, a camera or
-        a neural device."""
-        if look not in self._addon_looks():
-            return False, f"the {look} look is an add-on and it is not enabled: kos addon enable {look}"
-        try:
-            self.authority.authorize("look.immersive", look).close()
-        except Exception as e:                                   # AuthorizationDenied, a cancelled prompt, ...
-            return False, f"the {look} look needs your password ({e})"
-        return True, ""
 
     def relayout(self) -> None:
         for layer in self.layers.values():
@@ -462,6 +435,8 @@ class Shell(Compositor):
         """Add one of the interface apps. ``slot`` is the part of the interface it fills; for the built-in apps it
         is their own name, for a mod it is the slot the mod declares (a ``widget`` mod fills a new widget slot)."""
         slot = slot or inst.name
+        if getattr(inst, "compose", False):                        # an interface app: it draws the desktop, it is not drawn on it
+            return self._attach_scene(inst)
         if slot == "widget":                                       # a widget mod: a new widget, not a replacement
             slot = inst.name
             if slot not in self.widget_names:
@@ -486,7 +461,8 @@ class Shell(Compositor):
                       system=getattr(inst, "system", False), scopes=frozenset(getattr(inst, "scopes", None) or (["*"] if getattr(inst, "system", False) else [])), ticks=getattr(inst, "ticks", False),
                       shell=getattr(inst, "shell", False), pointer=getattr(inst, "pointer", False),
                       animate=getattr(inst, "animate", False), neural=getattr(inst, "neural", False),
-                      assistant=getattr(inst, "assistant", False))
+                      assistant=getattr(inst, "assistant", False), scene=getattr(inst, "compose", False),
+                      scratch=getattr(inst, "scratch", ""))
         if kind == "window":
             layer.ws = self.ws
         self.layers[layer.id] = layer
@@ -518,8 +494,8 @@ class Shell(Compositor):
             msg["insets"] = self.insets(layer.name)
             msg["font"] = _font_metrics()
             msg["look"] = self.cfg["look"]
-            msg["options"] = {**{k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "blocks", "side_tab")},
-                              "addons": sorted(self._addon_looks())}
+            msg["options"] = {**{k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "side_tab")},
+                              "interfaces": sorted(self._interfaces())}
         layer.send(msg)
 
     HEAL_DELAYS = (1.0, 3.0, 8.0)                           # seconds before each restart attempt, then give up
@@ -531,6 +507,8 @@ class Shell(Compositor):
         if not layer:
             return
         layer.channel.close()
+        if layer.scene:
+            self._forget_scene(layer_id)
         if not expected and layer.kind != "window" and self._restarter is not None and not self.stop_requested:
             self._schedule_heal(layer)
         self.anim_ids.discard(layer_id)
@@ -637,23 +615,18 @@ class Shell(Compositor):
             if msg["op"] == "set":
                 if not layer.shell:
                     return result(False, "this app does not have the 'shell' permission")
-                want = {k: v for k, v in msg.items() if k in ("look", "cursor_direction", "tilt", "bubbles", "blocks")}
-                if want.get("look") in looks.IMMERSIVE and want["look"] != self.cfg["look"]:
-                    ok, why = self.authorize_immersive(want["look"])
-                    if not ok:
-                        want.pop("look")
-                        self.notify("shell", "Not switched", why)
-                    else:
-                        self.set_look(authorized=True, **want)
-                        want = {}
-                self.set_look(**want)
+                self.set_look(**{k: v for k, v in msg.items() if k in ("look", "cursor_direction", "tilt", "bubbles")})
             layer.send({"cmd": "look", "look": self.cfg["look"],
-                        "options": {**{k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "blocks")},
-                                    "addons": sorted(self._addon_looks())}})
+                        "options": {**{k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles")},
+                                    "interfaces": sorted(self._interfaces())}})
             return
         if action == "intent":
-            ok, detail = self.intent(layer, msg["name"])
-            return result(ok, detail)
+            if not layer.neural:
+                return result(False, "this app is not a neural driver")
+            if self.scene is None or self.scene.slot != "interface:neural":
+                return result(False, "the neural interface is not running")
+            self.scene.send({"cmd": "intent", "name": msg["name"]})                # the interface app decides what a decision does
+            return result(True, msg["name"])
         if action == "propose":
             return self._propose(layer, msg, result)
         if action == "toggle":
@@ -812,6 +785,11 @@ class Shell(Compositor):
                 layer.screen, layer.title = msg, msg["title"] or layer.name
                 layer.rev += 1
                 self.surface_dirty = True
+            elif kind in ("scene", "press"):
+                if not layer.scene:
+                    self.log.append(f"{layer.name}: {kind} is for interface apps")
+                    return self.remove(layer.id)
+                (self._on_scene if kind == "scene" else self._scene_press)(layer, msg)
             elif kind == "request":
                 self._on_request(layer, msg)
             elif kind == "exit":
@@ -862,6 +840,8 @@ class Shell(Compositor):
         if t == "interrupt":
             self.stop_requested = True
             return
+        if self.scene is not None and not ev.get("flat") and t in ("key", "button", "pointer") and self._scene_wants(ev):
+            return                                         # an interface app asked for this input (Alt+arrows, the middle button): it is its own
         if t == "key":
             if ev["key"] == "super":                            # the Super key: the launcher
                 self._toggle_named("launcher")
@@ -869,13 +849,6 @@ class Shell(Compositor):
             if ev["key"] in ("ctrl-up", "ctrl-down") or (self.stack_open and ev["key"] == "escape"):
                 self.stack_open = ev["key"] == "ctrl-up"          # Ctrl-Up: look down at the stack of looks; Ctrl-Down/Esc: back
                 self.surface_dirty = True
-                return
-            if ev["key"] in ("alt-left", "alt-right", "alt-up", "alt-down", "alt-0") and self.cfg["look"] == "3d" and self.cfg["blocks"]:
-                step = 0.12                                       # Alt + arrows: go around the blocks, look down at them; Alt-0 resets
-                if ev["key"] == "alt-0":
-                    self.orbit(reset=True)
-                else:
-                    self.orbit({"alt-left": -step, "alt-right": step}.get(ev["key"], 0.0), {"alt-up": step, "alt-down": -step}.get(ev["key"], 0.0))
                 return
             if ev["key"] in ("ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4"):    # Ctrl-1..4: switch desktop
                 self.set_workspace(int(ev["key"][-1]) - 1)
@@ -896,24 +869,13 @@ class Shell(Compositor):
         x, y = ev.get("x", self.pointer[0]), ev.get("y", self.pointer[1])
         x, y = max(0, min(self.W - 1, x)), max(0, min(self.H - 1, y))
         ax, ay = x, y                                    # where the pointer really is on screen...
-        if t == "button" and ev.get("button") == "middle" and self.cfg["look"] == "3d" and self.cfg["blocks"]:
-            self._orbit_drag = (ax, ay) if ev["pressed"] else None      # ...a middle-button drag orbits the 3D look
-            self.pointer = (ax, ay)
-            return
-        if t == "pointer" and self._orbit_drag is not None:
-            self.orbit((ax - self._orbit_drag[0]) * 0.006, (ay - self._orbit_drag[1]) * 0.006)
-            self._orbit_drag = (ax, ay)
-            self.pointer = (ax, ay)
-            self._place_pointer_layers()
-            return
-        if t == "button" and ev.get("button") == "left" and ev.get("pressed") and self.cfg["look"] == "3d" and self.cfg["blocks"]:
-            go = self._block_action(ax, ay)              # a click on a waterfall, the Kernel or the Hardware goes somewhere
-            if go:
+        if t == "button" and ev.get("pressed") and ev.get("button") == "left" and self.scene is not None and not ev.get("flat"):
+            if self._scene_region(ax, ay):                  # a region the interface app declared (a waterfall): the app decides what it means
                 self.pointer = (ax, ay)
                 self._place_pointer_layers()
-                go()
                 return
-        x, y = self._flat(x, y)                          # ...and where it lands on a block's flat layer
+        if not ev.get("flat"):
+            x, y = self._flat(x, y)                      # ...and where it lands on its flat layer, if an interface app drew the layers elsewhere
         if t == "pointer":
             self._note_motion(ax, ay)
             self.pointer = (ax, ay)
@@ -1165,27 +1127,6 @@ class Shell(Compositor):
             if layer.allows("notify"):
                 layer.send({"cmd": "notifications", "notes": payload})
 
-    def controls(self) -> list["looks.Control"]:
-        """Every clickable thing on screen, front to back: apps' declared ``hit`` ops and window frames."""
-        out: list[looks.Control] = []
-        layers = sorted((l for l in self.layers.values() if self.shown(l) and l.kind not in ("wallpaper", "cursor", "overlay")),
-                        key=lambda l: (0 if l.kind == "window" else 1, -l.z))
-        r, u = 5 * self.u, self.u
-        for layer in layers:
-            x, y, w, h = layer.rect
-            if layer.kind == "window":
-                cy = y + self.titlebar // 2
-                out.append(looks.Control(layer.id, layer.name, f"{layer.title or layer.name}", (x, y, w, self.titlebar), "focus"))
-                out.append(looks.Control(layer.id, layer.name, "Close", (x + 12 * u - r, cy - r, 2 * r, 2 * r), "close"))
-                out.append(looks.Control(layer.id, layer.name, "Minimize", (x + 26 * u - r, cy - r, 2 * r, 2 * r), "minimize"))
-            cx, cy, _, _ = self.content_rect(layer)
-            for op in layer.ops:
-                if op[0] == "hit" and op[5] and op[3] > 0 and op[4] > 0:
-                    rect = (cx + op[1], cy + op[2], op[3], op[4])
-                    if rect[0] < self.W and rect[1] < self.H and rect[0] + rect[2] > 0 and rect[1] + rect[3] > 0:
-                        out.append(looks.Control(layer.id, layer.name, op[5], rect))
-        return out
-
     def activate(self, c: "looks.Control") -> None:
         """Press a control: exactly what clicking it would do."""
         layer = self.layers.get(c.layer)
@@ -1231,14 +1172,11 @@ class Shell(Compositor):
         elif key == "enter" and 0 <= self.nav < n:
             self.typed = ""
             self.activate(ctl[self.nav])
-            if not terminal and look != "neural":
+            if not terminal:
                 self.ring = False
-            self.neural["last_step"] = time.monotonic()
         elif key == "escape":
             if self.typed:
                 self.typed = ""
-            elif look == "neural":
-                self.set_look(look="normal")                    # leaving the neural look needs no password
             elif not terminal:
                 self.ring = False
             else:
@@ -1251,7 +1189,7 @@ class Shell(Compositor):
             if self.typed:
                 self.nav = max(0, min(n - 1, int(self.typed) - 1))
         else:
-            if not terminal and look != "neural":
+            if not terminal:
                 self.ring = False                      # any other key: back to normal typing
                 self.surface_dirty = True
                 return False
@@ -1299,8 +1237,13 @@ class Shell(Compositor):
         if self.stack_open:
             return self._stack_frame()
         look = self.cfg["look"]
-        if look in ("vr", "ar"):
-            return looks.render_stereo(self, look == "ar")
+        if self.scene is not None and look not in ("terminal",):
+            self._scene_sync()
+            if self._scene_frame is not None:                           # an interface app draws this look: its frame is the screen
+                fb = self._scene_frame.copy()
+                if look == "3d" and (abs(self.tilt[0]) >= 0.5 or abs(self.tilt[1]) >= 0.5):
+                    fb = looks.shear(fb, self.tilt[0], self.tilt[1])
+                return fb
         if look in ("text", "terminal"):
             ctl = self.controls() if look == "terminal" else []
             sig = (look, self._base_signature(), self.nav, self.typed, self.ring, tuple(c.rect for c in ctl))
@@ -1312,180 +1255,12 @@ class Shell(Compositor):
                 fb, self._term_rows = looks.render_terminal(self, ctl, self.nav, self.typed)
             self._look_cache = (sig, fb)
             return fb.copy()
-        if look == "3d" and self.cfg["blocks"]:
-            fb = self._block_frame()
-        else:
-            self._blocks = []
-            fb = self.compose().copy()
+        fb = self.compose().copy()
         if look == "3d" and (abs(self.tilt[0]) >= 0.5 or abs(self.tilt[1]) >= 0.5):
             fb = looks.shear(fb, self.tilt[0], self.tilt[1])
         return fb
 
     # ------------------------------------------------------------------ the 3D look: every layer is a block
-    def _paint_isolated(self, fb: Framebuffer, layer: Layer) -> None:
-        """One layer painted alone onto ``fb``, as it would be in the flat frame."""
-        if layer.kind == "window":
-            return self._paint_window(fb, layer, layer.id in self.focused_ids())
-        if layer.kind in ("plain", "top"):
-            return self._paint_content(fb, layer)
-        self._glass(fb, layer.rect, {"bar": BAR_GLASS, "dock": DOCK_GLASS, "popup": POPUP_GLASS}.get(layer.kind, GLASS),
-                    radius=BLOCK_RADIUS.get(layer.kind, 7) * self.u)
-        self._paint_content(fb, layer)
-
-    def _front_texture(self, layer: Layer) -> "blocks.Texture":
-        """What the front of this layer's block shows. Glass layers are painted over the wallpaper (so the frost is real) and
-        given rounded corners; layers with no glass (the pins, the search box) are painted over black and over white, and the
-        difference is their transparency."""
-        x, y, w, h = layer.rect
-        x0, y0 = max(0, x), max(0, y)
-        x1, y1 = min(self.W, x + w), min(self.H, y + h)
-        cw, ch = max(2, x1 - x0), max(2, y1 - y0)
-        key = (layer.rev, tuple(layer.rect), layer.id in self.focused_ids(), self.cfg["look"], self.ws)
-        hit = self._tex.get(layer.id)
-        if hit and hit[0] == key:
-            return hit[1]
-
-        def crop(src: Framebuffer) -> Framebuffer:
-            out = Framebuffer(cw, ch)
-            for r in range(ch):
-                a = ((y0 + r) * self.W + x0) * 4
-                out.buf[r * cw * 4:(r + 1) * cw * 4] = src.buf[a:a + cw * 4]
-            return out
-
-        if layer.kind in ("plain", "top"):
-            black, white = Framebuffer(self.W, self.H), Framebuffer(self.W, self.H)
-            white.buf[:] = b"\xff" * len(white.buf)
-            self._paint_isolated(black, layer)
-            self._paint_isolated(white, layer)
-            bl, wh = crop(black), crop(white)
-            b, wv = memoryview(bl.buf).cast("I"), memoryview(wh.buf).cast("I")
-            alpha = bytearray(cw * ch)
-            for i in range(cw * ch):
-                p, q = b[i], wv[i]
-                a = 255 - ((((q & 0xFF) - (p & 0xFF)) + (((q >> 8) & 0xFF) - ((p >> 8) & 0xFF)) + (((q >> 16) & 0xFF) - ((p >> 16) & 0xFF))) // 3)
-                alpha[i] = 0 if a < 0 else 255 if a > 255 else a
-                if 0 < alpha[i] < 255:                                  # un-premultiply: the colour the layer drew itself
-                    k = 255 / alpha[i]
-                    b[i] = (min(255, int((p & 0xFF) * k)) | min(255, int(((p >> 8) & 0xFF) * k)) << 8 | min(255, int(((p >> 16) & 0xFF) * k)) << 16)
-            tex = blocks.Texture(bl, alpha)
-        else:
-            bg = self._wallpaper().copy()
-            self._paint_isolated(bg, layer)
-            fb = crop(bg)
-            tex = blocks.Texture(fb, blocks.rounded_mask(cw, ch, BLOCK_RADIUS.get(layer.kind, 7) * self.u) if BLOCK_RADIUS.get(layer.kind, 7) else None)
-        self._tex[layer.id] = (key, tex)
-        return tex
-
-    def _layer_blocks(self) -> list:
-        """One block per visible layer, stacked: each rests on the highest block beneath it that overlaps it."""
-        u = self.u
-        ctl: dict[str, list[str]] = {}
-        for c in self.controls():
-            ctl.setdefault(c.layer, []).append(c.label)
-        out: list = []
-        for layer in sorted(self.layers.values(), key=lambda l: l.z):
-            if not self.shown(layer) or layer.kind in NOT_IN_BASE or layer.minimized:
-                continue
-            x, y, w, h = layer.rect
-            if w < 4 or h < 4:
-                continue
-            rank = sum(1 for b in out if b.name_kind == "window")           # windows stack by a small step, not by their whole depth
-            if layer.kind == "window":
-                T = max(30 * u, min(70 * u, int(0.3 * min(w, h)))) + 8 * u * rank
-            else:
-                T = BLOCK_HEIGHT.get(layer.kind, 8) * u
-            z_back = 0.0
-            for b in out:
-                bx, by, bw, bh = b.rect
-                if b.name_kind != "window" or layer.kind != "window":     # a block rests on the panels beneath it, not on other windows
-                    if x < bx + bw and bx < x + w and y < by + bh and by < y + h:
-                        z_back = max(z_back, b.z_front)
-            words = [layer.title or layer.name, layer.name, *ctl.get(layer.id, [])]
-            out.append(blocks.Block(layer.id, layer.name, (x, y, w, h), z_back, z_back + T, self._front_texture(layer),
-                                    BLOCK_TINT.get(layer.kind, "#2a3a55"), words, ctl.get(layer.id, []), layer.title or layer.name,
-                                    name_kind=layer.kind, fall=layer.kind in FALLS))
-        out += self._system_blocks()
-        return out
-
-    def _system_blocks(self) -> list:
-        """The two things the lake flows into: the Kernel, and beyond it the Hardware. They stand on the ground, on the river;
-        clicking one opens the app for it. (They show what a system call and a sysconf tell; no files are read.)"""
-        W, H, u = self.W, self.H, self.u
-        D = int(blocks.GROUND_DEPTH * W)
-        try:
-            un = os.uname()
-            kernel = [f"Linux {un.release}", f"{un.machine}, {os.cpu_count() or '?'} cpus", "every app below runs in a sandbox", "click: isolation"]
-            mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1 << 20)
-            hardware = [f"{os.cpu_count() or '?'} cpus, {mem} MiB RAM", "devices need your password", "click: devices"]
-        except (OSError, ValueError, AttributeError):
-            kernel, hardware = ["Linux"], ["the machine"]
-        out = []
-        for name, title, lines, app, wf, hf, z, depth in (("kernel", "KERNEL", kernel, "isolation", 0.34, 0.22, 0.16, 0.07),
-                                                          ("hardware", "HARDWARE", hardware, "devices", 0.24, 0.14, 0.36, 0.05)):
-            w, h = int(W * wf), int(H * hf)
-            x, y = (W - w) // 2, H - h
-            tex = blocks.info_texture(w, h, title, lines, "#06231a", u)
-            out.append(blocks.Block(f"{name}-system", name, (x, y, w, h), z * D, z * D + depth * W, tex, "#0b3a28", [title, *lines], [], title,
-                                    name_kind="system", opens=app))
-        return out
-
-    def _rain_visible(self) -> bool:
-        """Is there falling text to see? The waterfalls hang under the apps, the lake lies in front when the camera looks down."""
-        return self.cam[1] > 0.3 or any(b.fall_quad for b in self._blocks)
-
-    _top_faces_show = _rain_visible
-
-    def _block_frame(self) -> Framebuffer:
-        W, H, u = self.W, self.H, self.u
-        mt = round(self._matrix_t, 2) if self._rain_visible() else 0.0
-        key = (self._base_signature(), round(self.cam[0], 3), round(self.cam[1], 3), mt, self.cfg["look"])
-        if self._block_cache and self._block_cache[0] == key:
-            return self._block_cache[1].copy()
-        look = max(0.0, min(1.0, (self.cam[1] - 0.3) / 0.9))          # looking down: the pivot slides toward the lake, so the lake stays in view
-        cam = blocks.Camera(self.cam[0], self.cam[1], W / 2, H / 2, 40 * u + look * 0.22 * W, 3.4 * W, py=H / 2 + look * 0.42 * H)
-        bl = self._layer_blocks()
-        out = Framebuffer(W, H)
-
-        def shadows(frame: Framebuffer, camera) -> None:
-            for b in bl:                                              # a soft shadow on the wallpaper under each block's footprint
-                x, y, w, h = b.rect
-                foot = [camera.project(px, py, 0.0)[:2] for px, py in ((x, y), (x + w, y), (x + w, y + h), (x, y + h))]
-                cx = sum(p[0] for p in foot) / 4 + 5 * u
-                cy = sum(p[1] for p in foot) / 4 + 7 * u
-                for grow, alpha in ((10, 26), (7, 30), (4, 34), (1, 38)):
-                    k = grow * u
-                    frame.poly([(cx + (p[0] - cx + 5 * u) + (k if p[0] > cx else -k), cy + (p[1] - cy + 7 * u) + (k if p[1] > cy else -k))
-                                for p in foot], "#000000", alpha)
-
-        words = [w for b in bl for w in b.words][:200]                 # the ground rains the words of everything on the desktop
-        t0 = time.monotonic()
-        blocks.render(out, blocks.Texture(self._wallpaper()), bl, cam, mt, u, shadow=shadows, floor_words=words)
-        self._last_block_cost = time.monotonic() - t0
-        self._blocks = bl
-        for layer in sorted((l for l in self.layers.values() if self.shown(l) and l.kind == "overlay"), key=lambda l: l.z):
-            self._paint_content(out, layer)                          # the click bubbles float in front of everything
-        self._block_cache = (key, out)
-        return out.copy()
-
-    def orbit(self, dyaw: float = 0.0, dpitch: float = 0.0, *, reset: bool = False) -> None:
-        """Turn the 3D look's camera around the desktop (yaw) or tilt it up and down (pitch: positive looks down at the blocks)."""
-        if reset:
-            self.cam = [blocks.DEFAULT_YAW, blocks.DEFAULT_PITCH]
-        else:
-            self.cam[0] = ((self.cam[0] + dyaw + math.pi) % (2 * math.pi)) - math.pi
-            self.cam[1] = max(-0.25, min(1.45, self.cam[1] + dpitch))
-        self.surface_dirty = True
-
-    def _flat(self, x: int, y: int) -> tuple[int, int]:
-        """A screen point in the 3D look as the flat position it has on its layer (so clicks reach the app under the pointer)."""
-        if self.cfg["look"] != "3d" or not self.cfg["blocks"] or not self._blocks or self.stack_open:
-            return x, y
-        hit = blocks.unproject(self._blocks, x, y)
-        if hit is None:
-            return x, y
-        b, lx, ly = hit
-        return int(b.rect[0] + lx), int(b.rect[1] + ly)
-
     def _propose(self, layer: Layer, msg: dict, result) -> None:
         """An assistant's plan. It needs the assist permission; every step must be a launching/looking action the assistant also holds the scope
         for; the owner is shown the plan and must type the password (never remembered, so a sudo window cannot approve it); then each step runs
@@ -1514,43 +1289,6 @@ class Shell(Compositor):
         bits = [st["action"]] + [str(st[k]) for k in ("app", "path", "id", "kind") if st.get(k)]
         return " ".join(bits)[:60]
 
-    def _block_action(self, x: int, y: int):
-        """What a click at this screen point does in the 3D look, if it is on a waterfall, the Kernel or the Hardware: a function to call, else None.
-        A block's own front face wins over a waterfall hanging in front of it."""
-        if not self._blocks or self.stack_open:
-            return None
-        hit = blocks.unproject(self._blocks, x, y)
-        if hit is not None:
-            b = hit[0]
-            return (lambda: self._open_app_window(b.opens)) if b.opens else None
-        for b in sorted(self._blocks, key=lambda b: -b.depth):
-            if b.fall_quad and blocks.point_in_quad(b.fall_quad, x, y):
-                return lambda b=b: self.open_commands(b)
-        return None
-
-    def _open_app_window(self, name: str, command: Optional[dict] = None) -> None:
-        try:
-            self.open_window(name, command, new=bool(command))
-        except Exception as e:                                  # a refused password, a missing app: say so
-            self.notify("desktop", f"Could not open {name}", str(e)[:150])
-
-    def open_commands(self, block) -> None:
-        """A click on an app's waterfall: its commands, in the Commands app."""
-        layer = self.layers.get(block.layer_id)
-        app = layer.name if layer else block.name
-        self._open_app_window("commands", {"command": "list", "line": app})
-
-    def _matrix_step(self, now: float) -> None:
-        """While the top faces can be seen, the falling text moves on ~5 times a second."""
-        if self.cfg["look"] != "3d" or not self.cfg["blocks"] or not self._rain_visible():
-            return
-        # the rain moves on at a pace the machine can afford: never more than about a third of the time spent drawing it
-        period = max(0.25, 3.0 * getattr(self, "_last_block_cost", 0.1))
-        if now - getattr(self, "_matrix_at", 0.0) >= period:
-            self._matrix_at = now
-            self._matrix_t += period
-            self.surface_dirty = True
-
     def _draw_modal(self, fb: Framebuffer) -> None:
         """The trusted password prompt, centered on the primary output (not on the whole wide screen)."""
         if len(self.outputs) <= 1:
@@ -1568,13 +1306,7 @@ class Shell(Compositor):
             ctl = self.controls()
             if 0 <= self.nav < len(ctl):
                 looks.draw_ring(fb, ctl[self.nav].rect, self.u * (2 if self.cfg["look"] == "neural" else 1))
-        if self.cfg["look"] == "neural" and not self.modal:
-            ctl = self.controls()
-            n = self.neural
-            progress = min(1.0, (time.monotonic() - n["last_step"]) / self.NEURAL_DWELL)
-            looks.neural_hud(self, fb, ctl, self.nav, progress, {"paused": n["paused"], "last": n["last"],
-                                                                 "driver": any(l.neural for l in self.layers.values())})
-        if not self.modal and self.cfg["look"] not in ("vr", "ar"):          # those looks draw the pointer once per eye
+        if not self.modal and not (self.scene is not None and self._scene_frame is not None and self.scene_pointer):   # an interface app that draws the pointer itself (once per eye) says so
             cur = next((l for l in self.layers.values() if l.kind == "cursor" and l.visible and l.ops), None)
             if cur is not None:
                 self._paint_content(fb, cur)
@@ -1634,73 +1366,9 @@ class Shell(Compositor):
         while self.pending and not self.stop_requested:
             self.route(self.pending.popleft())
         self.tick()
+        if self.scene is not None:
+            self._scene_sync()                              # the interface app hears what changed even when nothing is being painted
         self._update_motion(time.monotonic())
-        self._neural_step(time.monotonic())
-        self._matrix_step(time.monotonic())
-        self._addon_step(time.monotonic())
-
-    def _addon_step(self, now: float) -> None:
-        """If the add-on behind the current look was turned off (``kos addon disable``), leave the look at once."""
-        if self.cfg["look"] not in looks.IMMERSIVE or now - getattr(self, "_addon_at", 0.0) < 1.0:
-            return
-        self._addon_at = now
-        if self.cfg["look"] not in self._addon_looks():
-            self.set_look(look="normal")
-            self.notify("desktop", "Add-on turned off", "The interface went back to a normal look.")
-
-    NEURAL_DWELL = 1.4                    # seconds the scan rests on each control before moving on
-
-    def _neural_step(self, now: float) -> None:
-        """The neural look scans: the highlight moves to the next control every ``NEURAL_DWELL`` seconds, so one signal
-        (a blink, a clench, a thought the driver recognises) is enough to press things."""
-        if self.cfg["look"] != "neural":
-            return
-        n = self.neural
-        if n["paused"]:
-            return
-        ctl = self.controls()
-        if ctl and now - n["last_step"] >= self.NEURAL_DWELL:
-            self.nav = (self.nav + 1) % len(ctl)
-            n["last_step"] = now
-            self.surface_dirty = True
-        elif now - n.get("last_paint", 0.0) >= 0.1:           # the progress bar fills smoothly
-            n["last_paint"] = now
-            self.surface_dirty = True
-
-    def intent(self, layer: Layer, name: str) -> tuple[bool, str]:
-        """One decision from a neural driver. Only while the neural look is on, only from an app that was granted the
-        'neural' permission (a driver), and at most ~12 a second: the OS sees decisions, never signals."""
-        if self.cfg["look"] != "neural":
-            return False, "the neural look is not on"
-        if not layer.neural:
-            return False, "this app is not a neural driver"
-        now = time.monotonic()
-        n = self.neural
-        if now - n["last_intent_t"] < 0.08:
-            return False, "too fast"
-        n["last_intent_t"], n["last"] = now, name
-        ctl = self.controls()
-        if name == "pause":
-            n["paused"] = not n["paused"]
-            n["last_step"] = now
-        elif ctl:
-            if name == "next":
-                self.nav = (self.nav + 1) % len(ctl)
-            elif name == "prev":
-                self.nav = (self.nav - 1) % len(ctl)
-            elif name == "select" and 0 <= self.nav < len(ctl):
-                self.activate(ctl[self.nav])
-            elif name == "back":
-                top = next((l for l in sorted(self.layers.values(), key=lambda l: -l.z) if self.shown(l) and l.kind == "window"), None)
-                if top is not None:
-                    try:
-                        self._closer(top.id)
-                        self.remove(top.id, expected=True)
-                    except Exception as e:
-                        self.log.append(f"close refused: {e}")
-            n["last_step"] = now
-        self.surface_dirty = True
-        return True, name
 
     def step(self, timeout: float = 0.1) -> None:
         now = time.monotonic()

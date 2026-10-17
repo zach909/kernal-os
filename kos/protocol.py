@@ -36,6 +36,10 @@ OS -> app
 app -> OS
     {"cmd": "screen", "title": str, "lines": [str], "status": str}      (tui)
     {"cmd": "frame", "ops": [op, ...]}                                   (graphical)
+    {"cmd": "scene", "rev", "w", "h", "hits": [{"id", "quad"}], "regions": [{"quad", "id"}], "captures": {"keys", "buttons", "pointer"}}
+                                                       (an interface app, compose permission) a frame is ready in its scratch directory
+                                                       (frame.bin: w*h*4 bytes) and this is where each layer's rectangle landed on it
+    {"cmd": "press", "x", "y"}                           (an interface app) press whatever is at this flat position
         op = ["clear", color] | ["rect", x, y, w, h, color]
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
            | ["stext", x, y, str, color, px, face?]     smooth text, face 0 sans / 1 bold / 2 mono
@@ -66,12 +70,11 @@ app -> OS
     {"cmd": "request", "action": "signal", "pid": N, "sig": "TERM"|"KILL"|"STOP"|"CONT"}   (password)
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
     {"cmd": "request", "action": "animate", "on": bool}      (animate permission) ask for / stop ~24 'anim' events a second
-    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|ar|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles"|"blocks": bool}   (shell permission to set)
+    {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|ar|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles": bool}   (shell permission to set)
     {"cmd": "request", "action": "propose", "title": str, "steps": [request, ...]}   (assist permission) a plan for the owner to approve with
                                                               the password: at most 8 steps, only launching and looking actions
     {"cmd": "request", "action": "encryption"}               is everything encrypted? (read-only report; system:os)
     {"cmd": "request", "action": "services"}                 the trusted core and every app's scopes (system:security)
-    {"cmd": "request", "action": "addons", "op": "list"|"enable"|"disable", "name"}   add-ons; enable/disable ask the kernel-layer password (system:addons)
     {"cmd": "request", "action": "intent", "name": next|prev|select|back|pause}   (neural permission, neural look only) one decision
                                                               a neural driver made from the wearer's signals - never the signals
     {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
@@ -334,7 +337,7 @@ def _request(msg: dict) -> dict:
                 if msg["look"] not in ("normal", "3d", "vr", "ar", "neural", "text", "terminal"):
                     raise ProtocolError("look.look must be normal, 3d, vr, ar, neural, text or terminal")
                 out["look"] = msg["look"]
-            for k in ("cursor_direction", "tilt", "bubbles", "blocks"):
+            for k in ("cursor_direction", "tilt", "bubbles"):
                 if k in msg:
                     if not isinstance(msg[k], bool):
                         raise ProtocolError(f"look.{k} must be true or false")
@@ -453,17 +456,6 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "heal", "op": op}
     if action in ("encryption", "services"):
         return {"cmd": "request", "action": action}
-    if action == "addons":
-        op = msg.get("op", "list")
-        if op not in ("list", "enable", "disable"):
-            raise ProtocolError("addons.op must be list, enable or disable")
-        out = {"cmd": "request", "action": "addons", "op": op}
-        if op != "list":
-            name = msg.get("name")
-            if not isinstance(name, str) or not re.match(r"^[a-z]{2,12}$", name):
-                raise ProtocolError("addons.name must be an add-on name")
-            out["name"] = name
-        return out
     if action == "mods":
         op = msg.get("op", "list")
         if op not in ("list", "enable", "disable"):
@@ -529,6 +521,43 @@ def _file_request(action: str, msg: dict) -> dict:
             "to": _path(msg.get("to"))}
 
 
+def _quad(q: Any) -> list:
+    if not isinstance(q, list) or len(q) != 4:
+        raise ProtocolError("a quad has four corners")
+    out = []
+    for p in q:
+        if not (isinstance(p, list) and len(p) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in p)):
+            raise ProtocolError("a corner is [x, y]")
+        out.append([round(max(-1e5, min(1e5, float(v))), 2) for v in p])
+    return out
+
+
+def _scene(msg: dict) -> dict:
+    """An interface app says a frame is ready (it wrote ``frame.bin`` in its scratch directory) and where it drew each layer."""
+    hits, regions = msg.get("hits", []), msg.get("regions", [])
+    if not isinstance(hits, list) or len(hits) > 96 or not isinstance(regions, list) or len(regions) > 96:
+        raise ProtocolError("a scene has at most 96 hits and 96 regions")
+    caps = msg.get("captures", {})
+    if not isinstance(caps, dict):
+        raise ProtocolError("captures must be an object")
+    keys, buttons = caps.get("keys", []), caps.get("buttons", [])
+    if (not isinstance(keys, list) or len(keys) > 16 or not all(isinstance(k, str) and 1 <= len(k) <= 20 for k in keys)
+            or not isinstance(buttons, list) or not all(b in ("left", "middle", "right") for b in buttons)):
+        raise ProtocolError("captures: keys is a short list of key names, buttons of left, middle, right")
+    out = {"cmd": "scene", "rev": _int(msg.get("rev", 0), 0, 1 << 40), "w": _int(msg.get("w"), 1, 16384), "h": _int(msg.get("h"), 1, 16384),
+           "hits": [], "regions": [], "pointer": bool(msg.get("pointer", False)),
+           "captures": {"keys": list(keys), "buttons": list(buttons), "pointer": bool(caps.get("pointer", False))}}
+    for h in hits:
+        if not isinstance(h, dict) or not isinstance(h.get("id"), str) or len(h["id"]) > 80:
+            raise ProtocolError("a hit names a layer")
+        out["hits"].append({"id": h["id"], "quad": _quad(h.get("quad"))})
+    for r in regions:
+        if not isinstance(r, dict) or not isinstance(r.get("id"), str) or len(r["id"]) > 80:
+            raise ProtocolError("a region has an id")
+        out["regions"].append({"quad": _quad(r.get("quad")), "id": r["id"]})
+    return out
+
+
 def validate_app_message(msg: Any, mode: str) -> dict:
     if not isinstance(msg, dict) or not isinstance(msg.get("cmd"), str):
         raise ProtocolError("message must be an object with a 'cmd'")
@@ -550,6 +579,10 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return {"cmd": "frame", "ops": [_op(o) for o in ops]}
     if cmd == "log":
         return {"cmd": "log", "msg": clean_text(msg.get("msg", ""), 2000)}
+    if cmd == "scene" and mode == "graphical":
+        return _scene(msg)
+    if cmd == "press" and mode == "graphical":
+        return {"cmd": "press", "x": _int(msg.get("x"), 0, 65535), "y": _int(msg.get("y"), 0, 65535)}
     if cmd == "request":
         return _request(msg)
     if cmd == "exit":

@@ -1,10 +1,10 @@
 'use strict';
-// Appearance. The look of the whole interface is a setting: normal, 3D, virtual reality (one picture per
-// eye), augmented reality (over a camera passthrough), neural (a scanning highlight a neural driver can drive),
-// text (everything built from text) or terminal (a numbered list of every button - pick one and press
-// Enter). The virtual, mixed and neural looks reach for a headset, a camera or a neural device, so they
-// are add-ons - off until you run `kos addon enable vr|ar|neural` - always ask for your password and are never restored at the next start. The pointer, the screen tilt and
-// the click bubbles are options of the 3D look. The OS remembers the choice of the other looks.
+// Appearance. The look of the whole interface is a setting: normal, 3D, virtual reality (one picture per eye), augmented reality (over
+// a camera passthrough), neural (a scanning highlight a neural driver can drive), text (everything built from text) or terminal (a
+// numbered list of every button - pick one and press Enter). Terminal is the system's own interface; every other look is an INTERFACE APP
+// that draws the running apps its own way. Virtual reality, augmented reality and neural are optional interface apps: their cards appear
+// once you have installed them (kos desktop install --optional interface-vr). Choosing one starts its app, which asks for your password.
+// The pointer, the screen tilt and the click bubbles are options of the 3D look. The OS remembers the choice.
 const path = require('path');
 const { App, Canvas } = require(process.env.KOS_SDK_JS);
 const G = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'gfx.js'));
@@ -12,16 +12,15 @@ const G = require(path.join(path.dirname(process.env.KOS_SDK_JS), 'gfx.js'));
 const LOOKS = [
   { id: 'normal', name: 'Normal', note: 'Glass, clean and flat. The default.' },
   { id: '3d', name: '3D', note: 'Everything is a solid block - windows, panels, text and icons. Look down at one: a terminal rains on top.' },
-  { id: 'vr', name: 'Virtual reality', note: 'A picture for each eye, side by side, with depth. Asks for your password.', lock: true },
-  { id: 'ar', name: 'Augmented reality', note: 'The interface floats over a camera passthrough. Asks for your password.', lock: true },
-  { id: 'neural', name: 'Neural', note: 'A highlight scans the buttons; a neural driver picks. Asks for your password.', lock: true },
+  { id: 'vr', name: 'Virtual reality', note: 'A picture for each eye, side by side, with depth. Optional app.', lock: true },
+  { id: 'ar', name: 'Augmented reality', note: 'The interface floats over a camera passthrough. Optional app.', lock: true },
+  { id: 'neural', name: 'Neural', note: 'A highlight scans the buttons; a neural driver picks. Optional app.', lock: true },
   { id: 'text', name: 'Text', note: 'Everything is built from text: boxes, labels and [buttons].' },
   { id: 'terminal', name: 'Terminal', note: 'No pictures. Every button in a list: Up/Down or a number, then Enter.' },
 ];
 const OPTIONS = [
   { id: 'cursor_direction', name: 'Pointer turns to point the way you move' },
-  { id: 'blocks', name: 'Every window and panel is a block you can go around: Alt + arrows, or drag with the middle button (3D look)' },
-  { id: 'tilt', name: 'Screen tilts toward your movement and clicks (3D look)' },
+    { id: 'tilt', name: 'Screen tilts toward your movement and clicks (3D look)' },
   { id: 'bubbles', name: 'A bubble pops off every click (3D look)' },
 ];
 
@@ -34,7 +33,7 @@ const OPTIONS = [
     G.stext(c, app, 16 * u, 10 * u, 'Appearance', '#ffffff', 11 * u, 1);
     G.stext(c, app, 16 * u, 26 * u, 'How the whole interface looks and is driven.', '#9fb2c8', 6 * u + 1);
     const cols = 4, cw = Math.floor((W - 32 * u - (cols - 1) * 8 * u) / cols), ch = 52 * u, y00 = 44 * u;
-    const shown = LOOKS.filter((l) => !l.lock || (st.options.addons || []).includes(l.id));        // the add-on looks appear only once enabled
+    const shown = LOOKS.filter((l) => !l.lock || (st.options.interfaces || []).includes(l.id));        // the optional looks appear once their interface app is installed
     shown.forEach((l, i) => {
       const x = 16 * u + (i % cols) * (cw + 8 * u), y0 = y00 + Math.floor(i / cols) * (ch + 8 * u);
       const on = st.look === l.id, hot = st.hover === l.id;

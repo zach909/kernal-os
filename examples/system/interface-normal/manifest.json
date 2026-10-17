@@ -1,0 +1,15 @@
+{
+  "name": "interface-normal",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "main:main",
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "compose"
+  ],
+  "driver": "interface",
+  "look": "normal",
+  "description": "The normal interface: the layers drawn as the flat glass desktop."
+}

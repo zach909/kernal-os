@@ -1,0 +1,16 @@
+{
+  "name": "interface-3d",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "main:main",
+  "modes": [
+    "graphical"
+  ],
+  "permissions": [
+    "compose",
+    "system:apps"
+  ],
+  "driver": "interface",
+  "look": "3d",
+  "description": "The 3D interface: every app is a block, its terminal falls as a waterfall into a lake that flows to the kernel and the hardware."
+}
