@@ -1026,7 +1026,7 @@ class TestSystemApps(Env):
             if name == "wallpaper":
                 self.assertEqual(m.permissions, (), name)             # the background only draws: no permission at all
             else:
-                self.assertTrue(set(m.permissions) & {"ticks", "shell", "pointer", "animate", "network"} or m.scopes, name)   # widgets: ticks; handler: shell; pointer, effects: pointer; browser: network; the rest: system scopes
+                self.assertTrue(set(m.permissions) & {"ticks", "shell", "pointer", "animate", "network", "compose"} or m.scopes, name)   # widgets: ticks; handler: shell; pointer, effects: pointer; browser: network; the rest: system scopes
             self.assertNotIn("*", m.scopes, f"{name} holds the bare 'system' permission")
             self.assertEqual(m.runtime, "npm" if name != "hello" else m.runtime)
             self.assertTrue(scan_bytes(out.read_bytes(), name).clean)
