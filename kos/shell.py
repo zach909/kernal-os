@@ -1631,8 +1631,8 @@ class Shell:
         except (OSError, ValueError, AttributeError):
             kernel, hardware = ["Linux"], ["the machine"]
         out = []
-        for name, title, lines, app, wf, hf, z, depth in (("kernel", "KERNEL", kernel, "isolation", 0.34, 0.22, 0.32, 0.07),
-                                                          ("hardware", "HARDWARE", hardware, "devices", 0.24, 0.14, 0.68, 0.05)):
+        for name, title, lines, app, wf, hf, z, depth in (("kernel", "KERNEL", kernel, "isolation", 0.34, 0.22, 0.16, 0.07),
+                                                          ("hardware", "HARDWARE", hardware, "devices", 0.24, 0.14, 0.36, 0.05)):
             w, h = int(W * wf), int(H * hf)
             x, y = (W - w) // 2, H - h
             tex = blocks.info_texture(w, h, title, lines, "#06231a", u)
@@ -1652,7 +1652,8 @@ class Shell:
         key = (self._base_signature(), round(self.cam[0], 3), round(self.cam[1], 3), mt, self.cfg["look"])
         if self._block_cache and self._block_cache[0] == key:
             return self._block_cache[1].copy()
-        cam = blocks.Camera(self.cam[0], self.cam[1], W / 2, H / 2, 40 * u, 3.4 * W)
+        look = max(0.0, min(1.0, (self.cam[1] - 0.3) / 0.9))          # looking down: the pivot slides toward the lake, so the lake stays in view
+        cam = blocks.Camera(self.cam[0], self.cam[1], W / 2, H / 2, 40 * u + look * 0.22 * W, 3.4 * W, py=H / 2 + look * 0.42 * H)
         bl = self._layer_blocks()
         out = Framebuffer(W, H)
 

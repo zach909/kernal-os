@@ -124,23 +124,27 @@ class Framebuffer:
                     self.buf[(yy * W + x0) * 4:(yy * W + x1) * 4] = seg
 
     def poly(self, pts: list, color: str, alpha: int = 255) -> None:
-        """An anti-aliased filled polygon (non-zero winding, exact pixel coverage), blended at ``alpha``."""
+        """An anti-aliased filled polygon (non-zero winding, exact pixel coverage), blended at ``alpha``. It is clipped to the framebuffer first,
+        so a shape far larger than the screen (a shadow seen from above, say) costs only the part that shows."""
+        pts = _clip_polygon(pts, 0.0, 0.0, float(self.width), float(self.height))
+        if len(pts) < 3:
+            return
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         x0, y0 = max(0, int(math.floor(min(xs))) - 1), max(0, int(math.floor(min(ys))) - 1)
-        x1, y1 = min(self.width, int(math.ceil(max(xs))) + 2), min(self.height, int(math.ceil(max(ys))) + 2)
+        x1, y1 = int(math.ceil(max(xs))) + 2, int(math.ceil(max(ys))) + 2      # not cut at the edge: the accumulation needs the whole shape
         w, h = x1 - x0, y1 - y0
         if w <= 0 or h <= 0:
             return
-        acc = [0.0] * (w * h + 1)
+        acc = [0.0] * (w * h + 2)
         n = len(pts)
         for i in range(n):
             a, b = pts[i], pts[(i + 1) % n]
             ttf._accumulate(acc, w, h, a[0] - x0, a[1] - y0, b[0] - x0, b[1] - y0)
         c = parse_color(color)
         buf, stride = self.buf, self.width * 4
-        for r in range(h):
+        for r in range(min(h, self.height - y0)):
             run, row = 0.0, r * w
-            for col in range(w):
+            for col in range(min(w, self.width - x0)):
                 run += acc[row + col]
                 cov = min(1.0, abs(run))
                 a = int(cov * alpha + 0.5)
@@ -188,6 +192,34 @@ class Framebuffer:
             elif kind == "blit":
                 self.blit(op[1], op[2], op[3], op[4], op[5], op[6])
             # "hit" declares a control and draws nothing
+
+
+def _clip_polygon(pts, x0: float, y0: float, x1: float, y1: float) -> list:
+    """Sutherland-Hodgman: the polygon cut to the rectangle, as a closed polygon."""
+    def cut(poly, inside, cross):
+        out = []
+        for i, cur in enumerate(poly):
+            prev = poly[i - 1]
+            a, b = inside(prev), inside(cur)
+            if a != b:
+                out.append(cross(prev, cur))
+            if b:
+                out.append(cur)
+        return out
+
+    def at_x(xv):
+        return lambda p, q: (xv, p[1] + (q[1] - p[1]) * (xv - p[0]) / (q[0] - p[0]))
+
+    def at_y(yv):
+        return lambda p, q: (p[0] + (q[0] - p[0]) * (yv - p[1]) / (q[1] - p[1]), yv)
+
+    poly = list(pts)
+    for inside, cross in ((lambda p: p[0] >= x0, at_x(x0)), (lambda p: p[0] <= x1, at_x(x1)),
+                          (lambda p: p[1] >= y0, at_y(y0)), (lambda p: p[1] <= y1, at_y(y1))):
+        if not poly:
+            break
+        poly = cut(poly, inside, cross)
+    return poly
 
 
 def _deepen(color: str, k: float) -> str:

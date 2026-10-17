@@ -39,12 +39,15 @@ GROUND_DEPTH = 1.0                                              # how far the la
 class Camera:
     """Orbits the point ``(cx, cy, cz)``. Yaw turns around the vertical axis, pitch looks down (positive) from above."""
 
-    def __init__(self, yaw: float, pitch: float, cx: float, cy: float, cz: float, dist: float):
+    def __init__(self, yaw: float, pitch: float, cx: float, cy: float, cz: float, dist: float, py: Optional[float] = None):
+        """``cx, cy``: where the pivot appears on screen. ``py``: its height in the world (default ``cy``) - move it toward the ground to
+        keep the lake in view while looking down."""
         self.yaw, self.pitch, self.cx, self.cy, self.cz, self.dist = yaw, pitch, cx, cy, cz, dist
+        self.py = cy if py is None else py
         self._cy, self._sy, self._cp, self._sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
 
     def rotate(self, x: float, y: float, z: float) -> tuple[float, float, float]:
-        x, y, z = x - self.cx, y - self.cy, z - self.cz
+        x, y, z = x - self.cx, y - self.py, z - self.cz
         x1, z1 = x * self._cy + z * self._sy, -x * self._sy + z * self._cy          # yaw about y
         y2, z2 = y * self._cp + z1 * self._sp, -y * self._sp + z1 * self._cp          # pitch about x (positive: look down)
         return x1, y2, z2

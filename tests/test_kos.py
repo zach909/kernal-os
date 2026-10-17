@@ -4638,6 +4638,17 @@ class TestImmersiveLooks(Env):
         frame = sh.backend.frames[-1]
         self.assertEqual(frame.pixel(40, 100), (0x10, 0x20, 0x30))
 
+    def test_a_polygon_larger_than_the_screen_or_half_off_it_is_clipped_not_a_crash(self):
+        fb = Framebuffer(40, 40)
+        fb.poly([[-500, -500], [900, -400], [800, 900], [-300, 700]], "#ffffff", 255)                   # covers everything
+        self.assertEqual((fb.pixel(0, 0), fb.pixel(20, 20), fb.pixel(39, 39)), ((255, 255, 255),) * 3)
+        edge = Framebuffer(40, 40)
+        edge.poly([[30, 30], [90, 30], [90, 90], [30, 90]], "#ffffff", 255)                              # half off the bottom right
+        self.assertEqual((edge.pixel(35, 35), edge.pixel(39, 39), edge.pixel(10, 10)), ((255, 255, 255), (255, 255, 255), (0, 0, 0)))
+        none = Framebuffer(40, 40)
+        none.poly([[100, 100], [200, 100], [200, 200]], "#ffffff", 255)                                  # entirely off
+        self.assertEqual(none.pixel(20, 20), (0, 0, 0))
+
     def test_the_neural_look_scans_on_its_own_and_a_driver_can_only_send_five_decisions(self):
         sh = self.shell_with(PW)
         pressed = []

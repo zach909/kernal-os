@@ -80,7 +80,7 @@ const wrap = (a) => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TA
       if (app.options.cursor_direction !== false && sp > 8) { st.leanTarget = REST + 0.5 * Math.max(-1, Math.min(1, ev.dx / 40)); st.moving = Date.now(); setAnim(true); }
       else if (sp <= 8 && app.options.cursor_direction !== false && Date.now() - st.moving > 900) { st.leanTarget = REST; setAnim(true); }
       if (app.options.cursor_direction === false) st.leanTarget = REST;
-      if (ev.down !== st.down) { st.down = ev.down; setAnim(true); }          // a click: the tool swings round to point down
+      if (ev.down !== st.down) { st.down = ev.down; if (st.down) st.tail = TAIL_DOWN; setAnim(true); }   // a click: the tool points down at once; letting go swings it back
       else if (!st.animating) continue;
     } else if (ev.cmd === 'anim') {
       if (app.options.cursor_direction !== false && st.speed <= 8 && Date.now() - st.moving > 900) st.leanTarget = REST;
