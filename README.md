@@ -201,12 +201,12 @@ that picture, always. The desktop itself is apps too: the wallpaper, menubar, do
   tinted glass. **The terminal comes down like a waterfall:** from the bottom edge of each app a see-through curtain of that app's own words falls to the
   ground, and **clicking an app's waterfall takes you to its commands** (the Commands app). **The ground is a lake of terminal**; look down and a bright
   river of text runs along it - **the lake flows to the Kernel, and from the kernel on to the Hardware**, two blocks standing on the river
-  (click them: Isolation, Devices). The **pointer is a cone on a cylinder** (the cursor app), shaded and floating over the screen; **when you click it points
+  (click the kernel: Isolation; the hardware blocks are the real machine - CPU, RAM, each disk, each network card, the input devices - and each opens its own monitor: Resources, Memory, Devices, Network). **Click the ground and you are back at the terminal** (the system's own interface). The **pointer is a cone on a cylinder** (the cursor app), shaded and floating over the screen; **when you click it points
   straight down** at what you are pressing. **Go around it**: Alt + arrow keys, or drag with the middle button (Alt-0 resets; `kos desktop shot --keys alt-left,alt-up`).
   Text is extruded (letters have depth) and icon symbols are solid; clicks pop bubbles and the screen tilts a little toward your movement. *How:* each face
   is a flat quad, which a perspective camera turns into a homography of its texture, so every face is filled scanline by scanline (`kos/blocks.py`).
   *Honest limits:* pure Python - a frame is a second or so, so orbiting is not smooth; blocks are boxes, not meshes; no colour-emoji font, so emoji are not
-  drawn (icons and text are); the Kernel and Hardware blocks show what `uname` and `sysconf` say, not live load.
+  drawn (icons and text are); the hardware blocks show what the OS reported when last asked (every 15 s), and only what this machine's `/proc` and `/sys` expose - a virtual machine shows its virtual disks.
 * **vr** (optional) - virtual reality: **one picture per eye**, side by side (half-width each, the usual half side-by-side format). Every layer sits at a depth -
   the wallpaper far away, windows and the sidebar nearer, effects and the pointer nearest - and each eye sees it shifted by that depth's disparity;
   moving the pointer turns your head, which slides the far layers more than the near ones. *Not here:* head tracking from a headset's sensors, lens

@@ -36,6 +36,8 @@ class Blocks3D(Interface):
         self.last_cost = 0.1
         self.drag: Optional[tuple] = None
         self.regions_by_id: dict = {}                           # region id -> (app, command, line)
+        self.facts: dict = {}                                   # what the OS said about this machine: resources, devices, network
+        self.asked = -1e9
         self.wait = 0.25
 
     # ---------------------------------------------------------------------------------- the camera
@@ -60,7 +62,9 @@ class Blocks3D(Interface):
             return False
         if t == "region":                                      # a click on a waterfall or the kernel: ask the OS to open the app (it asks for the password)
             what = self.regions_by_id.get(ev.get("id"))
-            if what:
+            if what and what[0] == "terminal":                 # the ground is the terminal: a click on it goes back to the system's own interface
+                self.runner.app.request_look("terminal")
+            elif what:
                 self.runner.app.request_open(what[0], "graphical", what[1], what[2])
             return False
         if t == "pointer" and self.drag is not None:
@@ -69,8 +73,22 @@ class Blocks3D(Interface):
             return True
         return False
 
+    def on_event(self, ev: dict) -> bool:
+        if ev.get("cmd") == "sys" and ev.get("kind") in ("resources", "devices", "network") and isinstance(ev.get("data"), dict):
+            self.facts[ev["kind"]] = ev["data"]
+            return True
+        return False
+
+    def ask_hardware(self, now: float) -> None:
+        """The hardware blocks show what this machine really has: ask the OS (read-only facts) now and then."""
+        if now - self.asked >= 15.0:
+            self.asked = now
+            for kind in ("resources", "devices", "network"):
+                self.runner.app.request_sys(kind)
+
     def tick(self, now: float) -> bool:
         """The rain moves on at a pace the machine can afford: never more than about a third of the time spent drawing it."""
+        self.ask_hardware(now)
         if not self.rain_visible():
             return False
         period = max(0.25, 3.0 * self.last_cost)
@@ -172,27 +190,60 @@ class Blocks3D(Interface):
         out += self.system_blocks()
         return out
 
+    def hardware_items(self) -> list:
+        """The real hardware, one entry each: (key, title, lines, the app that monitors it). Built from what the OS reported."""
+        f = self.facts
+        res, dev, net = f.get("resources"), f.get("devices"), f.get("network")
+        items = []
+        if res:
+            model = (res.get("cpu_model") or "CPU").replace("(R)", "").replace("(TM)", "").replace("Processor", "").strip()
+            load = (res.get("load") or [0.0])[0]
+            items.append(("cpu", "CPU", [model[:26], f"{res.get('cpus', '?')} cpus", f"load {load:.2f}", "click: resources"], "resources"))
+            mem = res.get("mem_kb") or {}
+            total, avail = mem.get("MemTotal", 0) // 1024, mem.get("MemAvailable", 0) // 1024
+            items.append(("ram", "RAM", [f"{total} MiB", f"{avail} MiB free", "click: memory"], "memory"))
+        for d in (dev or {}).get("disks", [])[:3]:
+            kind = "disk" if d.get("rotational") else "ssd"
+            items.append((f"disk-{d['name']}", d["name"].upper(), [f"{d.get('size', 0) / 1e9:.1f} GB {kind}", (d.get("model") or "")[:24],
+                                                                   f"read {d.get('read_bytes', 0) // (1 << 20)} MiB", "click: devices"], "devices"))
+        real = [i for i in (net or {}).get("interfaces", []) if not i.get("name", "lo").startswith(("lo", "ifb", "veth", "docker", "br-", "dummy", "sit"))]
+        for i in real[:2]:
+            items.append((f"net-{i['name']}", i["name"].upper(), [i.get("state", "?"), i.get("ipv4") or "no address",
+                                                                  f"in {i.get('rx_bytes', 0) // (1 << 20)} MiB", "click: network"], "network"))
+        inputs = (dev or {}).get("input", [])
+        if inputs:
+            items.append(("input", "INPUT", [i["name"][:24] for i in inputs[:3]] + ["click: devices"], "devices"))
+        return items
+
     def system_blocks(self) -> list:
-        """The two things the lake flows into: the Kernel, and beyond it the Hardware. They stand on the ground, on the river; clicking one
-        opens the app for it. (They show what a system call and a sysconf tell; no files are read.)"""
+        """The two things the lake flows into: the Kernel, and beyond it the machine's real hardware, a block for each part. They stand on the
+        ground, on the river; clicking one opens the app that monitors it (CPU: resources, RAM: memory, disks and inputs: devices, network cards:
+        network). Before the OS has answered there is one general Hardware block."""
         c = self.model
         W, H, u = c.W, c.H, c.u
         D = int(blocks.GROUND_DEPTH * W)
         try:
             un = os.uname()
             kernel = [f"Linux {un.release}", f"{un.machine}, {os.cpu_count() or '?'} cpus", "every app below runs in a sandbox", "click: isolation"]
-            mem = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1 << 20)
-            hardware = [f"{os.cpu_count() or '?'} cpus, {mem} MiB RAM", "devices need your password", "click: devices"]
         except (OSError, ValueError, AttributeError):
-            kernel, hardware = ["Linux"], ["the machine"]
+            kernel = ["Linux"]
         out = []
-        for name, title, lines, app, wf, hf, z, depth in (("kernel", "KERNEL", kernel, "isolation", 0.34, 0.22, 0.16, 0.07),
-                                                          ("hardware", "HARDWARE", hardware, "devices", 0.24, 0.14, 0.36, 0.05)):
-            w, h = int(W * wf), int(H * hf)
-            x, y = (W - w) // 2, H - h
-            tex = blocks.info_texture(w, h, title, lines, "#06231a", u)
-            out.append(blocks.Block(f"{name}-system", name, (x, y, w, h), z * D, z * D + depth * W, tex, "#0b3a28", [title, *lines], [], title,
-                                    name_kind="system", opens=app))
+        kw, kh = int(W * 0.34), int(H * 0.22)
+        out.append(blocks.Block("kernel-system", "kernel", ((W - kw) // 2, H - kh, kw, kh), 0.16 * D, 0.16 * D + 0.07 * W,
+                                blocks.info_texture(kw, kh, "KERNEL", kernel, "#06231a", u), "#0b3a28", ["KERNEL", *kernel], [], "KERNEL",
+                                name_kind="system", opens="isolation"))
+        items = self.hardware_items() or [("hardware", "HARDWARE", ["the machine", "asking the OS...", "click: devices"], "devices")]
+        gap, per_row = 6 * u, 4
+        h = int(H * 0.15)
+        for r in range(0, len(items), per_row):                          # at most four to a row; further rows stand nearer the viewer
+            row = items[r:r + per_row]
+            w = max(40 * u, min(int(W * 0.2), (int(W * 0.9) - gap * (len(row) - 1)) // len(row)))
+            x0 = (W - (w * len(row) + gap * (len(row) - 1))) // 2
+            z = (0.30 + 0.13 * (r // per_row)) * D
+            for n, (key, title, lines, app) in enumerate(row):
+                out.append(blocks.Block(f"{key}-system", key, (x0 + n * (w + gap), H - h, w, h), z, z + 0.05 * W,
+                                        blocks.info_texture(w, h, title, lines, "#06231a", u), "#0b3a28", [title, *lines], [], title,
+                                        name_kind="system", opens=app))
         return out
 
     # ------------------------------------------------------------------------------------ the frame
@@ -218,7 +269,7 @@ class Blocks3D(Interface):
 
         words = [w for b in bl for w in b.words][:200]                 # the ground rains the words of everything on the desktop
         t0 = time.monotonic()
-        blocks.render(out, blocks.Texture(c._wallpaper()), bl, cam, mt, u, shadow=shadows, floor_words=words)
+        seen = blocks.render(out, blocks.Texture(c._wallpaper()), bl, cam, mt, u, shadow=shadows, floor_words=words)
         self.last_cost = time.monotonic() - t0
         self.blocks = bl
         for layer in sorted((l for l in c.layers.values() if c.shown(l) and l.kind == "overlay"), key=lambda l: l.z):
@@ -235,6 +286,9 @@ class Blocks3D(Interface):
             if b.fall_quad:
                 self.regions_by_id[b.layer_id + ":fall"] = ("commands", "list", b.name[:40])
                 regions.append({"quad": b.fall_quad, "id": b.layer_id + ":fall"})
+        if seen.get("ground"):                                         # the ground is the terminal: last, so anything standing on it wins
+            self.regions_by_id["ground"] = ("terminal", "", "")
+            regions.append({"quad": seen["ground"], "id": "ground"})
         return out, hits, regions
 
 

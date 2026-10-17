@@ -501,7 +501,9 @@ def resources(paths: Paths, proc: str = "/proc") -> dict:
                 state_bytes += os.lstat(os.path.join(root, n)).st_size
             except OSError:
                 pass
-    return {"cpu_ticks": cpu, "cpus": os.cpu_count() or 1, "clk_tck": CLK_TCK, "mem_kb": mem,
+    model = next((clean_text(l.partition(":")[2].strip(), 60) for l in _read(f"{proc}/cpuinfo").splitlines()
+                  if l.startswith(("model name", "Model", "Hardware"))), "")
+    return {"cpu_model": model, "cpu_ticks": cpu, "cpus": os.cpu_count() or 1, "clk_tck": CLK_TCK, "mem_kb": mem,
             "load": [float(x) for x in _read(f"{proc}/loadavg").split()[:3]] or [], "disk": disk,
             "kos_state_bytes": state_bytes, "apps": apps,
             "uptime": float((_read(f"{proc}/uptime").split() or ["0"])[0])}

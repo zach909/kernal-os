@@ -191,6 +191,10 @@ class App:
     def request_sys(self, kind: str, arg: str = "") -> None:
         self.send({"cmd": "request", "action": "sys", "kind": kind, "arg": arg})
 
+    def request_look(self, look: str) -> None:
+        """Ask the OS to change the look (needs the ``shell`` permission). ``"terminal"`` is the system's own interface."""
+        self.send({"cmd": "request", "action": "look", "op": "set", "look": look})
+
     def request_signal(self, pid: int, sig: str) -> None:
         self.send({"cmd": "request", "action": "signal", "pid": pid, "sig": sig})
 

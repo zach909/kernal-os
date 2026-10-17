@@ -578,14 +578,14 @@ def _boot_shell(args, paths: Paths) -> int:
     return 0
 
 
-def _settle(shell, timeout: float = 6.0) -> None:
+def _settle(shell, timeout: float = 9.0) -> None:
     """Give an interface app time to take in every layer and draw (at least a few seconds: its animation never stops, so the
     picture is never 'steady'; the first frames come before the apps' own first drawings have crossed over)."""
     import time as _t
     if shell.scene is None:
         return
     start = _t.monotonic()
-    while _t.monotonic() - start < min(timeout, 3.5) or getattr(shell, "_scene_rev", -1) < 0 and _t.monotonic() - start < timeout:
+    while _t.monotonic() - start < min(timeout, 6.0) or getattr(shell, "_scene_rev", -1) < 0 and _t.monotonic() - start < timeout:
         shell.pump(0.1)
 
 
@@ -630,13 +630,15 @@ def _shot(args, paths: Paths) -> int:
         for k in (args.keys or "").split(","):
             if k:
                 devices.push({"type": "key", "key": k})
+        if args.keys:
+            _settle(shell)                                    # the interface app redraws for the keys before anything is clicked
         if args.point or args.click:
             shell.booted.add("mouse")
             px, _, py = (args.click or args.point).partition(",")
             devices.push({"type": "pointer", "x": int(px), "y": int(py)})
             if args.click:
                 devices.push({"type": "button", "button": "left", "pressed": True, "x": int(px), "y": int(py)})
-        end = _t.monotonic() + (0.5 if args.click else 0.4)
+        end = _t.monotonic() + (1.5 if args.click else 0.4)
         while _t.monotonic() < end:
             shell.pump(0.05)
             shell._update_motion(_t.monotonic())

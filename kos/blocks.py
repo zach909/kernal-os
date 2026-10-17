@@ -339,7 +339,7 @@ def faces_of(b: Block, matrix_t: float, u: int):
 
 
 def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera, matrix_t: float, u: int,
-           shadow=None, floor_words: Optional[list] = None) -> None:
+           shadow=None, floor_words: Optional[list] = None) -> dict:
     """Paint the wallpaper plane, then every block, farthest first. Fills in each block's projected front quad (``quad``, ``inv``)
     so a click on it can be traced back to the flat layer."""
     W, H = out.width, out.height
@@ -372,6 +372,7 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
         _PLANE["k"], _PLANE["fb"] = key, pad_fb
     plane = [cam.project(*c)[:2] for c in corners]
     fill_face(out, plane, Texture(pad_fb))
+    seen = {"ground": None}                                    # what the caller may want to know landed where
     if floor_words is not None:
         # the ground: a terminal. It runs from the bottom edge of the wall toward the viewer, and the same falling text rains on it
         H0 = H
@@ -385,6 +386,7 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
         nr = cam.normal_faces(0, -1, 0)
         if nr[0] * (0 - rc[0]) + nr[1] * (0 - rc[1]) + nr[2] * (cam.dist - rc[2]) > 0:        # only when it faces the viewer
             fill_face(out, ground_quad, gt)
+            seen["ground"] = ground_quad
     if shadow:
         shadow(out, cam)
     for b in blocks:
@@ -420,6 +422,7 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
             continue
         fh = max(8, (H - (y0 + h)) // 2)
         fill_face(out, quad, matrix_texture(b, max(8, w // 2), fh, matrix_t, u, px=max(6, 6 * u), transparent=True))
+    return seen
 
 
 def unproject(blocks: list[Block], x: float, y: float) -> Optional[tuple[Block, float, float]]:

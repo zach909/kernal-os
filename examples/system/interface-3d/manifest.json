@@ -8,9 +8,11 @@
   ],
   "permissions": [
     "compose",
-    "system:apps"
+    "shell",
+    "system:apps",
+    "system:os"
   ],
   "driver": "interface",
   "look": "3d",
-  "description": "The 3D interface: every app is a block, its terminal falls as a waterfall into a lake that flows to the kernel and the hardware."
+  "description": "The 3D interface: every app is a block, its terminal falls as a waterfall into a lake that flows to the kernel and the machine's real hardware; click the ground to return to the terminal."
 }

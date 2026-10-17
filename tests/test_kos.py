@@ -4936,6 +4936,63 @@ class TestInterfaceApps(Env):
                 self.assertIn(h["id"], {"w1", "d1"}, name)
                 self.assertEqual(len(h["quad"]), 4, name)
 
+    def blocks3d(self):
+        import importlib.util
+        from kos.scenelib import SceneModel
+        spec = importlib.util.spec_from_file_location("interface_3d_main", self.ROOT / "system" / "interface-3d" / "main.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        asked = []
+
+        class App:
+            def request_sys(self, kind, arg=""):
+                asked.append(("sys", kind))
+
+            def request_look(self, look):
+                asked.append(("look", look))
+
+            def request_open(self, app, mode="tui", command="", line=""):
+                asked.append(("open", app))
+
+            def send(self, *_):
+                pass
+
+        class Runner:
+            app = App()
+        model = SceneModel()
+        model.apply_state({"w": 640, "h": 360, "u": 1, "titlebar": 24, "ws": 0, "focus": [], "look": "3d", "layers": []})
+        return mod.Blocks3D(model, Runner()), asked
+
+    def test_the_3d_hardware_blocks_are_the_real_machine_and_each_opens_its_monitor(self):
+        iface, asked = self.blocks3d()
+        self.assertEqual([k for k, *_ in iface.hardware_items()], [])                      # nothing known yet: one general block
+        iface.tick(100.0)
+        self.assertEqual(asked, [("sys", "resources"), ("sys", "devices"), ("sys", "network")])
+        iface.tick(101.0)
+        self.assertEqual(len(asked), 3)                                                      # asked again only after a while
+        iface.on_event({"cmd": "sys", "kind": "resources", "data": {"cpu_model": "Test CPU", "cpus": 8, "load": [0.5, 0, 0], "mem_kb": {"MemTotal": 8 << 20, "MemAvailable": 4 << 20}}})
+        iface.on_event({"cmd": "sys", "kind": "devices", "data": {"disks": [{"name": "nvme0n1", "size": 5 * 10 ** 11, "rotational": False, "model": "Fast"}],
+                                                                   "input": [{"name": "Keyboard"}]}})
+        iface.on_event({"cmd": "sys", "kind": "network", "data": {"interfaces": [{"name": "lo"}, {"name": "ifb0"}, {"name": "eth0", "state": "up", "ipv4": "10.0.0.2"}]}})
+        items = {k: (t, app) for k, t, _, app in iface.hardware_items()}
+        self.assertEqual(items, {"cpu": ("CPU", "resources"), "ram": ("RAM", "memory"), "disk-nvme0n1": ("NVME0N1", "devices"),
+                                 "net-eth0": ("ETH0", "network"), "input": ("INPUT", "devices")})   # no loopback or virtual interfaces
+        names = [b.name for b in iface.system_blocks()]
+        self.assertEqual(names, ["kernel", "cpu", "ram", "disk-nvme0n1", "net-eth0", "input"])
+        self.assertFalse(iface.on_event({"cmd": "sys", "kind": "files", "data": {}}))        # only the three facts it asked for
+
+    def test_clicking_the_ground_goes_back_to_the_terminal_and_a_block_opens_its_app(self):
+        iface, asked = self.blocks3d()
+        iface.regions_by_id = {"ground": ("terminal", "", ""), "cpu-system": ("resources", "", "")}
+        iface.on_input({"type": "region", "id": "ground"})
+        iface.on_input({"type": "region", "id": "cpu-system"})
+        self.assertEqual(asked, [("look", "terminal"), ("open", "resources")])
+        from kos import blocks
+        frame, hits, regions = iface.render()
+        ids = [r["id"] for r in regions]
+        if "ground" in ids:
+            self.assertEqual(ids[-1], "ground")                                              # last: anything standing on it wins
+
     def test_a_homography_inverse_finds_where_in_a_quad_a_point_is(self):
         from kos.quad import point_in_quad, polygon_area, unproject_quad
         quad = [(100, 100), (200, 100), (200, 150), (100, 150)]
