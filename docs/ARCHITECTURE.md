@@ -129,7 +129,14 @@ its child - the child inherits Landlock, the empty network namespace and no_new_
 executable (`exec_scratch`) because their runtime unpacks there; the sandbox now also allows symlinks in scratch. The converter never executes anything,
 drops setuid bits, resolves symlinks inside the package only, ignores maintainer scripts, scans the result and refuses a flagged one.
 
-## The 3D look: blocks (`kos/blocks.py`, `kos/shell.py`)
+## The 3D look: blocks, waterfalls, the lake (`kos/blocks.py`, `kos/shell.py`)
+Block tops are plain glass; the terminal lives in `matrix_texture`: **waterfalls** (`transparent=True`, alpha only where a character is) hang from the bottom edge of
+each window/dock/sidebar/popup block at its front plane down to the ground (`Block.fall`, `fall_quad`), the **ground** is a matrix plane running toward the viewer
+with a brighter, denser `river` down the middle, and `Shell._system_blocks` puts the **Kernel** and **Hardware** blocks on that river (`Block.opens` = the app a
+click opens). `Shell._block_action` resolves a click: a block's front face wins, else a waterfall (-> `open_commands` -> the `commands` app with the app name as its line),
+else the normal flat mapping. The camera pivot slides toward the lake as the pitch rises so the lake stays in view; the rain advances at `max(0.25 s, 3 x the last frame cost)`.
+The 3D pointer is the cursor app drawing a cone and a cylinder (`poly` facets), snapping to point down while a button is held.
+
 `Shell._layer_blocks` makes one `Block` per shown layer: its front texture (`_front_texture`: glass layers painted over the wallpaper and given a
 rounded alpha mask; layers with no glass painted over black and over white to recover transparency), its height (`BLOCK_HEIGHT`, windows by size) and
 `z_back` = the highest block beneath it that overlaps it (windows rest on panels, not on each other; they stack by a small step). `blocks.render` draws
