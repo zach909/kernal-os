@@ -28,8 +28,8 @@ from .display import Framebuffer, parse_color
 
 ACCENT = "#0078d4"
 BORDER = "#5b6475"
-LOOKS = ("normal", "3d", "vr", "mr", "neural", "text", "terminal")
-IMMERSIVE = ("vr", "mr", "neural")        # these reach for sensors or a headset: entering one always asks for the password
+LOOKS = ("normal", "3d", "vr", "ar", "neural", "text", "terminal")
+IMMERSIVE = ("vr", "ar", "neural")        # add-on looks: off until you enable the add-on (`kos addon`). They reach for sensors or a headset: entering one always asks for the password
 
 
 @dataclass
@@ -101,7 +101,7 @@ def draw_ring(fb: Framebuffer, rect: tuple[int, int, int, int], u: int = 1) -> N
         fb.rect(dx, dy, rw, rh, col)
 
 
-# ------------------------------------------------------------------------- virtual / mixed reality
+# ------------------------------------------------------------------------- virtual / augmented reality
 DEPTH = {"wallpaper": 0, "plain": 1, "top": 1, "widget": 1, "bar": 2, "dock": 2, "sidebar": 3, "popup": 3, "window": 3,
          "overlay": 4, "cursor": 5}
 
@@ -119,7 +119,7 @@ def hsqueeze(fb: Framebuffer) -> Framebuffer:
 
 
 def has_passthrough(shell) -> bool:
-    """Is the wallpaper layer showing camera pixels (a ``blit``)? That is what mixed reality calls passthrough."""
+    """Is the wallpaper layer showing camera pixels (a ``blit``)? That is what augmented reality calls passthrough."""
     wall = shell.wallpaper_layer()
     return bool(wall and any(op[0] == "blit" for op in wall.ops))
 
@@ -129,7 +129,7 @@ def render_stereo(shell, mixed: bool) -> Framebuffer:
     sidebar nearer, effects and the pointer nearest): each eye sees it shifted by that depth's disparity, and moving the
     pointer turns your head, which slides the far layers more than the near ones - so panels float in front of the picture.
     Each eye is squeezed to half width (the usual half side-by-side format; a headset runtime widens it again and adds the
-    lens correction). Mixed reality is the same, but the wallpaper is the camera's passthrough when a camera driver
+    lens correction). Augmented reality is the same, but the wallpaper is the camera's passthrough when a camera driver
     provides one. Pure Python: the two eyes are composed once and cached until something changes."""
     from . import fbgfx
     W, H, u = shell.W, shell.H, shell.u
@@ -170,7 +170,7 @@ def render_stereo(shell, mixed: bool) -> Framebuffer:
             out.buf[(y * W + i * half_w) * 4:(y * W + i * half_w + eye.width) * 4] = eye.buf[y * eye.width * 4:(y + 1) * eye.width * 4]
     out.rect(half_w - u, 0, 2 * u, H, parse_color("#000000"))
     face = ttf.load("bold")
-    label = "MIXED REALITY" if mixed else "VIRTUAL REALITY"
+    label = "AUGMENTED REALITY" if mixed else "VIRTUAL REALITY"
     sub = ("passthrough: the camera shows behind the interface" if has_passthrough(shell)
            else "no camera driver: the interface floats over the plain wallpaper") if mixed else "side by side, one picture per eye - move the pointer to look around"
     if face:

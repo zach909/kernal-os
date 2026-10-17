@@ -4568,13 +4568,15 @@ from kos.kapp import Manifest  # noqa: E402
 
 
 class TestImmersiveLooks(Env):
-    """Virtual reality, mixed reality and the neural look: each asks for the password, none is restored at start, and a neural
+    """Virtual reality, augmented reality and the neural look: each asks for the password, none is restored at start, and a neural
     driver can only ever say next / prev / select / back / pause."""
 
     layer = TestLooksAndControls.layer
 
-    def shell_with(self, *answers, w=640, h=360):
+    def shell_with(self, *answers, w=640, h=360, addons=("vr", "ar", "neural")):
         from kos.shell import Shell
+        self.paths.ensure()
+        (self.paths.state / "addons.json").write_text(json.dumps({"enabled": list(addons)}))
         return Shell(self.paths, self.authority(*answers), HeadlessBackend(w, h), ScriptedDevices(), preboot=(),
                      keep_prompter=True)
 
@@ -4593,7 +4595,7 @@ class TestImmersiveLooks(Env):
         sh.set_look(look="vr", authorized=True)
         self.assertEqual(sh.cfg["look"], "vr")
         again = self.shell_with()                                                # a new session starts in a normal look
-        self.assertNotIn(again.cfg["look"], ("vr", "mr", "neural"))
+        self.assertNotIn(again.cfg["look"], ("vr", "ar", "neural"))
         wrong = self.shell_with("not the password", "still not", "no")
         ok, why = wrong.authorize_immersive("neural")
         self.assertFalse(ok)
@@ -4602,7 +4604,7 @@ class TestImmersiveLooks(Env):
     def test_a_sudo_window_does_not_stand_in_for_the_password(self):
         sh = self.shell_with(PW, "x", "x", "x")                                  # one answer opens the window; none left for the look
         sh.authority.sudo_open(5, ("interface", "app", "command"))
-        ok, _ = sh.authorize_immersive("mr")
+        ok, _ = sh.authorize_immersive("ar")
         self.assertFalse(ok)
 
     def test_vr_renders_one_picture_per_eye_with_depth_and_leaves_the_layers_alone(self):
@@ -4624,9 +4626,9 @@ class TestImmersiveLooks(Env):
         sh.render()                                                              # the second frame comes from the cache
         self.assertIs(sh._stereo[1][0], sh._stereo[1][0])
 
-    def test_mixed_reality_says_whether_there_is_a_passthrough(self):
+    def test_augmented_reality_says_whether_there_is_a_passthrough(self):
         sh = self.shell_with(PW)
-        sh.set_look(look="mr", authorized=True)
+        sh.set_look(look="ar", authorized=True)
         from kos import looks
         self.assertFalse(looks.has_passthrough(sh))
         wall = self.layer(sh, "wallpaper", "wallpaper", (0, 0, 640, 360),
@@ -4678,7 +4680,7 @@ class TestImmersiveLooks(Env):
                    ["blit", 0, 0, 2, 2, 99, px], ["blit", 0, 0, 2, 2, 1, 5]):
             with self.assertRaises(ProtocolError, msg=str(op)[:40]):
                 validate_app_message({"cmd": "frame", "ops": [op]}, "graphical")
-        for look in ("vr", "mr", "neural"):
+        for look in ("vr", "ar", "neural"):
             validate_app_message({"cmd": "request", "action": "look", "op": "set", "look": look}, "graphical")
 
     def test_only_a_neural_driver_may_hold_the_neural_permission(self):
@@ -4989,3 +4991,65 @@ class TestBlocks3D(Env):
         validate_app_message({"cmd": "request", "action": "look", "op": "set", "blocks": False}, "graphical")
         with self.assertRaises(ProtocolError):
             validate_app_message({"cmd": "request", "action": "look", "op": "set", "blocks": "yes"}, "graphical")
+
+
+class TestAddons(Env):
+    """VR, AR and the neural interface are add-ons: absent by default, enabled only with the kernel-layer password."""
+
+    def shell(self):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(PW), HeadlessBackend(320, 180), ScriptedDevices(), preboot=(), keep_prompter=True)
+
+    def test_nothing_is_enabled_by_default_and_the_looks_are_refused(self):
+        from kos.addons import Addons
+        self.assertEqual(Addons(self.paths).enabled(), frozenset())
+        sh = self.shell()
+        for look in ("vr", "ar", "neural"):
+            ok, why = sh.authorize_immersive(look)
+            self.assertFalse(ok)
+            self.assertIn(f"kos addon enable {look}", why)
+            sh.set_look(look=look, authorized=True)                                    # even a typed password cannot skip the add-on
+            self.assertEqual(sh.cfg["look"], "normal")
+
+    def test_enabling_asks_the_kernel_password_every_time_even_in_a_sudo_window(self):
+        from kos import auth
+        from kos.addons import Addons, AddonError
+        self.assertEqual(auth.LAYER_OF["addon.enable"], "kernel")
+        self.assertIn("addon.enable", auth.NEVER_REMEMBERED)
+        self.assertIn("addon.disable", auth.NEVER_REMEMBERED)
+        a = self.authority(PW, PW)
+        ad = Addons(self.paths)
+        ad.enable(a, "vr")
+        self.assertEqual(ad.enabled(), {"vr"})
+        self.assertEqual(ad.looks(), {"vr"})
+        a.sudo_open(5, ("interface", "app", "command"))                                  # a sudo window answered the PW above
+        with self.assertRaises(Exception):
+            ad.disable(a, "vr")                                                          # still asks: there is no answer left
+        self.assertEqual(ad.enabled(), {"vr"})
+        with self.assertRaises(AddonError):
+            ad.enable(self.authority(PW), "toaster")
+
+    def test_an_enabled_addon_allows_its_look_with_the_look_password_and_disabling_leaves_it(self):
+        from kos.addons import Addons
+        Addons(self.paths).enable(self.authority(PW), "neural")
+        sh2 = self.shell()
+        self.assertEqual(sh2._addon_looks(), {"neural"})
+        ok, _ = sh2.authorize_immersive("neural")                                        # the look itself still asks for the password
+        self.assertTrue(ok)
+        sh2.set_look(look="neural", authorized=True)
+        self.assertEqual(sh2.cfg["look"], "neural")
+        self.assertFalse(sh2.authorize_immersive("vr")[0])                               # the other add-ons stay off
+        Addons(self.paths).disable(self.authority(PW), "neural")
+        sh2._addon_step(1e9)
+        self.assertEqual(sh2.cfg["look"], "normal")                                      # turned off: back to normal at once
+
+    def test_the_cli_lists_them_off_and_the_appearance_app_hides_their_looks(self):
+        out = _sp.run([sys.executable, "-m", "kos", "addon", "list"], cwd=str(Path(__file__).resolve().parent.parent),
+                      env={**os.environ, "KOS_ROOT": str(self.paths.root)}, capture_output=True, text=True)
+        self.assertIn("off  vr", out.stdout, out.stderr)
+        self.assertIn("off  ar", out.stdout)
+        self.assertIn("off  neural", out.stdout)
+        js = (SYSTEM_DIR / "appearance" / "app.js").read_text()
+        self.assertIn("options.addons", js)
+        sh = self.shell()
+        self.assertEqual(sh._addon_looks(), frozenset())

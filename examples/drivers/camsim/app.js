@@ -1,7 +1,7 @@
 'use strict';
 // camsim: a camera EMULATOR. It fills the wallpaper slot with a synthetic "room" (a gradient, a moving
 // light and a few boxes) sent as raw pixels, the way a real camera driver would send its frames.
-// Mixed reality shows the interface floating in front of whatever the wallpaper is; with a real camera
+// Augmented reality shows the interface floating in front of whatever the wallpaper is; with a real camera
 // driver in this slot that is the world behind you. This one is labelled as an emulator on screen.
 //
 // A real driver ("driver": "camera") would name its video node in "devices" (for example /dev/video0),

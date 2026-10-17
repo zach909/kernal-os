@@ -171,10 +171,13 @@ pure-Python TrueType rasterizer (`kos/ttf.py`, exact-coverage anti-aliasing) usi
 the app windows' *content* is still the older text-mode pages (now drawn in a smooth monospace font), and a few
 widget details still use the pixel font.
 
-### Seven looks, one set of controls
+### Four looks, and three add-on looks
 
-`Appearance` (or `kos desktop shot --look`) switches the whole interface between seven looks; the choice is remembered (except the three
-immersive ones, below). **Ctrl-Up** looks down at the looks as a stack of cards (interface in front, text and terminal behind); click one to pick it.
+`Appearance` (or `kos desktop shot --look`) switches the whole interface between four looks - normal, 3d, text, terminal; the choice is remembered. Three more -
+**virtual reality, augmented reality and the neural interface** - are **add-ons**: not part of the default system, off until you run
+`kos addon enable vr|ar|neural` (list them with `kos addon`). Enabling or disabling one needs your password every time (kernel layer: a sudo window does
+not stand in for it); entering the look afterwards asks again. An add-on is not code loaded into the OS: it turns on a look the compositor already knows how
+to draw, and the hardware side lives in separate sandboxed driver apps. Turning one off puts the interface back to a normal look at once. **Ctrl-Up** looks down at the looks as a stack of cards (interface in front, text and terminal behind); click one to pick it.
 
 * **normal** - glass, pills, smooth type.
 * **3d** - **everything is a solid block**. Every window, the menubar, the dock, the sidebar, each widget and the launcher is a box standing on the
@@ -187,15 +190,15 @@ immersive ones, below). **Ctrl-Up** looks down at the looks as a stack of cards 
   turns into a homography of its texture, so every face is filled scanline by scanline from its texture (`kos/blocks.py`). *Honest limits:* pure
   Python - a frame is composed once and cached, so orbiting is a few frames a second, not smooth; blocks are boxes, not arbitrary meshes; there is no
   colour-emoji font, so emoji are not drawn (icons and text are).
-* **vr** - virtual reality: **one picture per eye**, side by side (half-width each, the usual half side-by-side format). Every layer sits at a depth -
+* **vr** (add-on) - virtual reality: **one picture per eye**, side by side (half-width each, the usual half side-by-side format). Every layer sits at a depth -
   the wallpaper far away, windows and the sidebar nearer, effects and the pointer nearest - and each eye sees it shifted by that depth's disparity;
   moving the pointer turns your head, which slides the far layers more than the near ones. *Not here:* head tracking from a headset's sensors, lens
   correction, 90 Hz (it is pure Python: the two eyes are composed once and cached). A headset appears as one more display, which the extra-displays
   layer already handles; its sensors would come in through an `"driver": "xr"` app like the others. None was available to test.
-* **mr** - mixed reality: the same stereo view, but the wallpaper is a **camera passthrough** when a camera driver app fills the wallpaper slot (it
+* **ar** (add-on) - augmented reality: the same stereo view, but the wallpaper is a **camera passthrough** when a camera driver app fills the wallpaper slot (it
   sends frames with the new `blit` op) - the interface floats over the world. With no camera driver it says so on screen and floats over the plain
   wallpaper. `examples/drivers/camsim` is a camera *emulator* (a synthetic room), labelled as one; no real camera driver is included.
-* **neural** - a surface neural interface (an EEG band, an EMG wristband): a highlight **scans the buttons on its own** (every 1.4 s), and one signal
+* **neural** (add-on) - a surface neural interface (an EEG band, an EMG wristband): a highlight **scans the buttons on its own** (every 1.4 s), and one signal
   - a blink, a clench, a thought the driver recognises - presses. A **neural driver** is an app with `"driver": "neural"` and the `neural`
   permission; it may send exactly five decisions (`next`, `prev`, `select`, `back`, `pause`), only while this look is on, at most ~12 a second.
   **The OS never receives or asks for the signal**: it stays inside the driver's sandbox, which has no network and no files. `examples/drivers/neurosim`
@@ -221,7 +224,7 @@ require its manifest to hold **exactly** the scopes that code uses: no more, no 
 
 ### Every layer asks for your password
 
-**Entering the virtual-reality, mixed-reality or neural look asks for the password every time** (it reaches for a headset, a camera or a neural
+**Entering the virtual-reality, augmented-reality or neural look (add-ons) asks for the password every time** (it reaches for a headset, a camera or a neural
 device): a sudo window does not stand in for it, "interface: don't ask" does not skip it, and it is never restored at the next start. A driver's
 device node is given only after its own password (`app.device`), exactly as for every hardware driver. **Each app also has its own folder**
 (`<state>/appdata/NAME/`, `KOS_DATA_DIR`, `app.data_dir()`): persistent, writable by that app alone (nothing else is mounted into it, checked

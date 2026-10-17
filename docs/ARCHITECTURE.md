@@ -146,10 +146,13 @@ reads an app's source for the requests it makes, so the test that each built-in 
 understated manifest. `kos services` prints `services.CORE` (what must stay outside the app model, and what each piece cannot do) and the app ledger.
 
 ## Immersive looks and neural intents (`kos/looks.py`, `kos/shell.py`, `kos/protocol.py`)
-`looks.IMMERSIVE = (vr, mr, neural)`. `Shell.set_look` refuses them unless `authorized=True`, which only `Shell.authorize_immersive` (the
+`looks.IMMERSIVE = (vr, ar, neural)` are **add-ons** (`kos/addons.py`): `<state>/addons.json` lists the enabled ones; `addon.enable`/`addon.disable` are
+kernel-layer, never-remembered actions; `Shell._addon_looks` is what may be entered, `_addon_step` leaves a look whose add-on was switched off, and the
+Appearance app is told (`options.addons`) which cards to show. Nothing is loaded into the compositor: an add-on only unlocks a look it already draws.
+`Shell.set_look` refuses them unless `authorized=True` and the add-on is on, which only `Shell.authorize_immersive` (the
 `look.immersive` action: interface layer, in `NEVER_REMEMBERED`, not in `KEYLESS`) gives; the saved layout never restores them. `render_stereo`
 shifts every layer's rect by `eye * depth * u` (plus a head-turn term from the pointer), composes each eye once (cached on the base signature and the
-quantised yaw), restores the rects, paints the pointer per eye (never cached) and squeezes each eye to half width. Mixed reality is the same with the
+quantised yaw), restores the rects, paints the pointer per eye (never cached) and squeezes each eye to half width. Augmented reality is the same with the
 wallpaper layer's `blit` pixels as the backdrop (`has_passthrough`). The neural look is the normal frame plus the focus ring and a card; `_neural_step`
 advances the scan on a dwell timer; `Shell.intent` accepts one of `protocol.INTENTS` from a layer whose app holds the `neural` permission - which a
 manifest may only have with `"driver": "neural"` - and only while the look is on, rate limited. The `blit` op (raw RGB, <= 96000 px, scaled up to 32x) is

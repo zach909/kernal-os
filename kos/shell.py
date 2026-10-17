@@ -189,7 +189,7 @@ class Shell:
         self.anim_ids: set[str] = set()
         self.nav, self.ring, self.typed = -1, False, ""
         self.neural: dict = {"last_step": 0.0, "paused": False, "last": "", "last_intent_t": 0.0}
-        self._stereo = None                                      # cached eyes of the virtual / mixed-reality look
+        self._stereo = None                                      # cached eyes of the virtual / augmented-reality look
         self.cam = [blocks.DEFAULT_YAW, blocks.DEFAULT_PITCH]    # the 3D look's camera: yaw, pitch (radians)
         self._blocks: list = []                                  # the blocks of the last 3D frame (for clicks)
         self._block_cache: Optional[tuple] = None                # (key, frame)
@@ -385,12 +385,12 @@ class Shell:
 
     def set_look(self, authorized: bool = False, **opts) -> dict:
         """Change the look or one of its options. Remembered across restarts (except the immersive looks). Every app is
-        sent a fresh ``hello`` so it redraws in the new look. The virtual, mixed-reality and neural looks need
+        sent a fresh ``hello`` so it redraws in the new look. The virtual-reality, augmented-reality and neural looks (add-ons) need
         ``authorized=True``, which only a typed password gives (see ``_authorize_immersive``)."""
         changed = False
         for k, v in opts.items():
-            if k == "look" and v in looks.IMMERSIVE and not authorized and v != self.cfg["look"]:
-                self.log.append(f"refused the {v} look: it needs the password")
+            if k == "look" and v in looks.IMMERSIVE and v != self.cfg["look"] and (not authorized or v not in self._addon_looks()):
+                self.log.append(f"refused the {v} look: " + ("its add-on is not enabled" if v not in self._addon_looks() else "it needs the password"))
                 continue
             if k == "look" and v in looks.LOOKS and v != self.cfg["look"]:
                 self.cfg["look"], changed = v, True
@@ -410,10 +410,16 @@ class Shell:
             self._touch_all()
         return dict(self.cfg)
 
+    def _addon_looks(self) -> frozenset:
+        from .addons import Addons
+        return Addons(self.paths).looks()
+
     def authorize_immersive(self, look: str) -> tuple[bool, str]:
-        """Entering a virtual-reality, mixed-reality or neural look always asks for the password (never remembered by a
+        """Entering a virtual-reality, augmented-reality or neural look always asks for the password (never remembered by a
         sudo window, not skipped when the interface layer is set to not ask): these looks reach for a headset, a camera or
         a neural device."""
+        if look not in self._addon_looks():
+            return False, f"the {look} look is an add-on and it is not enabled: kos addon enable {look}"
         try:
             self.authority.authorize("look.immersive", look).close()
         except Exception as e:                                   # AuthorizationDenied, a cancelled prompt, ...
@@ -540,7 +546,8 @@ class Shell:
             msg["insets"] = self.insets(layer.name)
             msg["font"] = _font_metrics()
             msg["look"] = self.cfg["look"]
-            msg["options"] = {k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "blocks", "side_tab")}
+            msg["options"] = {**{k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "blocks", "side_tab")},
+                              "addons": sorted(self._addon_looks())}
         layer.send(msg)
 
     HEAL_DELAYS = (1.0, 3.0, 8.0)                           # seconds before each restart attempt, then give up
@@ -672,7 +679,8 @@ class Shell:
                         want = {}
                 self.set_look(**want)
             layer.send({"cmd": "look", "look": self.cfg["look"],
-                        "options": {k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "blocks")}})
+                        "options": {**{k: self.cfg[k] for k in ("cursor_direction", "tilt", "bubbles", "blocks")},
+                                    "addons": sorted(self._addon_looks())}})
             return
         if action == "intent":
             ok, detail = self.intent(layer, msg["name"])
@@ -1489,8 +1497,8 @@ class Shell:
         if self.stack_open:
             return self._stack_frame()
         look = self.cfg["look"]
-        if look in ("vr", "mr"):
-            return looks.render_stereo(self, look == "mr")
+        if look in ("vr", "ar"):
+            return looks.render_stereo(self, look == "ar")
         if look in ("text", "terminal"):
             ctl = self.controls() if look == "terminal" else []
             sig = (look, self._base_signature(), self.nav, self.typed, self.ring, tuple(c.rect for c in ctl))
@@ -1679,7 +1687,7 @@ class Shell:
             progress = min(1.0, (time.monotonic() - n["last_step"]) / self.NEURAL_DWELL)
             looks.neural_hud(self, fb, ctl, self.nav, progress, {"paused": n["paused"], "last": n["last"],
                                                                  "driver": any(l.neural for l in self.layers.values())})
-        if not self.modal and self.cfg["look"] not in ("vr", "mr"):          # those looks draw the pointer once per eye
+        if not self.modal and self.cfg["look"] not in ("vr", "ar"):          # those looks draw the pointer once per eye
             cur = next((l for l in self.layers.values() if l.kind == "cursor" and l.visible and l.ops), None)
             if cur is not None:
                 self._paint_content(fb, cur)
@@ -1742,6 +1750,16 @@ class Shell:
         self._update_motion(time.monotonic())
         self._neural_step(time.monotonic())
         self._matrix_step(time.monotonic())
+        self._addon_step(time.monotonic())
+
+    def _addon_step(self, now: float) -> None:
+        """If the add-on behind the current look was turned off (``kos addon disable``), leave the look at once."""
+        if self.cfg["look"] not in looks.IMMERSIVE or now - getattr(self, "_addon_at", 0.0) < 1.0:
+            return
+        self._addon_at = now
+        if self.cfg["look"] not in self._addon_looks():
+            self.set_look(look="normal")
+            self.notify("desktop", "Add-on turned off", "The interface went back to a normal look.")
 
     NEURAL_DWELL = 1.4                    # seconds the scan rests on each control before moving on
 

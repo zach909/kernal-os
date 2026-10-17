@@ -1025,6 +1025,25 @@ def cmd_doctor(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_addon(args, paths: Paths) -> int:
+    """`kos addon list|enable NAME|disable NAME`: the add-ons (virtual reality, augmented reality, neural interface)."""
+    from .addons import ADDONS, Addons
+    ad = Addons(paths)
+    if args.addon_cmd == "list":
+        on = ad.enabled()
+        for name, a in ADDONS.items():
+            print(f"{'on ' if name in on else 'off'}  {name:<7} {a['title']}: {a['about']}")
+        print("\nAdd-ons are off by default. Enabling or disabling one needs your password every time.")
+        return 0
+    if not args.name:
+        raise KAppError(f"usage: kos addon {args.addon_cmd} NAME")
+    authority, prompter = _authority(paths)
+    (ad.enable if args.addon_cmd == "enable" else ad.disable)(authority, args.name)
+    prompter.close()
+    print(f"{args.name}: {'on' if args.addon_cmd == 'enable' else 'off'}")
+    return 0
+
+
 def cmd_services(args, paths: Paths) -> int:
     """`kos services`: what is the trusted core, and what every installed app may ask of the OS."""
     from . import services
@@ -1398,7 +1417,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--open", help="shot: comma-separated apps to open as windows")
     s.add_argument("--search", help="shot: text to type into the desktop search")
     s.add_argument("--wait", type=float, default=2.5, help="shot: seconds to let apps draw")
-    s.add_argument("--look", choices=["normal", "3d", "vr", "mr", "neural", "text", "terminal"], help="shot: the look to render in")
+    s.add_argument("--look", choices=["normal", "3d", "vr", "ar", "neural", "text", "terminal"], help="shot: the look to render in")
     s.add_argument("--point", help="shot: move the pointer to X,Y")
     s.add_argument("--click", help="shot: click at X,Y (the shot is taken a moment later, mid-effect)")
     s.add_argument("--orbit", help="shot: the 3D look's camera as YAW,PITCH in degrees (pitch 80 looks straight down at the blocks)")
@@ -1435,6 +1454,9 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    s = sub.add_parser("addon", help="add-on features, off by default: virtual reality, augmented reality, neural interface")
+    s.add_argument("addon_cmd", nargs="?", choices=["list", "enable", "disable"], default="list")
+    s.add_argument("name", nargs="?")
     sub.add_parser("services", help="the trusted core, and what every app may ask of the OS (nothing has power over everything)")
     sub.add_parser("encryption", help="is everything encrypted? disk, swap, RAM, scratch, backups - honestly")
     s = sub.add_parser("audit", help="show the authorization log")
@@ -1483,7 +1505,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "services": cmd_services, "audit": cmd_audit,
+            "cell": cmd_cell, "doctor": cmd_doctor, "encryption": cmd_encryption, "services": cmd_services, "addon": cmd_addon, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "provenance": cmd_provenance, "sources": cmd_sources, "updates": cmd_updates, "backup": cmd_backup, "offsite": cmd_offsite, "restore": cmd_restore, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop}
 

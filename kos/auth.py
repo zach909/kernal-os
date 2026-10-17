@@ -66,7 +66,9 @@ ACTIONS: dict[str, str] = {
     "code.run": "run code",
     "backup.create": "back up files",
     "backup.decrypt": "open an encrypted off-site backup",
-    "look.immersive": "switch to a virtual-reality, mixed-reality or neural look",
+    "look.immersive": "switch to a virtual-reality, augmented-reality or neural look",
+    "addon.enable": "turn on an add-on (virtual reality, augmented reality, neural interface)",
+    "addon.disable": "turn off an add-on",
     "sources.change": "change where software comes from",
     "updates.check": "check your software sources for updates",
     "updates.install": "update KOS itself",
@@ -92,7 +94,7 @@ ACTIONS: dict[str, str] = {
 LAYERS = ("interface", "app", "command", "kernel")
 LAYER_OF: dict[str, str] = {
     "session.login": "kernel", "device.mouse": "interface", "device.keyboard": "interface",
-    "device.desktop": "interface", "look.immersive": "interface",
+    "device.desktop": "interface", "look.immersive": "interface", "addon.enable": "kernel", "addon.disable": "kernel",
     "app.install": "app", "app.update": "app", "app.update.all": "app", "app.remove": "app", "app.run": "app",
     "app.graphical": "app", "app.open": "app", "app.close": "app", "app.permit": "app", "app.revoke": "app",
     "app.network": "app", "app.device": "app",
@@ -109,7 +111,7 @@ LAYER_OF: dict[str, str] = {
 NEVER_REMEMBERED = frozenset({"session.login", "auth.change", "app.permit", "app.revoke", "app.network", "app.device",
                               "sources.change", "backup.push", "backup.remote", "updates.install",
                               "admin.boot", "sudo.open", "policy.change", "cell.start", "cell.stop",
-                              "mod.enable", "mod.disable", "look.immersive"})
+                              "mod.enable", "mod.disable", "look.immersive", "addon.enable", "addon.disable"})
 KEYLESS = frozenset({"device.mouse", "device.keyboard", "device.desktop"})   # use no key: nothing is sealed
 SUDO_DEFAULT_MINUTES, SUDO_MAX_MINUTES = 5, 60
 SUDO_DEFAULT_LAYERS = ("interface", "app", "command")      # the kernel layer is never remembered
