@@ -47,7 +47,7 @@ NPM_ENTRY_RE = re.compile(r"^(?:npx:[A-Za-z0-9._-]{1,60}|[A-Za-z0-9:_-]{1,40})$"
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native", "npm", "bundle"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network", "system", "ticks", "shell", "pointer", "animate", "neural"}
+PERMISSIONS = {"network", "system", "ticks", "shell", "pointer", "animate", "neural", "assist"}
 # Interface slots a "mod" can fill (kos/mods.py decides what each may ask for).
 SLOTS = {"wallpaper", "menubar", "dock", "pins", "search", "widgets", "cursor", "effects", "sidebar", "launcher",
          "pins", "widget"}
@@ -55,7 +55,7 @@ BUNDLE_ENTRY_RE = re.compile(r"^[A-Za-z0-9._+-][A-Za-z0-9._+/-]{0,199}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description", "commands",
                   "args", "slot", "exec_scratch", "devices", "driver"}
 DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9_.*?/-]{1,60}$")
-DRIVER_KINDS = {"quantum", "xr", "camera", "neural"}
+DRIVER_KINDS = {"quantum", "xr", "camera", "neural", "assistant"}
 COMMAND_ID_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,60}$")
 MAX_COMMANDS = 24
 
@@ -148,6 +148,8 @@ class Manifest:
         driver = d.get("driver", "")
         if driver and driver not in DRIVER_KINDS:
             raise KAppError(f"driver must be one of {sorted(DRIVER_KINDS)}")
+        if "assist" in perms and driver != "assistant":
+            raise KAppError("the 'assist' permission (proposing plans for the owner to approve) is only for an assistant: \"driver\": \"assistant\"")
         if "neural" in perms and driver != "neural":
             raise KAppError("the 'neural' permission (sending intents to the interface) is only for a driver: \"driver\": \"neural\"")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],

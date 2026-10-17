@@ -143,7 +143,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     shell="shell" in app.manifest.permissions,
                     pointer="pointer" in app.manifest.permissions,
                     animate="animate" in app.manifest.permissions,
-                    neural="neural" in app.manifest.permissions)
+                    neural="neural" in app.manifest.permissions,
+                    assistant="assist" in app.manifest.permissions)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)

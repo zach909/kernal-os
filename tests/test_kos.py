@@ -5200,3 +5200,86 @@ int main(void) {
         status, out = self.run_line("c", 'FILE *f = fopen("/etc/shadow", "r");')
         self.assertEqual(status, 3)
         self.assertIn("blocked by the security scan", out)
+
+
+class TestAssistantPermission(Env):
+    """An AI assistant is an app that can only propose; nothing runs unless the owner types the password."""
+
+    layer = TestLooksAndControls.layer
+    sent = TestLooksAndControls.sent
+
+    def shell(self, *answers):
+        from kos.shell import Shell
+        return Shell(self.paths, self.authority(*answers), HeadlessBackend(320, 180), ScriptedDevices(), preboot=(), keep_prompter=True)
+
+    def test_a_plan_is_bounded_and_may_only_launch_and_look(self):
+        ok = validate_app_message({"cmd": "request", "action": "propose", "title": "t", "steps": [{"action": "open", "app": "files", "mode": "graphical"}]}, "graphical")
+        self.assertEqual(ok["steps"][0]["app"], "files")
+        too_many = [{"action": "apps"}] * 9
+        for bad in ([], too_many, [{"action": "save", "path": "/x", "text": "y"}], [{"action": "signal", "pid": 1, "sig": "KILL"}],
+                    [{"action": "sudo", "op": "open"}], [{"action": "permit", "app": "x"}], [{"action": "mods", "op": "enable", "name": "x"}],
+                    [{"action": "propose", "title": "x", "steps": [{"action": "apps"}]}], [{"action": "open"}], ["open files"], "open files"):
+            with self.assertRaises(ProtocolError, msg=str(bad)[:40]):
+                validate_app_message({"cmd": "request", "action": "propose", "title": "t", "steps": bad}, "graphical")
+
+    def test_only_an_assistant_may_hold_the_assist_permission(self):
+        base = {"name": "x", "version": "1", "runtime": "python", "entry": "m", "modes": ["graphical"]}
+        Manifest.parse(json.dumps({**base, "permissions": ["assist"], "driver": "assistant"}).encode())
+        for extra in ({"permissions": ["assist"]}, {"permissions": ["assist"], "driver": "neural"}):
+            with self.assertRaises(KAppError, msg=str(extra)):
+                Manifest.parse(json.dumps({**base, **extra}).encode())
+        shipped = Manifest.parse((Path(__file__).resolve().parent.parent / "examples" / "optional" / "assistant" / "manifest.json").read_bytes())
+        self.assertEqual((shipped.driver, shipped.scopes), ("assistant", {"apps"}))                 # it holds the one scope it uses
+
+    def test_an_app_that_is_not_an_assistant_cannot_propose(self):
+        sh = self.shell()
+        plain = self.layer(sh, "stranger", "plain", (0, 0, 10, 10), system=True, scopes=frozenset({"apps"}))
+        sh._on_request(plain, {"cmd": "request", "action": "propose", "title": "t", "steps": [{"action": "apps"}]})
+        msg = [m for m in self.sent(plain) if m.get("cmd") == "result"][-1]
+        self.assertFalse(msg["ok"])
+        self.assertIn("assist", msg["detail"])
+
+    def test_every_step_needs_a_scope_the_assistant_holds(self):
+        sh = self.shell()
+        ai = self.layer(sh, "assistant", "plain", (0, 0, 10, 10), system=True, scopes=frozenset({"apps"}), assistant=True)
+        sh._on_request(ai, {"cmd": "request", "action": "propose", "title": "t", "steps": [{"action": "ls", "path": "/"}]})
+        msg = [m for m in self.sent(ai) if m.get("cmd") == "result"][-1]
+        self.assertFalse(msg["ok"])
+        self.assertIn("system:files", msg["detail"])
+
+    def test_nothing_runs_without_the_password_and_a_sudo_window_does_not_approve(self):
+        sh = self.shell("not the password", "not it either", "no")
+        ai = self.layer(sh, "assistant", "plain", (0, 0, 10, 10), system=True, scopes=frozenset({"apps"}), assistant=True)
+        ran = []
+        sh.open_window = lambda name, cmd=None, **kw: ran.append(name)
+        plan = {"cmd": "request", "action": "propose", "title": "look", "steps": [{"action": "open", "app": "files", "mode": "graphical"}]}
+        sh._on_request(ai, plan)
+        msg = [m for m in self.sent(ai) if m.get("cmd") == "result"][-1]
+        self.assertFalse(msg["ok"])
+        self.assertIn("did not approve", msg["detail"])
+        self.assertEqual(ran, [])
+        from kos import auth
+        self.assertEqual(auth.LAYER_OF["assistant.plan"], "command")
+        self.assertIn("assistant.plan", auth.NEVER_REMEMBERED)                                     # a sudo window never approves a plan
+        sh2 = self.shell(PW)                                                                          # one answer: it opens the sudo window...
+        sh2.authority.sudo_open(5, ("interface", "app", "command"))
+        ai2 = self.layer(sh2, "assistant", "plain", (0, 0, 10, 10), system=True, scopes=frozenset({"apps"}), assistant=True)
+        ran2 = []
+        sh2.open_window = lambda name, cmd=None, **kw: ran2.append(name)
+        sh2._on_request(ai2, plan)                                                                    # ...and a plan still has to ask, with none left to give
+        self.assertEqual(ran2, [])
+
+    def test_an_approved_plan_runs_each_step_as_the_assistant_and_tells_the_owner_first(self):
+        sh = self.shell(PW)
+        ai = self.layer(sh, "assistant", "plain", (0, 0, 10, 10), system=True, scopes=frozenset({"apps"}), assistant=True)
+        ran = []
+        sh.open_window = lambda name, cmd=None, **kw: ran.append(name)
+        sh._on_request(ai, {"cmd": "request", "action": "propose", "title": "look around", "steps": [
+            {"action": "open", "app": "files", "mode": "graphical"}, {"action": "open", "app": "processes", "mode": "graphical"}]})
+        self.assertEqual(ran, ["files", "processes"])
+        self.assertTrue(any("awaiting your approval" in n["title"] for n in sh.notes))              # shown to the owner before it asked
+        msg = [m for m in self.sent(ai) if m.get("cmd") == "result" and m["action"] == "propose"][-1]
+        self.assertTrue(msg["ok"])
+        self.assertIn("ran 2", msg["detail"])
+        entries = [e["action"] for e in self.authority(PW).audit.entries()]
+        self.assertIn("assistant.plan", entries)                                                    # and it is in the audit log

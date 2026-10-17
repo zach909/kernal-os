@@ -141,6 +141,12 @@ and the middle-button drag call it; `_flat` unprojects a pointer position throug
 coordinates while the cursor is drawn where the pointer really is. `Framebuffer.apply(extrude=True)` gives text depth in this look. Gap: speed
 (cached per scene and camera, ~0.3-1 s a frame), no arbitrary meshes, no emoji font.
 
+## Assistants (`kos/shell.py` `_propose`, `kos/protocol.py` `PLAN_ACTIONS`)
+`propose` carries a title and 1-8 steps, each validated by the normal request validator and restricted to `PLAN_ACTIONS` (launch and look). `Shell._propose` requires
+`Layer.assistant` (the `assist` permission, which a manifest may hold only with `"driver": "assistant"`), requires `layer.allows(step)` for every step, announces the
+plan as a notification, then `authority.authorize("assistant.plan", ...)` - command layer, in `NEVER_REMEMBERED` - and only then replays each step through
+`_on_request` *as the assistant layer*, so its scopes and each step's own password still apply. A refused or cancelled prompt runs nothing.
+
 ## Scoped capabilities and the ledger (`kos/capabilities.py`, `kos/services.py`)
 `capabilities.ACTION_SCOPE` maps every OS request to one scope; a manifest holds `system:<scope>` permissions (`Manifest.scopes`; the bare `system` is
 `{"*"}` and fits no mod slot). `SystemBridge(scopes=...)` checks every request before dispatch, `Layer.allows(action)` gates the shell's own handlers and

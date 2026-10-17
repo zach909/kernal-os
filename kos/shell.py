@@ -110,6 +110,7 @@ class Layer:
     slot: str = ""                 # the interface slot it fills (its own name for built-ins; a mod's declared slot)
     pointer: bool = False          # is told about the pointer and where clicks land
     animate: bool = False          # may ask for animation ticks
+    assistant: bool = False        # an assistant: may propose plans (run only after the owner's password)
     neural: bool = False           # a neural driver: may send intents while the neural look is on
     rev: int = 0                   # bumps whenever what this layer shows changes
     cache: Optional[tuple] = None  # (signature, region rows) of its glass, before content
@@ -516,7 +517,8 @@ class Shell:
                       z=Z[kind] if kind != "window" else self._raise_z(), title=inst.name,
                       system=getattr(inst, "system", False), scopes=frozenset(getattr(inst, "scopes", None) or (["*"] if getattr(inst, "system", False) else [])), ticks=getattr(inst, "ticks", False),
                       shell=getattr(inst, "shell", False), pointer=getattr(inst, "pointer", False),
-                      animate=getattr(inst, "animate", False), neural=getattr(inst, "neural", False))
+                      animate=getattr(inst, "animate", False), neural=getattr(inst, "neural", False),
+                      assistant=getattr(inst, "assistant", False))
         if kind == "window":
             layer.ws = self.ws
         self.layers[layer.id] = layer
@@ -687,6 +689,8 @@ class Shell:
         if action == "intent":
             ok, detail = self.intent(layer, msg["name"])
             return result(ok, detail)
+        if action == "propose":
+            return self._propose(layer, msg, result)
         if action == "toggle":
             if not layer.shell:
                 return result(False, "this app does not have the 'shell' permission")
@@ -1691,6 +1695,34 @@ class Shell:
             return x, y
         b, lx, ly = hit
         return int(b.rect[0] + lx), int(b.rect[1] + ly)
+
+    def _propose(self, layer: Layer, msg: dict, result) -> None:
+        """An assistant's plan. It needs the assist permission; every step must be a launching/looking action the assistant also holds the scope
+        for; the owner is shown the plan and must type the password (never remembered, so a sudo window cannot approve it); then each step runs
+        *as the assistant* - with its scopes, and with whatever password that step needs on its own."""
+        if not layer.assistant:
+            return result(False, "this app is not an assistant (it does not have the 'assist' permission)")
+        steps = msg["steps"]
+        for st in steps:
+            if not layer.allows(st["action"]):
+                return result(False, f"the plan needs '{capabilities.needed(st['action'])}', which this assistant does not hold")
+        summary = "; ".join(self._describe_step(st) for st in steps)
+        self.notify(layer.name, "Plan awaiting your approval", f"{msg['title']}: {summary}"[:240])
+        try:
+            self.authority.authorize("assistant.plan", f"{layer.name}: {msg['title']} - {summary}"[:300]).close()
+        except Exception as e:                                   # a wrong password, a cancelled prompt
+            self.log.append(f"plan refused: {e}")
+            return result(False, "the owner did not approve the plan; nothing was run")
+        done = 0
+        for st in steps:
+            self._on_request(layer, st)                           # as the assistant: its scopes, and the step's own password
+            done += 1
+        result(True, f"approved: ran {done} step(s)")
+
+    @staticmethod
+    def _describe_step(st: dict) -> str:
+        bits = [st["action"]] + [str(st[k]) for k in ("app", "path", "id", "kind") if st.get(k)]
+        return " ".join(bits)[:60]
 
     def _block_action(self, x: int, y: int):
         """What a click at this screen point does in the 3D look, if it is on a waterfall, the Kernel or the Hardware: a function to call, else None.

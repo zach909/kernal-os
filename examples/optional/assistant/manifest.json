@@ -1,0 +1,10 @@
+{
+  "name": "assistant",
+  "version": "1.0",
+  "runtime": "npm",
+  "entry": "start",
+  "modes": ["graphical"],
+  "permissions": ["assist", "system:apps"],
+  "driver": "assistant",
+  "description": "An assistant that must ask permission: it proposes a plan; nothing runs unless you type your password. A rule-based stand-in for a model."
+}

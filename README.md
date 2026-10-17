@@ -217,6 +217,18 @@ All of this works because apps *declare* their controls with invisible `hit` ops
 frames it draws itself) into one list. In **every** look, **Tab** (when no window is focused) walks that list with a focus ring and **Enter** presses the
 control - the keyboard-only way around the interface. An app with no `hit` ops still shows its text in the text look but is not reachable from the keyboard.
 
+### AI assistants: an app that must ask permission
+
+An AI assistant is an ordinary KOS app with the `assist` permission (`"driver": "assistant"`). It has no password, no files, and no network unless you
+gave it some, and **no way to act on its own**: all it can do is *propose a plan* - up to eight steps, only launching and looking actions (open, focus,
+close, list, view, scan, system facts) - and the OS shows you the plan and asks for your password. If you do not type it, nothing happens. If you do, each
+step runs *as the assistant*, limited to the scopes the assistant holds (a plan step it has no scope for is refused outright) and asking for whatever
+password that step needs by itself. Saving, backing up, pushing, signalling, permitting, sudo, mods and the password policy cannot even appear in a plan.
+The approval is never remembered: a sudo window cannot approve a plan, and every plan lands in the audit log. `examples/optional/assistant` is a
+rule-based stand-in ("open files and processes"); a real model plugs in the same way - an assistant app you let reach its model (the network permission is
+asked for separately) that turns what you type into the same kind of plan. Nothing here makes an assistant smarter or safer to *believe*; it makes it
+unable to do anything you did not approve.
+
 ### Nothing has power over everything (`kos services`)
 
 The rule: **every service, system and part of KOS is an app, and nothing - the OS included - holds power over everything**, because things can be

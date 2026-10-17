@@ -226,6 +226,10 @@ class App:
     def request_restore(self, backup: str, member: str, to: str) -> None:
         self.send({"cmd": "request", "action": "restore", "backup": backup, "member": member, "to": to})
 
+    def request_propose(self, title: str, steps: list) -> None:
+        """An assistant (``"driver": "assistant"``, ``assist`` permission): put a plan to the owner. It runs only if they type the password."""
+        self.send({"cmd": "request", "action": "propose", "title": title, "steps": steps})
+
     def request_intent(self, name: str) -> None:
         """A neural driver (``"driver": "neural"``): one decision - next, prev, select, back or pause - made from the wearer's
         signals. The signals themselves never leave the driver."""

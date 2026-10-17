@@ -67,6 +67,8 @@ app -> OS
     {"cmd": "request", "action": "renice", "pid": N, "nice": 0..19}   (password)
     {"cmd": "request", "action": "animate", "on": bool}      (animate permission) ask for / stop ~24 'anim' events a second
     {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|ar|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles"|"blocks": bool}   (shell permission to set)
+    {"cmd": "request", "action": "propose", "title": str, "steps": [request, ...]}   (assist permission) a plan for the owner to approve with
+                                                              the password: at most 8 steps, only launching and looking actions
     {"cmd": "request", "action": "intent", "name": next|prev|select|back|pause}   (neural permission, neural look only) one decision
                                                               a neural driver made from the wearer's signals - never the signals
     {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
@@ -108,6 +110,9 @@ import re
 import socket
 from typing import Any
 
+# What an assistant may put in a plan: launching and looking, never changing. (Each step still needs the scope it names and its own password.)
+PLAN_ACTIONS = ("apps", "open", "focus", "close", "info", "sys", "netcheck", "ls", "view", "scan", "backups")
+MAX_PLAN_STEPS = 8
 INTENTS = ("next", "prev", "select", "back", "pause")      # what a neural driver may say: never raw signals
 MAX_LINE = 1 << 20
 MAX_LINES = 500
@@ -332,6 +337,16 @@ def _request(msg: dict) -> dict:
                         raise ProtocolError(f"look.{k} must be true or false")
                     out[k] = msg[k]
         return out
+    if action == "propose":
+        steps = msg.get("steps")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_PLAN_STEPS:
+            raise ProtocolError(f"a plan has 1 to {MAX_PLAN_STEPS} steps")
+        clean = []
+        for st in steps:
+            if not isinstance(st, dict) or st.get("action") not in PLAN_ACTIONS:
+                raise ProtocolError("a plan step is one of: " + ", ".join(PLAN_ACTIONS))
+            clean.append(_request({"cmd": "request", **st}))
+        return {"cmd": "request", "action": "propose", "title": clean_text(msg.get("title", ""), 80) or "a plan", "steps": clean}
     if action == "intent":
         if msg.get("name") not in INTENTS:
             raise ProtocolError(f"intent.name must be one of {', '.join(INTENTS)}")
