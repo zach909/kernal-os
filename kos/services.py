@@ -51,7 +51,7 @@ _METHOD_ACTION = {
     "Backups": "backups", "Restore": "restore", "Push": "push", "Remote": "remote", "Sys": "sys", "Signal": "signal",
     "Renice": "renice", "FsChange": "fschange", "Updates": "updates", "Notify": "notify", "NotifyClear": "notify",
     "NotifyDismiss": "notify", "Links": "links", "OpenLink": "openlink", "Quantum": "quantum", "AutoUpdate": "autoupdate",
-    "Heal": "heal", "Mods": "mods", "Policy": "policy", "Sudo": "sudo", "NetCheck": "netcheck", "Revoke": "revoke",
+    "Heal": "heal", "Mods": "mods", "Encryption": "encryption", "Services": "services", "Addons": "addons", "Policy": "policy", "Sudo": "sudo", "NetCheck": "netcheck", "Revoke": "revoke",
 }
 
 

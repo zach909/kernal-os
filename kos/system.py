@@ -246,6 +246,31 @@ class SystemBridge:
                            ("nothing wrong" if not found else f"{len(found)} problem(s): " + "; ".join(f["kind"] + " " + f["subject"] for f in found[:4])))
                 reply({"cmd": "heal", "findings": found, "fixed": rep.fixed, "left": rep.left, "summary": clean_text(summary, 300)})
                 return None
+            if action == "encryption":
+                from . import encryption
+                reply({"cmd": "encryption", "items": [{k: clean_text(str(v), 300) if isinstance(v, str) else v for k, v in i.as_dict().items()}
+                                                      for i in encryption.check()]})
+                return None
+            if action == "services":
+                from . import services
+                r = services.report(self.paths)
+                reply({"cmd": "services", "core": [{k: clean_text(v, 200) for k, v in c.items()} for c in r["core"]],
+                       "apps": [{"name": a["name"], "scopes": a["scopes"], "network": a["network"], "devices": a["devices"], "driver": a["driver"],
+                                 "slot": a["slot"]} for a in r["apps"]], "blanket": r["blanket"]})
+                return None
+            if action == "addons":
+                from .addons import ADDONS, AddonError, Addons
+                ad = Addons(self.paths)
+                try:
+                    if req["op"] == "enable":
+                        ad.enable(authority, req["name"])
+                    elif req["op"] == "disable":
+                        ad.disable(authority, req["name"])
+                except AddonError as e:
+                    return result(False, str(e))
+                on = ad.enabled()
+                reply({"cmd": "addons", "addons": [{"name": n, "title": a["title"], "about": a["about"], "enabled": n in on} for n, a in ADDONS.items()]})
+                return None
             if action == "mods":
                 from .mods import Mods, ModError
                 mods = Mods(self.paths)

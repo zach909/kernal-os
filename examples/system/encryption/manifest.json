@@ -1,0 +1,2 @@
+{ "name": "encryption", "version": "1.0", "runtime": "npm", "entry": "start", "modes": ["graphical"], "permissions": ["ticks", "system:os"],
+  "description": "Is everything encrypted? Disk, swap, RAM, scratch space, core dumps, hibernation, secrets in memory and off-site backups - honestly." }

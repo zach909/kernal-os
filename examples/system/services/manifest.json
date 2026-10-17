@@ -1,0 +1,2 @@
+{ "name": "services", "version": "1.0", "runtime": "npm", "entry": "start", "modes": ["graphical"], "permissions": ["system:security"],
+  "description": "The trusted core (the only parts that are not apps) and what every app may ask of the OS - nothing has power over everything." }

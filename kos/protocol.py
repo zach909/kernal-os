@@ -69,6 +69,9 @@ app -> OS
     {"cmd": "request", "action": "look", "op": "get"|"set", "look": normal|3d|vr|ar|neural|text|terminal, "cursor_direction"|"tilt"|"bubbles"|"blocks": bool}   (shell permission to set)
     {"cmd": "request", "action": "propose", "title": str, "steps": [request, ...]}   (assist permission) a plan for the owner to approve with
                                                               the password: at most 8 steps, only launching and looking actions
+    {"cmd": "request", "action": "encryption"}               is everything encrypted? (read-only report; system:os)
+    {"cmd": "request", "action": "services"}                 the trusted core and every app's scopes (system:security)
+    {"cmd": "request", "action": "addons", "op": "list"|"enable"|"disable", "name"}   add-ons; enable/disable ask the kernel-layer password (system:addons)
     {"cmd": "request", "action": "intent", "name": next|prev|select|back|pause}   (neural permission, neural look only) one decision
                                                               a neural driver made from the wearer's signals - never the signals
     {"cmd": "request", "action": "links", "op": "list"|"add"|"remove", "kind", "target", "title", "where": shelf|desktop, "id"}
@@ -448,6 +451,19 @@ def _request(msg: dict) -> dict:
         if op not in ("check", "fix"):
             raise ProtocolError("heal.op must be check or fix")
         return {"cmd": "request", "action": "heal", "op": op}
+    if action in ("encryption", "services"):
+        return {"cmd": "request", "action": action}
+    if action == "addons":
+        op = msg.get("op", "list")
+        if op not in ("list", "enable", "disable"):
+            raise ProtocolError("addons.op must be list, enable or disable")
+        out = {"cmd": "request", "action": "addons", "op": op}
+        if op != "list":
+            name = msg.get("name")
+            if not isinstance(name, str) or not re.match(r"^[a-z]{2,12}$", name):
+                raise ProtocolError("addons.name must be an add-on name")
+            out["name"] = name
+        return out
     if action == "mods":
         op = msg.get("op", "list")
         if op not in ("list", "enable", "disable"):

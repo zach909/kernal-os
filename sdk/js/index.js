@@ -132,6 +132,9 @@ class App {
   requestMods(op = 'list', name = '') { this.send({ cmd: 'request', action: 'mods', op, ...(op !== 'list' ? { name } : {}) }); }
   requestPolicy(op = 'get', iface = '') { this.send({ cmd: 'request', action: 'policy', op, ...(op === 'set' ? { interface: iface } : {}) }); }
   requestPropose(title, steps) { this.send({ cmd: 'request', action: 'propose', title, steps }); }
+  requestEncryption() { this.send({ cmd: 'request', action: 'encryption' }); }
+  requestServices() { this.send({ cmd: 'request', action: 'services' }); }
+  requestAddons(op = 'list', name = '') { this.send({ cmd: 'request', action: 'addons', op, ...(op !== 'list' ? { name } : {}) }); }
   requestSudo(op = 'status', minutes = 5, layers = ['interface', 'app', 'command']) { this.send({ cmd: 'request', action: 'sudo', op, ...(op === 'open' ? { minutes, layers } : {}) }); }
   requestResize(w = 0, h = 0) { this.send({ cmd: 'request', action: 'resize', ...(w ? { w: Math.round(w) } : {}), ...(h ? { h: Math.round(h) } : {}) }); }
   requestLayout(order, hidden) { this.send({ cmd: 'request', action: 'layout', order, hidden }); }
