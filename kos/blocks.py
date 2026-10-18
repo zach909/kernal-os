@@ -412,17 +412,22 @@ def render(out: Framebuffer, backdrop: Texture, blocks: list[Block], cam: Camera
             while t.w > 2.2 * span and t.w > 8:                   # far away or foreshortened: use a smaller copy
                 t = t.halved()
             fill_face(out, quad, t)
-    # the waterfalls: each app's own words falling from its bottom edge to the ground, over everything behind them
-    for b in sorted((b for b in blocks if b.fall and b.rect[1] + b.rect[3] < H - 4), key=lambda b: b.depth):
-        x0, y0, w, h = b.rect
-        zf = b.z_front
-        quad = [cam.project(x0, y0 + h, zf)[:2], cam.project(x0 + w, y0 + h, zf)[:2], cam.project(x0 + w, H, zf)[:2], cam.project(x0, H, zf)[:2]]
-        b.fall_quad = quad
-        if polygon_area(quad) ** 2 < 4:
-            continue
-        fh = max(8, (H - (y0 + h)) // 2)
-        fill_face(out, quad, matrix_texture(b, max(8, w // 2), fh, matrix_t, u, px=max(6, 6 * u), transparent=True))
+        if b.fall and b.rect[1] + b.rect[3] < H - 4:
+            _waterfall(out, cam, b, H, matrix_t, u)               # its terminal falls to the ground now: nearer blocks paint over it
     return seen
+
+
+def _waterfall(out: Framebuffer, cam: Camera, b: Block, H: int, matrix_t: float, u: int) -> None:
+    """A block's terminal falling from its bottom edge to the ground. Drawn with the block, in depth order, so a block nearer the viewer
+    covers it: the rain only ever shows where nothing stands in front of it."""
+    x0, y0, w, h = b.rect
+    zf = b.z_front
+    quad = [cam.project(x0, y0 + h, zf)[:2], cam.project(x0 + w, y0 + h, zf)[:2], cam.project(x0 + w, H, zf)[:2], cam.project(x0, H, zf)[:2]]
+    b.fall_quad = quad
+    if polygon_area(quad) ** 2 < 4:
+        return
+    fh = max(8, (H - (y0 + h)) // 2)
+    fill_face(out, quad, matrix_texture(b, max(8, w // 2), fh, matrix_t, u, px=max(6, 6 * u), transparent=True))
 
 
 def unproject(blocks: list[Block], x: float, y: float) -> Optional[tuple[Block, float, float]]:
