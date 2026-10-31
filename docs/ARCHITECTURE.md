@@ -75,6 +75,18 @@ following ones via `preboot`.
 Gap: the desktop's first-session password also covers every later app it
 switches to for *devices*; opening an app still always asks.
 
+## Vault (`kos/vault.py`)
+The sandbox's only writable place is a cache wiped on exit, so apps could never keep anything. The vault is
+the OS-mediated answer: an app with the `storage` permission sends `{"cmd":"vault","op":"put|get|list|delete",
+"id":N,"key":..,"value":..}`; the *session* (not the app) validates it (`protocol._vault`), checks it was given
+a `Vault` (built by `cli._vault_for` from the installed manifest, never from anything the app says), does the
+disk I/O under `<state>/vault/<app>/`, and replies. Keys are `[a-z0-9._-]{1,64}` (no traversal), items are
+capped at 400k chars / 500 items / 64 MiB per app. `sdk.App.vault_*` are blocking round trips that keep any
+other event that arrives meanwhile.
+Gaps: values are clear text on the (LUKS2) volume, not sealed with the password-derived key (the session does
+not hold the master key while an app runs); an app cannot read another app's vault, so apps that conceptually
+belong together (mail client/server, calendar/automation) do not exchange data; cells get no vault.
+
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short
 list of hand-written regex rules (reverse shells, obfuscated

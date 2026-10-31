@@ -50,7 +50,7 @@ from .admin import AdminError, WriteBlocked
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
-from .kapp import KAppError, pack
+from .kapp import KApp, KAppError, pack
 from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
@@ -219,8 +219,9 @@ def cmd_run(args, paths: Paths) -> int:
     prompter.close()
     try:
         bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge)
+                            bridge=bridge, vault=vault)
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -261,8 +262,14 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
     bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    perms = ()
+    try:
+        perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
+    except (KAppError, OSError):
+        pass
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True, bridge=bridge, **session_kwargs)
+                        detach_on_interrupt=True, bridge=bridge,
+                        vault=_vault_for(paths, inst.name, perms), **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:
@@ -481,6 +488,11 @@ def _build_surface(mode, name, term):
         return (GraphicalSurface(backend, status_in_frame=True),
                 EvdevDevices(backend.width, backend.height))
     return GraphicalSurface(TerminalBackend(1, cols, rows)), TerminalDevices(term, cell_to_pixels=True)
+
+
+def _vault_for(paths: Paths, name: str, permissions):
+    from .vault import Vault
+    return Vault(paths, name) if "storage" in permissions else None
 
 
 def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) -> int:

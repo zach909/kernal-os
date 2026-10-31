@@ -39,6 +39,32 @@ power on
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
+## Productivity suite
+
+149 products were asked for (document/spreadsheet/slides editors, mail, calendar, databases, project and
+security tools, AI assistants, ...). **144 are built as apps; 5 are not, with the reason in the catalogue.**
+Honest breakdown: 51 full, 93 partial (a real, useful part - the catalogue says exactly what is missing),
+5 not built. See [docs/CATALOG.md](docs/CATALOG.md) for every product, its app name and its scope.
+
+```
+bin/suite list                list every product, scope and app name
+bin/suite build DIR           pack one .kapp per app into DIR
+kos install DIR/document-editor.kapp && kos permit document-editor && run document-editor
+```
+
+How it fits the security model: apps are ordinary sandboxed `.kapp`s (manifest + 3-line launcher); all code
+lives in `kos/office`, on every app's import path like `kos.sdk`. Apps keep data in the **vault**
+(`kos/vault.py`): a new `storage` manifest permission lets an app *ask* the OS (a `vault` command) to put/get/
+list/delete named text items in a per-app directory. No password prompt (the run permit + password at launch
+still apply), no paths, size/count caps, apps cannot see each other's vaults. AI apps additionally declare
+`network` (password at launch) and work **without** a model using local deterministic tools; connect a model
+in the app's settings for open-ended answers.
+
+What is real vs. what is not: SQL is real SQLite; spreadsheets have a real formula parser (no `eval`); mail has
+a real delivery pipeline; TOTP matches RFC 6238; the audit log is hash-chained; search is BM25. What is not:
+anything needing audio/video/camera/screen/other machines (conferencing, voice, capture, scanning, speech) and
+anything that needs two apps or two people to share live data - every app is single-user and local.
+
 ## Commands
 
 ```

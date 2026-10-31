@@ -19,6 +19,8 @@ OS -> app
     {"cmd": "apps", "installed": [{name, version, description, modes, permitted}],
                     "open": [{id, name, mode, status}]}                  (answer to request apps)
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
+    {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?}
+                                                       (answer to a vault command)
     {"cmd": "quit"}
 
 app -> OS
@@ -32,6 +34,8 @@ app -> OS
     {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
+    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete", "key": str?, "value": str?}
+                                         durable per-app storage (needs the 'storage' permission)
     {"cmd": "exit", "code": int}
 
 ``request`` is how an app does anything beyond drawing: it *asks*. The OS only
@@ -116,6 +120,30 @@ def _request(msg: dict) -> dict:
     raise ProtocolError(f"unknown request {action!r}")
 
 
+VAULT_OPS = ("put", "get", "list", "delete")
+_VAULT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MAX_VAULT_VALUE = 400_000
+
+
+def _vault(msg: dict) -> dict:
+    op, ident = msg.get("op"), msg.get("id")
+    if op not in VAULT_OPS:
+        raise ProtocolError(f"vault.op must be one of {VAULT_OPS}")
+    ident = _int(ident, 0, 2**31)
+    out = {"cmd": "vault", "op": op, "id": ident}
+    if op != "list":
+        key = msg.get("key")
+        if not isinstance(key, str) or not _VAULT_KEY_RE.match(key):
+            raise ProtocolError("vault.key must be a plain lowercase name")
+        out["key"] = key
+    if op == "put":
+        value = msg.get("value")
+        if not isinstance(value, str) or len(value) > MAX_VAULT_VALUE:
+            raise ProtocolError("vault.value must be text")
+        out["value"] = value        # data, never displayed by the OS: not stripped
+    return out
+
+
 def validate_app_message(msg: Any, mode: str) -> dict:
     if not isinstance(msg, dict) or not isinstance(msg.get("cmd"), str):
         raise ProtocolError("message must be an object with a 'cmd'")
@@ -139,6 +167,8 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return {"cmd": "log", "msg": clean_text(msg.get("msg", ""), 2000)}
     if cmd == "request":
         return _request(msg)
+    if cmd == "vault":
+        return _vault(msg)
     if cmd == "exit":
         return {"cmd": "exit", "code": _int(msg.get("code", 0), 0, 255)}
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")
