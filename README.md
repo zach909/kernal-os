@@ -7,7 +7,7 @@ password in from a script.
 
 ## Rules
 
-These two rules govern every change to KOS. A change that breaks one is wrong.
+These three rules govern every change to KOS. A change that breaks one is wrong.
 
 1. **Everything needs verification.**
    - In the OS: every action goes through `Authority.authorize(action, target)`
@@ -22,7 +22,6 @@ These two rules govern every change to KOS. A change that breaks one is wrong.
    the OS only through the command protocol (`request` for system functions,
    with the `system` permission and a permit). The OS core stays small: auth,
    sandbox, devices, protocol. The taskbar and App Library are the model.
-
 3. **Every connection is blocked by default.** Any connection between anything
    (app to internet, app to app, app to cell, the OS to the internet, inbound
    listeners, any protocol, any port) is denied until a firewall rule allows it.
