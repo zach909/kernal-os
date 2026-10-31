@@ -35,6 +35,12 @@ These three rules govern every change to KOS. A change that breaks one is wrong.
    - Using a privilege asks at the moment of use, after the password that ran
      the app, in the OS's own prompt. Grants last until the app exits unless
      you explicitly make one permanent (which costs a password).
+   - Every connection is encrypted and verifiable. Plain-text connections
+     (`http://`, FTP, anything unencrypted) are refused, never silently
+     upgraded. The peer's certificate and host name must verify, with no
+     "continue anyway" and no switch to turn it off. A redirect may not move
+     from encrypted to plain.
+   - The browser tells you on every page that websites can see your IP address.
    - Every allowed and every blocked attempt goes in the audit log.
 
 ### Where the code does not meet the rules yet
@@ -44,7 +50,7 @@ Honest list, so nobody assumes these are covered:
 | Rule | Gap |
 |---|---|
 | Verification | Run with no password: `list`, `ps`, `activity`, `audit`, `owed`, `cell list`, `scan file`, `ls`, `pack`, `doctor`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
-| Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. |
+| Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
 | Everything is an app | The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
 
 ## How it works

@@ -1301,3 +1301,68 @@ class TestCodeIsACommand(Env):
         self.run_line("x = 5", "assignment", PW)
         _, out = self.run_line("print(x)", "code call", PW)
         self.assertIn("NameError", out)
+
+
+def _load_web():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("kos_web_example", EXAMPLE.parent / "web" / "web.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestWebBrowserRules(unittest.TestCase):
+    """Every connection is encrypted and verified; the page says sites see your IP."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.web = _load_web()
+
+    def test_plain_http_is_refused_not_upgraded(self):
+        with self.assertRaises(ValueError) as cm:
+            self.web.check_url("http://example.com")
+        self.assertIn("not encrypted", str(cm.exception))
+
+    def test_bare_domain_means_https(self):
+        self.assertEqual(self.web.check_url("example.com/x"), "https://example.com/x")
+
+    def test_other_schemes_are_refused(self):
+        for u in ("ftp://example.com", "file:///etc/passwd", "javascript:alert(1)"):
+            with self.assertRaises(ValueError, msg=u):
+                self.web.check_url(u)
+
+    def test_redirect_to_http_is_refused(self):
+        import urllib.request
+        h = self.web._HttpsOnlyRedirects()
+        req = urllib.request.Request("https://example.com/")
+        with self.assertRaises(ValueError):
+            h.redirect_request(req, None, 302, "Found", {}, "http://example.com/")
+
+    def test_unverifiable_certificate_is_refused(self):
+        import http.server
+        import ssl
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            key, crt = f"{d}/k.pem", f"{d}/c.pem"
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                            "-keyout", key, "-out", crt, "-days", "1", "-subj", "/CN=localhost"],
+                           check=True, capture_output=True)
+            srv = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(crt, key)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            try:
+                with self.assertRaises(ValueError) as cm:
+                    self.web.fetch(f"https://localhost:{srv.server_address[1]}/")
+                self.assertIn("certificate", str(cm.exception))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_every_screen_says_sites_can_see_your_ip(self):
+        page = self.web.Page("https://example.com")
+        for args in ((None, False), (page, False), (page, True)):
+            lines = self.web.build_lines(args[0], args[1], 0, 10, "", "")
+            self.assertTrue(any(self.web.IP_NOTICE in l for l in lines), args)

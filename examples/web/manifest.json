@@ -5,5 +5,5 @@
   "entry": "web:main",
   "modes": ["tui"],
   "permissions": ["network"],
-  "description": "Text web browser: pages are folders of links you click through; 'run' shows the page"
+  "description": "Text web browser (https only, certificates verified): pages are folders of links you click through; 'run' shows the page"
 }
