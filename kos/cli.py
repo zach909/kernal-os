@@ -683,6 +683,66 @@ def cmd_write(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_convert(args, paths: Paths) -> int:
+    """Convert a Debian .deb into a .kapp. The package is analysed and scanned
+    first (a bad or unconvertible one is refused before any password prompt);
+    then the password is needed to write the result. Nothing is installed."""
+    from .debconv import MAX_DEB, DebError, convert
+    src, out = Path(args.file), Path(args.output)
+    if os.path.lexists(out):
+        raise KAppError(f"{out} already exists; refusing to overwrite it")
+    with open(src, "rb") as f:
+        data = f.read(MAX_DEB + 1)
+    try:
+        kapp, report = convert(data, args.exe)
+    except DebError as e:
+        raise KAppError(str(e)) from None
+    authority, prompter = _authority(paths)
+    authority.authorize("app.convert", report.kapp_name).close()
+    prompter.close()
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(kapp)
+    print(report.summary())
+    print(f"wrote {out}. Next: kos install {out}   (scans again, asks for the password, seals)")
+    return 0
+
+
+def cmd_skills(args, paths: Paths) -> int:
+    """Make agent skills from the installed apps and the commands. One password
+    (``skill.make``) verifies every app's seal. Printing writes nothing; with
+    --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
+    from .skillmaker import collect_apps, command_inventory, make_skills
+    authority, prompter = _authority(paths)
+    manifests, skipped = collect_apps(paths, authority)
+    prompter.close()
+    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    for line in skipped + refused:
+        print(line, file=sys.stderr)
+    if not args.out:
+        for rel, text in files.items():
+            print(f"=== {rel}\n{text}")
+        return 0
+    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
+    out = Path(os.path.abspath(args.out))
+    if not out.is_dir() or out.is_symlink():
+        raise KAppError(f"{out} must be an existing directory (not a symlink)")
+    kb = AdminKeyboard(paths)
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)
+    try:
+        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        wauth = Authority(paths, wprompter)
+        for rel, text in files.items():
+            target = out / rel
+            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
+            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
+    finally:
+        if devices is not None:
+            devices.close()
+    return 0
+
+
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -813,6 +873,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.add_argument("--text", help="the text to write")
     s.add_argument("--stdin", action="store_true", help="read the content from standard input")
+    s = sub.add_parser("convert", help="convert a Debian .deb package into a .kapp (static programs only)")
+    s.add_argument("file", help="the .deb to convert")
+    s.add_argument("-o", "--output", required=True, help="the .kapp to create (must not exist)")
+    s.add_argument("--exe", help="which program in the package to run, e.g. usr/bin/hello")
+    s = sub.add_parser("skills", help="make agent skills from the installed apps and commands")
+    s.add_argument("--out", help="write SKILL.md files into this existing directory (guarded writes)")
     s = sub.add_parser("do", help="run one line of human language as one command")
     s.add_argument("words", nargs="+")
     s.add_argument("--explain", action="store_true", help="show how the line was understood")
@@ -831,7 +897,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
+            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert,
             "desktop": cmd_desktop}
 
 
