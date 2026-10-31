@@ -90,9 +90,11 @@ hostile-input test.
       input is rejected.
 - [ ] Tests added for the rule you touched (a refusal test, not just a happy
       path).
-- [ ] Ran `python3 -m unittest discover -s tests`. In sandboxed containers
-      about 14 tests already fail (no KVM, sandboxed-run tests); compare to a
-      baseline taken *before* your change and report any difference.
+- [ ] Ran `python3 -m unittest discover -s tests`. The whole suite should pass.
+      If something fails, take a baseline on the untouched branch first and
+      say which failures are yours. Never call a failure "the environment"
+      without finding its cause (the earlier "14 known failures" were a real
+      bug: `fcntl.F_ADD_SEALS` does not exist before Python 3.14).
 - [ ] README gaps table updated: say what is still not covered. Never claim a
       rule is met when it is only met in one example.
 - [ ] Reported honestly: what ran, what failed, what you did not test.

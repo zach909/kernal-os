@@ -683,6 +683,31 @@ def cmd_write(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_convert(args, paths: Paths) -> int:
+    """Convert a Debian .deb into a .kapp. The package is analysed and scanned
+    first (a bad or unconvertible one is refused before any password prompt);
+    then the password is needed to write the result. Nothing is installed."""
+    from .debconv import MAX_DEB, DebError, convert
+    src, out = Path(args.file), Path(args.output)
+    if os.path.lexists(out):
+        raise KAppError(f"{out} already exists; refusing to overwrite it")
+    with open(src, "rb") as f:
+        data = f.read(MAX_DEB + 1)
+    try:
+        kapp, report = convert(data, args.exe)
+    except DebError as e:
+        raise KAppError(str(e)) from None
+    authority, prompter = _authority(paths)
+    authority.authorize("app.convert", report.kapp_name).close()
+    prompter.close()
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(kapp)
+    print(report.summary())
+    print(f"wrote {out}. Next: kos install {out}   (scans again, asks for the password, seals)")
+    return 0
+
+
 def cmd_skills(args, paths: Paths) -> int:
     """Make agent skills from the installed apps and the commands. One password
     (``skill.make``) verifies every app's seal. Printing writes nothing; with
@@ -848,6 +873,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.add_argument("--text", help="the text to write")
     s.add_argument("--stdin", action="store_true", help="read the content from standard input")
+    s = sub.add_parser("convert", help="convert a Debian .deb package into a .kapp (static programs only)")
+    s.add_argument("file", help="the .deb to convert")
+    s.add_argument("-o", "--output", required=True, help="the .kapp to create (must not exist)")
+    s.add_argument("--exe", help="which program in the package to run, e.g. usr/bin/hello")
     s = sub.add_parser("skills", help="make agent skills from the installed apps and commands")
     s.add_argument("--out", help="write SKILL.md files into this existing directory (guarded writes)")
     s = sub.add_parser("do", help="run one line of human language as one command")
@@ -868,7 +897,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
-            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write, "skills": cmd_skills,
+            "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert,
             "desktop": cmd_desktop}
 
 

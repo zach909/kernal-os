@@ -28,6 +28,14 @@ from typing import Optional
 from .kapp import KApp
 from .sandbox import SandboxPolicy
 
+# Linux memfd sealing constants. Python only exposes these from 3.14; without
+# this fallback no app can launch on 3.13 or older (the values are kernel ABI
+# and do not change).
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = (
+    getattr(fcntl, "F_SEAL_SEAL", 0x1), getattr(fcntl, "F_SEAL_SHRINK", 0x2),
+    getattr(fcntl, "F_SEAL_GROW", 0x4), getattr(fcntl, "F_SEAL_WRITE", 0x8))
+
 SDK_DIR = str(Path(__file__).resolve().parent.parent)
 
 _BOOTSTRAP = r"""
@@ -47,8 +55,7 @@ def sealed_memfd(label: str, data: bytes) -> int:
         while view:
             n = os.write(fd, view)
             view = view[n:]
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS,
-                    fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL)
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)

@@ -61,5 +61,7 @@ what KOS promises means the computer does not unlock.
 ## Testing
 
 `TestSandboxedRun`, `TestCodeIsACommand`, `TestDesktopSessions` run real
-sandboxed processes; about 14 tests already fail in a container without KVM or
-a working sandboxed run. Take a baseline before your change and diff after.
+sandboxed processes and should all pass where Landlock and user namespaces
+exist. Memfd sealing needs `F_ADD_SEALS`, which Python exposes only from 3.14;
+`kos/loader.py` uses the Linux constant (1033) as a fallback. If a sandboxed
+test fails, find the cause before blaming the machine.
