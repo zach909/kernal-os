@@ -50,8 +50,10 @@ These four rules govern every change to KOS. A change that breaks one is wrong.
    the OS does. Every channel between separate parties is encrypted and
    authenticated.
 
-The agent skill `.claude/skills/kos-rules/SKILL.md` holds these rules as a
-checklist for AI agents working on this repo.
+Agent skills for AI agents working on this repo live in `.claude/skills/`:
+`kos-rules` (these rules as a checklist) and one per layer of the pipeline -
+`kos-graphics`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
+`kos-hardware`.
 
 ### Where the code does not meet the rules yet
 

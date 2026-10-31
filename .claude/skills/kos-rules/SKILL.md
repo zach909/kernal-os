@@ -58,6 +58,12 @@ or use one from memory. The standard library has no authenticated encryption;
 adding a vetted library (for example `cryptography`) is a decision for the
 owner. Ask before adding a dependency.
 
+## Layer skills
+
+One skill per layer of the pipeline; load the one you are changing:
+`kos-graphics`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
+`kos-hardware`.
+
 ## Generated skills
 
 `kos skills` (`kos/skillmaker.py`) makes skills from the installed apps and the
