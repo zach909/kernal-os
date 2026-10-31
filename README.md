@@ -5,6 +5,33 @@ through everything: **nothing happens without your password.** There are no
 background services, no cached logins, no autostart, and no way to feed a
 password in from a script.
 
+## Rules
+
+These two rules govern every change to KOS. A change that breaks one is wrong.
+
+1. **Everything needs verification.**
+   - In the OS: every action goes through `Authority.authorize(action, target)`
+     and needs the password typed for *that* action. A new command or feature
+     must add its action to `ACTIONS` in `kos/auth.py` and call `authorize`
+     before it does anything. A second kind of verification (a `requires`
+     dependency, a security scan, a signed seal) adds to the password; it never
+     replaces it.
+   - In the work: nothing is called done until it has been run and checked.
+     Tests pass, or the failure is reported as it is.
+2. **Everything is an app.** Features ship as sandboxed `.kapp`s that talk to
+   the OS only through the command protocol (`request` for system functions,
+   with the `system` permission and a permit). The OS core stays small: auth,
+   sandbox, devices, protocol. The taskbar and App Library are the model.
+
+### Where the code does not meet the rules yet
+
+Honest list, so nobody assumes these are covered:
+
+| Rule | Gap |
+|---|---|
+| Verification | Run with no password: `list`, `ps`, `activity`, `audit`, `owed`, `cell list`, `scan file`, `ls`, `pack`, `doctor`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
+| Everything is an app | The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
+
 ## How it works
 
 ```
