@@ -5,6 +5,13 @@ description: The KOS command protocol - every message between an app and the OS,
 
 # KOS command protocol (app commands)
 
+**This does:** carries every message between an app and the OS, treats each
+app message as hostile, and lets an app only *ask* the OS for system things.
+
+**So the AI:** adds a new command to the spec and the validator with bounds,
+picks the permission and password it needs, handles it in the OS and never in
+the app, and writes a test for the accepted shape and every rejection.
+
 Everything is a command. Newline-delimited JSON over a socket
 (`Channel` in `kos/protocol.py`). The module docstring is the spec; keep it in
 step with the code.

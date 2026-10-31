@@ -5,6 +5,14 @@ description: The rules every change to kernal-os (KOS) must follow - everything 
 
 # KOS rules
 
+**This does:** sets the four rules every change to KOS must follow
+(verification, everything is an app, connections blocked and encrypted, the
+pipeline encrypted).
+
+**So the AI:** reads the README rules first, applies the checklist at the
+bottom to its change, runs the tests against a baseline, and reports what is
+still not covered instead of claiming a rule is met.
+
 Read `README.md` ("Rules" and the gaps table) first. It is the source of truth;
 this skill is the checklist for applying it. If the README and the code
 disagree, say so and fix whichever is wrong. Do not paper over it.

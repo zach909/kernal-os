@@ -5,6 +5,14 @@ description: How clicks, pointer movement and keys reach a KOS app - the input l
 
 # KOS input (the button clicker layer)
 
+**This does:** reads the mouse and keyboard itself and hands the app a
+command (`key`, `pointer`, `button`, `scroll`), only after the owner booted
+that device with the password.
+
+**So the AI:** never passes a device or raw event into the sandbox, makes a
+new input a validated command tied to a booted device, keeps Ctrl-C and
+right-click with the OS, and tests with scripted devices.
+
 A click is never delivered to an app as a device. The OS reads the device and
 sends the app a **command**: `key`, `pointer`, `button`, `scroll`.
 

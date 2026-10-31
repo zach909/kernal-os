@@ -5,6 +5,14 @@ description: How KOS uses the Linux kernel - the sandbox that confines apps (Lan
 
 # KOS kernel layer
 
+**This does:** confines each app with the Linux kernel (Landlock,
+namespaces) and runs risky work in its own kernel cell, refusing to start if
+a protection can't be applied.
+
+**So the AI:** never weakens a layer to make a test pass, makes any new
+privilege a password-gated action asked for at the moment of use, and
+compares test failures to a baseline taken before the change.
+
 The OS sits between app commands and the kernel. An app never makes a kernel
 decision for itself: it is confined, and its only way out is the command channel.
 

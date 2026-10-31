@@ -5,6 +5,13 @@ description: Which KOS code is allowed to touch hardware - the screen (/dev/fb0)
 
 # KOS hardware layer
 
+**This does:** is the only code allowed to open the screen, input devices,
+KVM and the administrator keyboard.
+
+**So the AI:** adds no unprompted device open, closes every exclusive grab,
+keeps hardware out of the sandbox, and says plainly which hardware paths were
+tested with fakes and which were never exercised.
+
 Only the OS touches hardware. Apps get commands, never devices.
 
 | Hardware | Opened by | Notes |

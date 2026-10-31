@@ -5,6 +5,13 @@ description: How KOS draws - the graphics layer between an app's draw commands a
 
 # KOS graphics
 
+**This does:** turns an app's draw commands into pixels, and draws the
+password overlay and pointer on top where the app can't touch them.
+
+**So the AI:** validates every new draw op and bounds it, never lets app
+pixels land after the overlay, and tests with the headless backend because
+this container has no screen.
+
 An app never draws. It sends `screen` (text page) or `frame` (shapes) commands;
 the OS rasterizes them into a framebuffer **it owns**, then draws the things
 only the OS may draw on top: the mouse pointer and the trusted password overlay.
