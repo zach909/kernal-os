@@ -1801,6 +1801,28 @@ class TestDebBuild(unittest.TestCase):
             again = self.bd.build(Path(t2))
             self.assertEqual(again.read_bytes(), self.deb.read_bytes())
 
+    def test_control_file_is_strictly_well_formed(self):
+        """dpkg -i is stricter than dpkg-deb -I: every line is 'Field: value'
+        or a continuation starting with a space. (A first description line
+        without its leading space passed -I but failed a real install.)"""
+        import re
+        from kos.debconv import _ar_members, _member, _tar
+        _, blob = _member(_ar_members(self.deb.read_bytes()), "control.tar")
+        with _tar(blob, "control") as t:
+            text = t.extractfile("./control").read().decode()
+        self.assertTrue(text.endswith("\n"))
+        for line in text.rstrip("\n").split("\n"):
+            self.assertTrue(re.match(r"^[A-Za-z][A-Za-z0-9-]*: ?\S?", line) or line[:1] in " \t", line)
+        self.assertNotIn("\n\n", text)
+
+    def test_real_dpkg_dry_run_install_when_root(self):
+        import shutil
+        import subprocess
+        if not shutil.which("dpkg") or os.geteuid() != 0:
+            self.skipTest("needs dpkg and root for a dry-run install")
+        r = subprocess.run(["dpkg", "--no-act", "-i", str(self.deb)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_real_dpkg_accepts_it_when_available(self):
         import shutil
         import subprocess

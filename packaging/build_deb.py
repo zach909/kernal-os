@@ -148,7 +148,7 @@ def build(out_dir: Path) -> Path:
     data_tar = _tar_gz(entries, mtime)
 
     # --- control.tar ---
-    description = ("A security-first operating system layer on the Linux kernel: nothing happens\n"
+    description = (" A security-first operating system layer on the Linux kernel: nothing happens\n"
                    " without your password. Apps are zip files that are never unzipped, run in a\n"
                    " sandbox, and talk to the OS only through a command protocol.\n"
                    " .\n"
