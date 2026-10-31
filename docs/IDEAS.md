@@ -9,6 +9,14 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **Backup follow-ups.** Encrypt blob bodies with a password-derived key
+  instead of relying on LUKS2 + 0700 (needs a streaming AEAD; stdlib has none,
+  so this wants the Rust port first). Restore a whole folder/snapshot in one
+  password rather than per item. A "share this folder with the app" permission
+  (see the per-resource permissions item below) so the `backup` app could be
+  handed a folder instead of asking the OS to read a path. Garbage-collect
+  orphan bodies after a crash between index write and blob delete.
+
 - **npm/Node apps as `.kapp`s.** Today a `.kapp` app is either Python
   (imported straight from the zip) or a static native binary (run from a
   sealed memfd). Node can't import straight from a zip the way Python can,
@@ -88,6 +96,18 @@ land instead of getting lost in chat.
 
 ## Shipped
 
+- **Backup, as a KOS app (`kos backup`, `examples/backup`).** The Universal
+  Backup System's core idea - content-addressed dedup - brought in under KOS's
+  rules. Engine in `kos/backup.py`: bodies stored once per SHA-256, scanned
+  before they are stored, index HMAC-sealed, bodies re-hashed on read, every
+  action password-gated, restore through the guarded write and never
+  overwriting. The `backup` app is a `system`-permission front-end: a sandboxed
+  app can't read files or keep state, so it asks the OS. Deliberately *not*
+  brought over: the HTTP server, user accounts/JWTs, cloud-provider connectors,
+  the browser extension and the mock ad-earnings ledger - they conflict with
+  "no background services, no network without your password" and were never
+  backup logic.
+
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
   command in the user's own language, and code is a command too (run sandboxed,
   never on the host); `requires` (unlock requires the keyboard requires the
@@ -136,7 +156,9 @@ land instead of getting lost in chat.
 A password is asked for anything that *starts, stops, changes, or reveals
 the contents of* something: `open`, `close`, `boot desktop`, `cat`/`view`,
 `install`, `update`(`all`), `remove`, `run`, `permit`(`--revoke`),
-`optimize`, starting `scan watch`, booting a device. Plain listings don't
+`optimize`, starting `scan watch`, booting a device, and every `backup`
+action (`add`, `list`, `remove`, `restore` - listing too, since file names are
+private; restore asks twice: once to read the vault, once for the guarded write). Plain listings don't
 ask (`ps`, `ls`, `list`, `doctor`, `audit`, `activity`, `permit --list`,
 `scan file`) - `scan file` is read-only in the same sense `kos list` is,
 even though it's a security check, because it changes nothing and reveals

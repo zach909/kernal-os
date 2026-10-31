@@ -277,6 +277,28 @@ _LEXICON: dict[str, dict[str, str]] = {
         "zh": "管理员 管理員",
         "ja": "管理者",
     },
+    "backup": {
+        "en": "backup back-up",
+        "es": "respalda respaldar",
+        "fr": "sauvegardez archivez",
+        "de": "sichere sichern",
+        "pt": "salvaguarde",
+        "it": "salvataggio",
+        "ru": "бэкап резервируй",
+        "zh": "备份 備份",
+        "ja": "バックアップ",
+    },
+    "restore": {
+        "en": "restore recover",
+        "es": "restaura restaurar recupera recuperar",
+        "fr": "restaure restaurer récupère récupérer",
+        "de": "stelle-wieder wiederherstellen",
+        "pt": "restaure restaurar recupere recuperar",
+        "it": "ripristina ripristinare",
+        "ru": "восстанови восстановить",
+        "zh": "恢复 恢復 还原 還原",
+        "ja": "復元",
+    },
     "help": {
         "en": "help ?",
         "es": "ayuda",
@@ -540,6 +562,10 @@ def interpret(line: str) -> Line:
         argv = ["permit", "--revoke", *args]
     elif verb == "desktop":
         argv = ["boot", "desktop"]
+    elif verb == "backup":
+        argv = ["backup", *args]
+    elif verb == "restore":
+        argv = ["backup", "restore", *args]
     else:
         argv = [verb, *args]
     return Line("command", argv=tuple(argv), verb=verb, language=language, word=word)
