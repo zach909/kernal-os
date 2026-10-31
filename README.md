@@ -23,6 +23,21 @@ These two rules govern every change to KOS. A change that breaks one is wrong.
    with the `system` permission and a permit). The OS core stays small: auth,
    sandbox, devices, protocol. The taskbar and App Library are the model.
 
+3. **Every connection is blocked by default.** Any connection between anything
+   (app to internet, app to app, app to cell, the OS to the internet, inbound
+   listeners, any protocol, any port) is denied until a firewall rule allows it.
+   - Websites are blocked too. A site installed as an app follows the same
+     rules as any other app.
+   - The firewall is an app. It holds no power of its own: it asks the OS, and
+     every change needs the password. Enforcement stays in the OS, so the
+     firewall app being broken or hostile leaves the default at deny.
+   - A rule names one app, one host, one port and one protocol. No wildcards
+     unless typed out.
+   - Using a privilege asks at the moment of use, after the password that ran
+     the app, in the OS's own prompt. Grants last until the app exits unless
+     you explicitly make one permanent (which costs a password).
+   - Every allowed and every blocked attempt goes in the audit log.
+
 ### Where the code does not meet the rules yet
 
 Honest list, so nobody assumes these are covered:
@@ -30,6 +45,7 @@ Honest list, so nobody assumes these are covered:
 | Rule | Gap |
 |---|---|
 | Verification | Run with no password: `list`, `ps`, `activity`, `audit`, `owed`, `cell list`, `scan file`, `ls`, `pack`, `doctor`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
+| Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. |
 | Everything is an app | The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
 
 ## How it works
