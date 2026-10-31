@@ -1750,3 +1750,64 @@ class TestDebConvert(Env):
             proc.wait(10)
         self.assertTrue(any("hello from debian" in l for l in seen), seen)
         self.assertTrue(any("[exit 3]" in l for l in seen), seen)
+
+
+class TestDebBuild(unittest.TestCase):
+    """The repository itself, built into one .deb, obeys KOS's own rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parent.parent
+        if not (root / ".git").exists() or not (root / "packaging" / "build_deb.py").exists():
+            raise unittest.SkipTest("needs a git checkout (an installed copy has no .git)")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("build_deb", root / "packaging" / "build_deb.py")
+        cls.bd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.bd)
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.deb = cls.bd.build(Path(cls.tmp.name))
+        cls.root = root
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_every_committed_file_is_in_it_and_nothing_else(self):
+        import subprocess
+        from kos.debconv import parse_deb
+        d = parse_deb(self.deb.read_bytes())
+        committed = subprocess.run(["git", "-C", str(self.root), "ls-tree", "-r", "--name-only", "HEAD"],
+                                   capture_output=True, text=True, check=True).stdout.split("\n")
+        want = {f"usr/lib/kernal-os/{p}" for p in committed if p}
+        self.assertEqual(set(d.files), want)
+        self.assertEqual(d.control["Package"], "kernal-os")
+        self.assertEqual(d.control["Architecture"], "all")
+
+    def test_no_maintainer_scripts_no_setuid_symlinks_only_the_two_launchers(self):
+        from kos.debconv import parse_deb
+        d = parse_deb(self.deb.read_bytes())
+        self.assertEqual(d.scripts, [])                      # nothing runs at install or removal
+        self.assertTrue(all(not (mode & 0o7000) for _, mode in d.files.values()))
+        self.assertEqual(sorted(x.split(": ", 1)[1] for x in d.dropped),
+                         ["usr/bin/kos", "usr/bin/kos-run"])
+        self.assertFalse(any(p.startswith(("etc/", "lib/systemd", "var/")) for p in d.files))
+
+    def test_launchers_are_executable_and_the_build_is_reproducible(self):
+        from kos.debconv import parse_deb
+        d = parse_deb(self.deb.read_bytes())
+        for p in ("bin/kos", "bin/run", "boot/mkinitramfs.sh"):
+            self.assertTrue(d.files[f"usr/lib/kernal-os/{p}"][1] & 0o111, p)
+        with tempfile.TemporaryDirectory() as t2:
+            again = self.bd.build(Path(t2))
+            self.assertEqual(again.read_bytes(), self.deb.read_bytes())
+
+    def test_real_dpkg_accepts_it_when_available(self):
+        import shutil
+        import subprocess
+        if not shutil.which("dpkg-deb"):
+            self.skipTest("no dpkg-deb here")
+        for flag in ("--info", "--contents"):
+            r = subprocess.run(["dpkg-deb", flag, str(self.deb)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotRegex(subprocess.run(["dpkg-deb", "-c", str(self.deb)], capture_output=True,
+                                           text=True).stdout, r"(?m)^-.{2}[sS]")

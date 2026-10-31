@@ -102,6 +102,25 @@ power on
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
+## Install as a Debian package
+
+The whole repository builds into one `.deb`, from the last commit (so a version
+always means the same bytes; building twice gives identical files):
+
+```
+python3 packaging/build_deb.py          # -> dist/kernal-os_VERSION_all.deb
+sudo dpkg -i dist/kernal-os_*.deb       # installs files only
+kos setup                               # choose your password
+```
+
+It installs the tree under `/usr/lib/kernal-os/` with `kos` and `kos-run` in
+`/usr/bin`. It has **no maintainer scripts**, starts no service, touches
+nothing in `/etc` and creates no state, which is KOS's own rule applied to its
+package. Needs `python3 (>= 3.11)`; the full test suite was run from an
+extracted copy on 3.11, 3.12 and 3.13. Not done yet: a license (the repo has
+none, so the package ships no copyright file), a changelog, and an apt
+repository.
+
 ## Commands
 
 ```
