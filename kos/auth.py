@@ -65,6 +65,10 @@ ACTIONS: dict[str, str] = {
     "file.write": "write file",
     "code.run": "run code",
     "admin.boot": "boot the administrator keyboard",
+    "backup.add": "back up",
+    "backup.list": "list backups",
+    "backup.remove": "remove backup",
+    "backup.restore": "restore backup",
 }
 
 

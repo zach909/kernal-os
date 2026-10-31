@@ -1301,3 +1301,290 @@ class TestCodeIsACommand(Env):
         self.run_line("x = 5", "assignment", PW)
         _, out = self.run_line("print(x)", "code call", PW)
         self.assertIn("NameError", out)
+
+
+# ---------------------------------------------------------------------------
+# Backup: content-addressed, deduplicated, scanned, behind the password
+# ---------------------------------------------------------------------------
+from kos import backup as kbackup  # noqa: E402
+from kos.lang import interpret  # noqa: E402
+
+BACKUP_APP = Path(__file__).resolve().parent.parent / "examples" / "backup"
+
+
+class BackupEnv(AdminEnv):
+    def setUp(self):
+        super().setUp()
+        self.src = Path(self.tmp.name) / "src"
+        self.src.mkdir()
+        self.restore_dir = Path(self.tmp.name) / "restored"
+        self.restore_dir.mkdir()
+
+    def file(self, name, data):
+        p = self.src / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        return str(p)
+
+    def add(self, *paths, answers=(PW,)):
+        return kbackup.add(self.paths, self.authority(*answers), list(paths))
+
+    def blobs(self):
+        return [p for p in (self.paths.backup / "blobs").rglob("*") if p.is_file()]
+
+
+class TestBackupEngine(BackupEnv):
+    def test_the_same_bytes_are_stored_once_under_any_name(self):
+        a, b = self.file("a.txt", b"same body" * 100), self.file("copy/b.txt", b"same body" * 100)
+        r = self.add(a, b)
+        self.assertEqual((len(r.stored), r.new_bodies, r.deduplicated), (2, 1, 1))
+        self.assertEqual(r.saved_bytes, 900)
+        self.assertEqual(len(self.blobs()), 1)
+        _, stats = kbackup.snapshot(self.paths, self.authority(PW))
+        self.assertEqual((stats.items, stats.unique_blobs), (2, 1))
+        self.assertEqual((stats.logical_bytes, stats.stored_bytes, stats.saved_bytes), (1800, 900, 900))
+
+    def test_readding_unchanged_is_a_noop_and_a_changed_file_is_a_new_version(self):
+        p = self.file("a.txt", b"v1")
+        self.add(p)
+        r = self.add(p)
+        self.assertEqual((len(r.stored), r.unchanged), (0, 1))
+        Path(p).write_bytes(b"v2")
+        r = self.add(p)
+        self.assertEqual((len(r.stored), r.new_bodies), (1, 1))
+        items, _ = kbackup.snapshot(self.paths, self.authority(PW))
+        self.assertEqual([i.size for i in items], [2, 2])
+        self.assertEqual(len(self.blobs()), 2)
+
+    def test_directories_are_walked_and_symlinks_and_kos_state_are_skipped(self):
+        self.file("d/one.txt", b"1")
+        self.file("d/sub/two.txt", b"2")
+        os.symlink("/etc/hostname", self.src / "d" / "link")
+        self.paths.ensure()
+        secret = self.paths.etc / "auth-copy.json"
+        secret.write_text("salt")
+        r = self.add(str(self.src / "d"), str(secret))
+        self.assertEqual(sorted(os.path.basename(i.path) for i in r.stored), ["one.txt", "two.txt"])
+        why = dict(r.skipped)
+        self.assertIn("symlink", why[str(self.src / "d" / "link")])
+        self.assertIn("system state", why[str(secret)])
+
+    def test_every_action_needs_the_password_and_a_wrong_one_changes_nothing(self):
+        p = self.file("a.txt", b"x")
+        with self.assertRaises(AuthorizationDenied):
+            self.add(p, answers=("no", "no", "no"))
+        self.assertFalse((self.paths.backup / "index.json").exists())
+        self.assertEqual(self.blobs(), [])
+        self.add(p)
+        with self.assertRaises(AuthorizationDenied):
+            kbackup.snapshot(self.paths, self.authority("no", "no", "no"))
+        item = kbackup.snapshot(self.paths, self.authority(PW))[0][0]
+        with self.assertRaises(AuthorizationDenied):
+            kbackup.remove(self.paths, self.authority("no", "no", "no"), item.id)
+        self.assertEqual(len(self.blobs()), 1)
+        actions = [e["action"] for e in self.authority().audit.entries()]
+        for a in ("backup.add", "backup.list"):
+            self.assertIn(a, actions)
+
+    def test_flagged_files_are_reported_and_never_stored(self):
+        good, bad = self.file("ok.txt", b"fine"), self.file("bad.bin", EICAR)
+        r = self.add(good, bad)
+        self.assertEqual([os.path.basename(i.path) for i in r.stored], ["ok.txt"])
+        self.assertEqual([p for p, _ in r.flagged], [bad])
+        self.assertEqual(len(self.blobs()), 1)
+        self.assertIn("FLAGGED", r.summary())
+
+    def test_remove_deletes_a_body_only_when_the_last_item_using_it_goes(self):
+        a, b = self.file("a.txt", b"shared"), self.file("b.txt", b"shared")
+        self.add(a, b)
+        i1, i2 = kbackup.snapshot(self.paths, self.authority(PW))[0]
+        _, gone = kbackup.remove(self.paths, self.authority(PW), i1.id)
+        self.assertFalse(gone)
+        self.assertEqual(len(self.blobs()), 1)
+        _, gone = kbackup.remove(self.paths, self.authority(PW), i2.id)
+        self.assertTrue(gone)
+        self.assertEqual(self.blobs(), [])
+        with self.assertRaises(kbackup.BackupError):
+            kbackup.remove(self.paths, self.authority(PW), i2.id)
+
+    def test_an_edited_index_is_refused(self):
+        self.add(self.file("a.txt", b"hello"))
+        index = self.paths.backup / "index.json"
+        doc = json.loads(index.read_text())
+        doc["items"][0]["path"] = "/etc/shadow"
+        index.write_text(json.dumps(doc))
+        with self.assertRaises(kbackup.VaultTamperedError):
+            kbackup.snapshot(self.paths, self.authority(PW))
+        with self.assertRaises(kbackup.VaultTamperedError):       # adding can't launder it either
+            self.add(self.file("b.txt", b"x"))
+
+    def test_a_modified_body_is_refused_when_read(self):
+        self.add(self.file("a.txt", b"original"))
+        self.blobs()[0].write_bytes(b"swapped!")
+        item = kbackup.snapshot(self.paths, self.authority(PW))[0][0]
+        with self.assertRaises(kbackup.VaultTamperedError):
+            kbackup.fetch(self.paths, self.authority(PW), item.id)
+
+    def test_vault_files_are_private(self):
+        self.add(self.file("a.txt", b"x"))
+        self.assertEqual(oct(self.blobs()[0].stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct((self.paths.backup / "index.json").stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(self.paths.backup.stat().st_mode & 0o777), "0o700")
+
+
+class TestBackupRestore(BackupEnv):
+    def setUp(self):
+        super().setUp()
+        self.kb_ = self.booted()
+        self.add(self.file("note.txt", b"remember me"))
+        self.item = kbackup.snapshot(self.paths, self.authority(PW))[0][0]
+
+    def restore(self, ident=None, dest=None, **kw):
+        # one password to read the vault, one more for the guarded write
+        return kbackup.restore(self.paths, self.authority(PW), self.authority(PW), self.kb_,
+                               ident or self.item.id, dest or str(self.restore_dir), **kw)
+
+    def test_restore_goes_through_the_guarded_write_and_round_trips(self):
+        item, report = self.restore()
+        out = self.restore_dir / "note.txt"
+        self.assertEqual(out.read_bytes(), b"remember me")
+        self.assertEqual(report.path, str(out))
+        self.assertIn("reclaimed", report.optimize_summary)      # scan + optimize both ran
+        from kos.requires import Ledger
+        self.assertEqual(Ledger(self.paths).owed(), [])
+
+    def test_restore_never_overwrites(self):
+        (self.restore_dir / "note.txt").write_bytes(b"precious")
+        with self.assertRaises(kbackup.BackupError):
+            self.restore()
+        self.assertEqual((self.restore_dir / "note.txt").read_bytes(), b"precious")
+
+    def test_restore_needs_the_admin_keyboard_and_asks_for_no_password_without_it(self):
+        from kos.admin import AdminError
+        auth = self.authority()                       # no answers: any prompt would blow up
+        with self.assertRaises(AdminError):
+            kbackup.restore(self.paths, auth, auth, self.kb(boot_id=lambda: "other-boot"),
+                            self.item.id, str(self.restore_dir))
+        self.assertEqual(list(self.restore_dir.iterdir()), [])
+
+    def test_restore_refuses_a_body_that_now_scans_as_flagged(self):
+        with self.assertRaises(kbackup.BackupError):
+            self.restore(scanner=lambda data, label: scan_bytes(EICAR, label))
+        self.assertEqual(list(self.restore_dir.iterdir()), [])
+
+    def test_restore_into_kos_state_is_refused_by_the_guarded_write(self):
+        from kos.admin import AdminError
+        self.paths.ensure()
+        with self.assertRaises(AdminError):
+            self.restore(dest=str(self.paths.state))
+
+
+class TestBackupApp(BackupEnv):
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+
+    def ask(self, req, *answers):
+        SystemBridge(self.paths).handle(req, self.sent.append, self.authority(*answers))
+        return self.sent[-1]
+
+    def test_the_app_packs_scans_clean_and_asks_only_for_system(self):
+        out = Path(self.tmp.name) / "backup.kapp"
+        m = pack(BACKUP_APP, out)
+        self.assertEqual((m.name, m.permissions), ("backup", ("system",)))
+        self.assertTrue(scan_bytes(out.read_bytes(), "backup").clean)
+        self.assertNotIn("network", m.permissions)
+
+    def test_requests_validate_and_hostile_ones_do_not(self):
+        for ok in ({"cmd": "request", "action": "backup"},
+                   {"cmd": "request", "action": "backup_add", "path": "/home/me/notes"},
+                   {"cmd": "request", "action": "backup_remove", "id": "0123456789ab"}):
+            self.assertEqual(validate_app_message(ok, "tui")["action"], ok["action"])
+        for bad in ({"cmd": "request", "action": "backup_add"},
+                    {"cmd": "request", "action": "backup_add", "path": ""},
+                    {"cmd": "request", "action": "backup_add", "path": "a\x00b"},
+                    {"cmd": "request", "action": "backup_add", "path": "x" * 2000},
+                    {"cmd": "request", "action": "backup_remove", "id": "../../etc"},
+                    {"cmd": "request", "action": "backup_remove", "id": "0123456789AB"}):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message(bad, "tui")
+
+    def test_listing_needs_the_password_typed_in_the_os_prompt(self):
+        self.add(self.file("a.txt", b"hello"), self.file("b.txt", b"hello"))
+        reply = self.ask({"cmd": "request", "action": "backup"}, "no", "no", "no")
+        self.assertFalse(reply["ok"])
+        self.assertNotIn("items", reply)
+        reply = self.ask({"cmd": "request", "action": "backup"}, PW)
+        self.assertEqual(reply["cmd"], "backup")
+        self.assertEqual((reply["stats"]["items"], reply["stats"]["saved"]), (2, 5))
+        self.assertEqual(len(reply["items"]), 2)
+        self.assertEqual(len(reply["items"][0]["sha256"]), 12)       # never the full hash or any bytes
+
+    def test_add_and_remove_by_request_each_need_the_password(self):
+        p = self.file("a.txt", b"hello")
+        reply = self.ask({"cmd": "request", "action": "backup_add", "path": p}, "no", "no", "no")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(self.blobs(), [])
+        reply = self.ask({"cmd": "request", "action": "backup_add", "path": p}, PW)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(len(self.blobs()), 1)
+        ident = self.ask({"cmd": "request", "action": "backup"}, PW)["items"][0]["id"]
+        reply = self.ask({"cmd": "request", "action": "backup_remove", "id": ident}, PW)
+        self.assertTrue(reply["ok"])
+        self.assertEqual(self.blobs(), [])
+
+    def test_a_flagged_add_through_the_app_reports_failure(self):
+        reply = self.ask({"cmd": "request", "action": "backup_add",
+                          "path": self.file("bad.bin", EICAR)}, PW)
+        self.assertFalse(reply["ok"])
+        self.assertIn("FLAGGED", reply["detail"])
+        self.assertEqual(self.blobs(), [])
+
+    def test_the_app_ui_only_asks(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("backup_app", BACKUP_APP / "app.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class FakeApp:
+            def __init__(self):
+                self.calls = []
+            def request_backup(self): self.calls.append(("list",))
+            def request_backup_add(self, p): self.calls.append(("add", p))
+            def request_backup_remove(self, i): self.calls.append(("rm", i))
+
+        app = FakeApp()
+        state = {"items": [{"id": "0123456789ab", "path": "/x/y", "size": 2048, "sha256": "ab"}],
+                 "stats": None, "loaded": True, "sel": 0, "typing": None, "note": ""}
+        mod.handle_key(app, state, "r")
+        mod.handle_key(app, state, "a")
+        for ch in "/x/y":
+            mod.handle_key(app, state, ch)
+        mod.handle_key(app, state, "enter")
+        mod.handle_key(app, state, "d")
+        self.assertEqual(app.calls, [("list",), ("add", "/x/y"), ("rm", "0123456789ab")])
+        state["typing"] = "partial"
+        self.assertFalse(mod.handle_key(app, state, "escape"))      # escape cancels typing, not the app
+        self.assertIsNone(state["typing"])
+        self.assertTrue(mod.handle_key(app, state, "escape"))
+        self.assertIn("1 item", mod.ratio_line({"items": 1, "unique": 1, "logical": 10,
+                                                "stored": 10, "saved": 0}))
+
+
+class TestBackupCommandLine(unittest.TestCase):
+    def test_parser_and_default_action(self):
+        p = kcli.build_parser()
+        self.assertIsNone(p.parse_args(["backup"]).bkact)
+        a = p.parse_args(["backup", "add", "x", "y"])
+        self.assertEqual((a.bkact, a.paths), ("add", ["x", "y"]))
+        a = p.parse_args(["backup", "restore", "0123456789ab", "/tmp"])
+        self.assertEqual((a.id, a.dest), ("0123456789ab", "/tmp"))
+
+    def test_human_language_maps_to_the_backup_command(self):
+        self.assertEqual(interpret("please backup add notes.txt").argv, ("backup", "add", "notes.txt"))
+        self.assertEqual(interpret("respalda add notes.txt").argv, ("backup", "add", "notes.txt"))
+        self.assertEqual(interpret("备份 add notes.txt").argv, ("backup", "add", "notes.txt"))
+        self.assertEqual(interpret("restore 0123456789ab /tmp").argv,
+                         ("backup", "restore", "0123456789ab", "/tmp"))
+        self.assertEqual(interpret("sauvegardez add x").verb, "backup")
+        self.assertEqual(interpret("sauvegarde x").verb, "write")        # existing word untouched

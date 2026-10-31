@@ -37,6 +37,7 @@ power on
 | Every line is a command | `kos/lang.py`, `kos/coderun.py`: a line of human language (en/es/fr/de/pt/it/ru/zh/ja) becomes exactly one structured `kos` command - never a shell string. A line of **code is a command too**: *run this line* - but never on the host. It is scanned, needs your password, and runs as a one-shot app in the usual sandbox (no files, no network, time limit, nothing carries over to the next line). `kos do WORDS...` runs one line; `kos line` is the shell; login starts it instead of `/bin/sh`. |
 | The OS is made of apps | `kos/desktop.py`, `kos/system.py`, `examples/system/`: the **taskbar** and the **App Library** are ordinary sandboxed apps. They never touch the screen or other apps - they *ask* the OS with a `request` command (needs the `system` permission in the manifest + a permit; opening/closing needs your password in the OS's own prompt). The **right mouse button is the App Library**, handled by the OS from any app. |
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
+| Backups (the backup app) | `kos/backup.py`, `examples/backup`: **content-addressed, deduplicated** backups. A file body is stored once under its SHA-256 no matter how many names or times it is added; every file is **scanned before it is stored** (flagged files never enter the vault); `add`/`list`/`remove`/`restore` each need the password; the index is HMAC-sealed with a password-derived key and every body is re-hashed when read, so tampering is refused. **Restore is a write**, so it goes through the guarded write (admin keyboard, scan, optimize) and never overwrites. The `backup` app is a sandboxed front-end that can't read files itself - it *asks* the OS (`system` permission) and the password is typed in the OS's own prompt. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
 ## Commands
@@ -64,6 +65,10 @@ kos update all --from DIR   update every installed app that's newer in DIR, all 
 kos optimize                 recompress apps, prune dead state, reclaim disk space
 kos admin [status|boot|lock] the elevated administrator keyboard (boots at login)
 kos write PATH --text T      write a file (needs the admin keyboard); owes a scan + optimize afterwards
+kos backup add PATH...       back up files/folders (scanned, stored once per content)
+kos backup [list]            what is backed up + what deduplication saved
+kos backup restore ID DIR    put one item back (guarded write, never overwrites)
+kos backup remove ID         forget one item (body deleted when nothing else uses it)
 kos owed / kos settle        what earlier writes still owe / do it now
 kos exec --code LINE         run one line of code as a sandboxed command
 kos do WORDS...              one line of human language, run as one command
@@ -89,7 +94,10 @@ desktop view unless you ask for one with `kos boot desktop`.
 (including `.kapp` apps) as one continuous tree - `cd`-ing into a zip is
 just another `cd`, and nothing is ever extracted to disk to look at it.
 
-Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
+Included apps: `examples/backup` (a front-end for `kos backup`: `kos pack
+examples/backup -o backup.kapp && kos install backup.kapp && kos permit backup`,
+then `run backup` - `r` lists, `a` adds a path, `d` removes; each asks the OS for
+your password), `examples/hello` (text + graphical + cmd-mode demo) and
 `examples/web` — a no-graphics browser: type a URL, the page appears as a
 folder of links you click through, type `run` to view the page text. Every
 page it fetches is scanned before you see it; the status line says so.
@@ -219,6 +227,17 @@ python3 -m unittest discover -s tests -v
   the OS prompt through a real broker); and the real CLI end to end through a
   pseudo-terminal (`desktop install`, `admin boot`, `write`, EICAR blocked,
   `boot desktop` with switching, right-click, launching from the library).
+* **Backup (this round):** dedup across names and re-adds, versions of a
+  changed file, directory walking (symlinks and KOS state skipped), password on
+  every action with nothing changed on a wrong one, flagged files never stored,
+  shared-body removal, a tampered index and a tampered body both refused,
+  restore through the guarded write (round trip, never overwrites, refused
+  before any password without the admin keyboard), the app's requests through
+  the bridge, and the real CLI through a pseudo-terminal. **Not run here:** the
+  `backup` app *running* inside the sandbox - this container's Python lacks
+  `fcntl.F_ADD_SEALS`, so no sandboxed app (existing ones too: 14 pre-existing
+  test failures) can start; the app's key handling and requests are unit-tested
+  instead.
 * **Written but not yet booted:** exclusive evdev capture for the admin
   keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the
   image builder, framebuffer/evdev on real hardware, starting KVM cells (no

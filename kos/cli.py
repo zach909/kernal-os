@@ -33,6 +33,10 @@
     kos audit                       show the authorization log
     kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
     kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
+    kos backup add PATH...          back up files/folders: scanned, stored once per content (password)
+    kos backup [list]               what is backed up and how much deduplication saved (password)
+    kos backup restore ID DIR       put one item back in DIR; guarded write, never overwrites
+    kos backup remove ID            forget one item (its body goes when nothing else uses it)
     kos do WORDS...                 one line of human language, run as one command
     kos line [--explain]            the line shell: every line you type is a command
 """
@@ -47,6 +51,7 @@ from pathlib import Path
 
 from . import loader
 from .admin import AdminError, WriteBlocked
+from .backup import BackupError, VaultTamperedError
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
@@ -683,6 +688,50 @@ def cmd_write(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_backup(args, paths: Paths) -> int:
+    """Deduplicated backups. Every action asks for the password; a restore is a
+    guarded write (admin keyboard, scan, optimize) and asks again for that."""
+    from . import backup
+    authority, prompter = _authority(paths)
+    action = args.bkact or "list"
+    if action == "add":
+        report = backup.add(paths, authority, args.paths)
+        for it in report.stored:
+            print(f"  {it.id}  {it.size:>10,}  {it.path}")
+        for path, rules in report.flagged:
+            eprint(f"  FLAGGED (not stored) {path}: {rules}")
+        for path, why in report.skipped:
+            eprint(f"  skipped {path}: {why}")
+        print(report.summary())
+        return 3 if report.flagged else 0
+    if action == "list":
+        items, stats = backup.snapshot(paths, authority)
+        for it in items:
+            print(f"  {it.id}  {it.size:>10,}  {it.sha256[:12]}  {it.path}")
+        print(stats.summary())
+        return 0
+    if action == "remove":
+        item, gone = backup.remove(paths, authority, args.id)
+        print(f"removed {item.id} ({item.path}); " + ("its body was deleted" if gone
+              else "its body is still used by another item"))
+        return 0
+    if action == "restore":
+        from .admin import AdminKeyboard, AdminPrompter, open_admin_devices
+        kb = AdminKeyboard(paths)
+        lease = kb.require_booted()              # refuse before any password prompt
+        devices = open_admin_devices(lease)
+        try:
+            writer = Authority(paths, AdminPrompter(devices) if devices is not None
+                               else TTYPrompter())
+            item, report = backup.restore(paths, authority, writer, kb, args.id, args.dest)
+        finally:
+            if devices is not None:
+                devices.close()
+        print(f"restored {item.id} -> {report.summary()}")
+        return 0
+    raise KAppError(f"unknown backup action {action!r}")
+
+
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -813,6 +862,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.add_argument("--text", help="the text to write")
     s.add_argument("--stdin", action="store_true", help="read the content from standard input")
+    s = sub.add_parser("backup", help="deduplicated backups: add | list | restore | remove")
+    bs = s.add_subparsers(dest="bkact")
+    b = bs.add_parser("add", help="back up files or folders (scanned first, stored once per content)")
+    b.add_argument("paths", nargs="+")
+    bs.add_parser("list", help="what is backed up, and what deduplication saved")
+    b = bs.add_parser("restore", help="put one item back in a directory (guarded write, never overwrites)")
+    b.add_argument("id")
+    b.add_argument("dest")
+    b = bs.add_parser("remove", help="forget one item")
+    b.add_argument("id")
     s = sub.add_parser("do", help="run one line of human language as one command")
     s.add_argument("words", nargs="+")
     s.add_argument("--explain", action="store_true", help="show how the line was understood")
@@ -832,7 +891,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
-            "desktop": cmd_desktop}
+            "desktop": cmd_desktop, "backup": cmd_backup}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -840,13 +899,14 @@ def main(argv: list[str] | None = None) -> int:
     paths = Paths.from_env()
     try:
         return COMMANDS[args.cmd](args, paths)
-    except (TamperedError, VirusFoundError, WriteBlocked) as e:
+    except (TamperedError, VirusFoundError, WriteBlocked, VaultTamperedError) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
     except (AuthorizationDenied, AuthError, PermitError, AdminError) as e:
         eprint(f"denied: {e}")
         return 2
-    except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, OSError) as e:
+    except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, BackupError,
+            OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:
