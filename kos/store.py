@@ -160,6 +160,18 @@ class AppStore:
         """
         if grant.action not in ("app.run", "app.graphical", "app.open") or grant.target != name:
             raise TamperedError("grant does not cover running this app")
+        return self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+
+    def verified_manifest(self, name: str, grant: Grant):
+        """The manifest of an installed app, after the same seal check as a
+        run. For callers that only *describe* apps (the skill maker): the
+        grant must be for ``skill.make``, so a describe-only grant can never
+        be used to load an app to run it, and vice versa."""
+        if grant.action != "skill.make":
+            raise TamperedError("grant does not cover describing apps")
+        return self._read_sealed(name, grant.key(SEAL_KEY_LABEL)).manifest
+
+    def _read_sealed(self, name: str, key: bytes) -> KApp:
         kapp_path, seal_path = self._files(name)
         try:
             meta = json.loads(seal_path.read_text())
@@ -168,8 +180,7 @@ class AppStore:
         except FileNotFoundError:
             raise KAppError(f"{name} is not installed") from None
         digest = hashlib.sha256(data).hexdigest()
-        expected = compute_seal(grant.key(SEAL_KEY_LABEL), meta.get("name", ""),
-                                meta.get("version", ""), digest)
+        expected = compute_seal(key, meta.get("name", ""), meta.get("version", ""), digest)
         if meta.get("name") != name or not hmac.compare_digest(expected, meta.get("seal", "")):
             raise TamperedError(
                 f"{name}: seal check FAILED - the app was modified after install. Refusing to run.")

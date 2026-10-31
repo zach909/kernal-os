@@ -58,6 +58,15 @@ or use one from memory. The standard library has no authenticated encryption;
 adding a vetted library (for example `cryptography`) is a decision for the
 owner. Ask before adding a dependency.
 
+## Generated skills
+
+`kos skills` (`kos/skillmaker.py`) makes skills from the installed apps and the
+command parser. Anything an app's author wrote (the manifest description) is
+untrusted: it must never reach a skill's frontmatter or instructions, only an
+inert labelled data block. If you add a new manifest field, decide whether it
+is validated (safe in instructions) or free text (data block only), and add a
+hostile-input test.
+
 ## Before you call a change done
 
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
