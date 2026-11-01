@@ -43,16 +43,18 @@ done
 
 dev=""
 i=0
-while [ $i -lt 50 ]; do          # wait up to 10s for the disk to appear
+# USB sticks enumerate slowly (hubs, cheap controllers): wait up to 60s.
+while [ $i -lt 300 ]; do
     case "$root_spec" in
         UUID=*) dev=$(blkid -U "${root_spec#UUID=}" 2>/dev/null) ;;
         /dev/*) [ -b "$root_spec" ] && dev="$root_spec" ;;
     esac
     [ -n "$dev" ] && break
+    [ $i -eq 25 ] && echo "kos-preboot: waiting for the boot disk (USB sticks can take a while)..."
     sleep 0.2
     i=$((i + 1))
 done
-[ -n "$dev" ] || halt_forever "root device $root_spec not found"
+[ -n "$dev" ] || halt_forever "root device $root_spec not found (is the USB stick still plugged in?)"
 
 clear
 cat <<'BANNER'
