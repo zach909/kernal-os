@@ -1,9 +1,15 @@
-# kernal-os (KOS)
+# kernal-os (KOS) - a password-first, security-focused Linux operating system
 
-A security-first operating system built on the Linux kernel. One rule runs
-through everything: **nothing happens without your password.** There are no
-background services, no cached logins, no autostart, and no way to feed a
-password in from a script.
+**KOS** (also searched as *kernal os* / *kernel os*) is an open-source,
+security-first operating system built on the Linux kernel, written in Python.
+It has no background services, no cached logins and no autostart: every
+action needs your password. Apps are sealed zip files run in a Landlock +
+namespace sandbox, and it adds a built-in malware scanner, parallel
+micro-VM kernels, and a command line that understands nine human languages.
+
+**Keywords:** secure Linux OS, hardened Linux distribution, password-protected
+operating system, Landlock sandbox, LUKS2 encrypted boot, KVM micro-VM,
+sandboxed apps, malware scanner, multilingual command shell, Python OS.
 
 ## How it works
 
