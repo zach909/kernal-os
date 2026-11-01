@@ -267,6 +267,78 @@ class TestSealedMemfd(unittest.TestCase):
             os.close(fd)
 
 
+class TestHostileInput(Env):
+    """Names and leftovers from disks, zips and crashes are not trusted."""
+
+    ESC_NAME = "\x1b[2J\x1b[1;1HPassword to unlock: "
+
+    def _evil_zip(self, directory: Path) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(self.ESC_NAME, b"payload")
+        p = directory / "evil.zip"
+        p.write_bytes(buf.getvalue())
+        return p
+
+    def test_stale_temp_file_cannot_block_atomic_write(self):
+        from kos.paths import atomic_write
+        target = Path(self.tmp.name) / "auth-throttle.json"
+        # what a crash used to leave behind: the old predictable per-pid name
+        (Path(self.tmp.name) / f".{target.name}.tmp.{os.getpid()}").write_bytes(b"stale")
+        atomic_write(target, b'{"failures": 1}')
+        self.assertEqual(target.read_bytes(), b'{"failures": 1}')
+        atomic_write(target, b'{"failures": 2}')      # and again
+        self.assertEqual(target.read_bytes(), b'{"failures": 2}')
+        self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+
+    def test_dangling_symlink_does_not_break_listing(self):
+        d = Path(self.tmp.name) / "browse"
+        d.mkdir()
+        (d / "ok.txt").write_text("hi")
+        os.symlink("/nonexistent/target", d / "dangling")
+        names = {e.name: e for e in VFS(d).list()}
+        self.assertEqual(set(names), {"ok.txt", "dangling"})
+        self.assertFalse(names["dangling"].is_archive)
+
+    def test_hostile_names_are_shown_escaped_but_still_reachable(self):
+        from kos.protocol import escape_text
+        d = Path(self.tmp.name) / "browse"
+        d.mkdir()
+        self._evil_zip(d)
+        v = VFS(d)
+        v.cd("evil.zip")
+        (entry,) = v.list()
+        self.assertEqual(entry.name, self.ESC_NAME)                   # the data is untouched ...
+        shown = escape_text(entry.name)
+        self.assertNotIn("\x1b", shown)                                # ... what is printed is not
+        self.assertIn("\\x1b[2J", shown)
+        self.assertNotIn("\x1b", v.pwd())
+        self.assertEqual(v.read_bytes(shown), b"payload")              # typed the way it is shown
+        self.assertEqual(v.read_bytes(self.ESC_NAME), b"payload")      # or the way it really is
+        with self.assertRaises(VFSError) as cm:
+            v.read_bytes("\x1b[31mnope")
+        self.assertNotIn("\x1b", str(cm.exception))
+
+    def test_ls_audit_and_activity_never_print_escape_codes(self):
+        import contextlib
+        import types
+        from kos.activity import build_feed, render_feed
+        from kos.auth import AuditLog
+        d = Path(self.tmp.name) / "browse"
+        d.mkdir()
+        self._evil_zip(d)
+        AuditLog(self.paths).record("file.view", f"{d}/evil.zip/{self.ESC_NAME}", "granted")
+        for label, call in (
+                ("kos ls", lambda: kcli.cmd_ls(types.SimpleNamespace(path=str(d / "evil.zip")), self.paths)),
+                ("kos audit", lambda: kcli.cmd_audit(types.SimpleNamespace(n=10), self.paths)),
+                ("kos activity", lambda: print(render_feed(build_feed(self.paths))))):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                call()
+            self.assertNotIn("\x1b", out.getvalue(), label)
+            self.assertIn("\\x1b[2J", out.getvalue(), label)
+
+
 class TestVFS(Env):
     def test_cd_into_zip_without_extracting(self):
         vfs = VFS(self.tmp.name)

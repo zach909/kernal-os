@@ -74,6 +74,18 @@ def clean_text(s: Any, limit: int) -> str:
     return _CONTROL_RE.sub("", s)[:limit]
 
 
+def escape_text(s: str, limit: int = 4096) -> str:
+    """Make untrusted text safe to print on the owner's terminal.
+
+    Unlike :func:`clean_text` nothing is dropped: each control or bidi character
+    becomes a visible ``\\xNN`` / ``\\uNNNN``. A hostile file or zip-entry name
+    therefore cannot move the cursor, clear the screen or fake a password prompt
+    - and cannot pass for a different name either."""
+    return _CONTROL_RE.sub(
+        lambda m: "\\x%02x" % ord(m.group()) if ord(m.group()) < 0x100 else "\\u%04x" % ord(m.group()),
+        str(s))[:limit]
+
+
 def _int(v: Any, lo: int = -MAX_COORD, hi: int = MAX_COORD) -> int:
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise ProtocolError(f"expected an integer in [{lo}, {hi}]")

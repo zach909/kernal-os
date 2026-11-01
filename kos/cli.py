@@ -398,11 +398,12 @@ def _resolve_mixed(path: str):
 
 
 def cmd_ls(args, paths: Paths) -> int:
+    from .protocol import escape_text
     vfs, last = _resolve_mixed(args.path)
     vfs.cd(last)
     for e in vfs.list():
         tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
-        print(f"{e.name}{tag}")
+        print(f"{escape_text(e.name)}{tag}")
     return 0
 
 
@@ -420,7 +421,7 @@ def cmd_explore(args, paths: Paths) -> int:
     """An interactive shell for walking real directories and zip files as one
     tree: `cd something.kapp` steps straight into the archive. Browsing
     (`cd`/`ls`) needs no password; `cat` does, same as `kos view`."""
-    from .protocol import clean_text
+    from .protocol import clean_text, escape_text
     from .vfs import VFS
 
     vfs = VFS(args.start)
@@ -443,7 +444,7 @@ def cmd_explore(args, paths: Paths) -> int:
             elif cmd == "ls":
                 for e in vfs.list():
                     tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
-                    print(f"{e.name}{tag}")
+                    print(f"{escape_text(e.name)}{tag}")
             elif cmd in ("cd", "up") and (cmd == "up" or not rest):
                 vfs.up()
             elif cmd == "cd":
@@ -699,9 +700,11 @@ def cmd_doctor(args, paths: Paths) -> int:
 def cmd_audit(args, paths: Paths) -> int:
     import time
     from .auth import AuditLog
+    from .protocol import escape_text
     for e in AuditLog(paths).entries()[-args.n:]:
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
-        print(f"{t}  {e['outcome']:13} {e['action']:15} {e['target']}")
+        # targets can hold names that came from disks and zips: print them escaped
+        print(f"{t}  {escape_text(e['outcome']):13} {escape_text(e['action']):15} {escape_text(e['target'])}")
     return 0
 
 

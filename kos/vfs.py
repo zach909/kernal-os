@@ -15,6 +15,8 @@ import zipfile
 from dataclasses import dataclass
 from typing import Union
 
+from .protocol import escape_text
+
 MAX_READ = 4 << 20
 ZIP_EXTS = (".zip", ".kapp")
 
@@ -68,7 +70,20 @@ class VFS:
         self._names: list[str] = [str(self.root)]
 
     def pwd(self) -> str:
-        return "/".join(self._names)
+        # Names come from disks and zips we don't trust: show them escaped.
+        return "/".join(escape_text(n) for n in self._names)
+
+    def _find(self, name: str):
+        """The entry called ``name`` - typed either as it really is or as it is
+        shown (escaped), so a hostile name can still be dealt with."""
+        entries = self.list()
+        for e in entries:
+            if e.name == name:
+                return e
+        for e in entries:
+            if escape_text(e.name) == name:
+                return e
+        return None
 
     def in_archive(self) -> bool:
         return self._stack[-1].kind == "zip"
@@ -81,10 +96,15 @@ class VFS:
         if here.kind == "real":
             out = []
             for p in sorted(here.path.iterdir(), key=lambda p: p.name.lower()):
-                if p.is_dir():
-                    out.append(Entry(p.name, True, False))
-                else:
-                    out.append(Entry(p.name, False, _is_archive_name(p.name), p.stat().st_size))
+                try:
+                    if p.is_dir():
+                        out.append(Entry(p.name, True, False))
+                    else:
+                        out.append(Entry(p.name, False, _is_archive_name(p.name), p.stat().st_size))
+                except OSError:
+                    # A dangling symlink, or a file that vanished while we looked:
+                    # list it (so you can see it is there) but never crash on it.
+                    out.append(Entry(p.name, False, False, 0))
             return out
         seen: dict[str, Entry] = {}
         plen = len(here.prefix)
@@ -109,19 +129,19 @@ class VFS:
         if name == "..":
             self.up()
             return
-        entries = {e.name: e for e in self.list()}
-        e = entries.get(name)
+        e = self._find(name)
         if e is None:
-            raise VFSError(f"no such entry: {name!r}")
+            raise VFSError(f"no such entry: '{escape_text(name)}'")
+        name = e.name   # the real name, whichever way it was typed
         if not e.is_dir and not e.is_archive:
-            raise VFSError(f"{name!r} is not a directory or an archive")
+            raise VFSError(f"'{escape_text(name)}' is not a directory or an archive")
         here = self._here()
         if e.is_archive:
             data = self.read_bytes(name)
             try:
                 zf = zipfile.ZipFile(io.BytesIO(data))
             except zipfile.BadZipFile as exc:
-                raise VFSError(f"{name}: not a valid zip: {exc}") from None
+                raise VFSError(f"{escape_text(name)}: not a valid zip: {exc}") from None
             self._stack.append(_ZipDir(zf, "", name))
             self._names.append(name)
             return
@@ -138,17 +158,17 @@ class VFS:
         self._names.pop()
 
     def read_bytes(self, name: str) -> bytes:
-        entries = {e.name: e for e in self.list()}
-        e = entries.get(name)
+        e = self._find(name)
         if e is None or e.is_dir:
-            raise VFSError(f"no such file: {name!r}")
+            raise VFSError(f"no such file: '{escape_text(name)}'")
+        name = e.name
         if e.size > MAX_READ:
-            raise VFSError(f"{name!r} is too large to view")
+            raise VFSError(f"'{escape_text(name)}' is too large to view")
         here = self._here()
         if here.kind == "real":
             return (here.path / name).read_bytes()
         with here.zf.open(here.prefix + name) as f:
             data = f.read(MAX_READ + 1)
         if len(data) > MAX_READ:
-            raise VFSError(f"{name!r} is too large to view")
+            raise VFSError(f"'{escape_text(name)}' is too large to view")
         return data
