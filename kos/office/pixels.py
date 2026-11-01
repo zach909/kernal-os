@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import colorsys
+import functools
 import math
 import random
 import struct
@@ -22,7 +23,23 @@ def rgb(hexcol: str) -> tuple:
     return int(hexcol[1:3], 16), int(hexcol[3:5], 16), int(hexcol[5:7], 16)
 
 
-def hexc(c: tuple) -> str: return "#%02x%02x%02x" % tuple(max(0, min(255, int(v))) for v in c)
+@functools.lru_cache(maxsize=65536)
+def _hexc(c: tuple) -> str: return "#%02x%02x%02x" % tuple(max(0, min(255, int(v))) for v in c)
+
+
+def hexc(c) -> str: return _hexc(c if isinstance(c, tuple) else tuple(c))
+
+
+def rect_runs(canvas, ox: int, oy: int, cell: int, rows) -> None:
+    """Draw a grid of colours, merging horizontal runs of one colour into a single
+    rect. Pixel-for-pixel the same picture as one rect per cell, far fewer ops."""
+    for y, r in enumerate(rows):
+        x, n = 0, len(r)
+        while x < n:
+            x2, col = x + 1, r[x]
+            while x2 < n and r[x2] == col: x2 += 1
+            canvas.rect(ox + x * cell, oy + y * cell, (x2 - x) * cell, cell, col)
+            x = x2
 
 
 def png_b64(rows: list) -> str:
@@ -89,8 +106,7 @@ class ImageEditor(Screen):
     def canvas(self, w, h):
         cell = max(4, min((h - 40) // self.N, (w - 20) // self.N)); c = Canvas().clear("#202020")
         ox, oy = 10, 30
-        for y in range(self.N):
-            for x in range(self.N): c.rect(ox + x * cell, oy + y * cell, cell, cell, self.px[y][x])
+        rect_runs(c, ox, oy, cell, self.px)
         c.rect(ox + self.cx * cell, oy + self.cy * cell, cell, 1, "#ff00ff").rect(ox + self.cx * cell, oy + self.cy * cell + cell - 1, cell, 1, "#ff00ff")
         for i, col in enumerate(PALETTE):
             c.rect(10 + i * 18, 6, 16, 16, col)
@@ -143,6 +159,11 @@ PALETTES = ("rainbow", "fire", "ocean", "gray")
 
 def generate(kind: str, n: int, seed: int) -> list:
     """-> n x n grid of values in [0,1]. Deterministic for a (kind, n, seed)."""
+    return [list(r) for r in _generate(kind, n, seed)]
+
+
+@functools.lru_cache(maxsize=32)
+def _generate(kind: str, n: int, seed: int) -> tuple:
     rnd = random.Random(seed); o1, o2, o3 = rnd.random() * 6.28, rnd.random() * 6.28, rnd.random() * 6.28
     f = 3 + seed % 5
     g = []
@@ -165,8 +186,27 @@ def generate(kind: str, n: int, seed: int) -> list:
                 a = math.atan2(v - .5, u - .5); r = math.hypot(u - .5, v - .5); t = 0.5 + 0.5 * math.sin(a * (1 + seed % 4) + r * 30)
             else: t = 0.5 + 0.5 * math.sin(math.hypot(u - .5, v - .5) * f * 12 + o1)
             row.append(t)
-        g.append(row)
-    return g
+        g.append(tuple(row))
+    return tuple(g)
+
+
+@functools.lru_cache(maxsize=16)
+def _generated_runs(kind: str, n: int, seed: int, pal: str) -> tuple:
+    """Run-merged (x, y, width_in_cells, hex) boxes of a generated image; cached,
+    since the same image is redrawn on every frame until a setting changes."""
+    memo, out = {}, []
+    for y, r in enumerate(_generate(kind, n, seed)):
+        cols = []
+        for t in r:
+            h = memo.get(t)
+            if h is None: h = memo[t] = hexc(tuple(int(c) for c in ramp(pal, t)))
+            cols.append(h)
+        x = 0
+        while x < n:
+            x2 = x + 1
+            while x2 < n and cols[x2] == cols[x]: x2 += 1
+            out.append((x, y, x2 - x, cols[x])); x = x2
+    return tuple(out)
 
 
 class ImageGenerator(Screen):
@@ -179,11 +219,16 @@ class ImageGenerator(Screen):
         self.msg = ""
         self.help = "left/right seed  up/down kind  p palette  r random seed  e export"
 
-    def grid(self, n): return generate(KINDS[self.kind], n, self.seed)
+    def grid(self, n): return _generate(KINDS[self.kind], n, self.seed)
 
     def rows(self, n=None):
         n = n or self.N
-        return [[tuple(int(v) for v in ramp(PALETTES[self.pal], t)) for t in r] for r in self.grid(n)]
+        pal, memo = PALETTES[self.pal], {}
+        def px(t):
+            v = memo.get(t)
+            if v is None: v = memo[t] = tuple(int(c) for c in ramp(pal, t))
+            return v
+        return [[px(t) for t in r] for r in self.grid(n)]
 
     def render(self, w, h):
         n = min(h - 3, 24); ramp_chars = " .:-=+*#%@"
@@ -196,8 +241,8 @@ class ImageGenerator(Screen):
     def canvas(self, w, h):
         n = self.N; cell = max(2, min((h - 24) // n, (w - 10) // n)); c = Canvas().clear("#101010")
         c.text(6, 6, f"{KINDS[self.kind]}  seed {self.seed}  {PALETTES[self.pal]}", "#ffffff")
-        for y, r in enumerate(self.rows(n)):
-            for x, px in enumerate(r): c.rect(6 + x * cell, 18 + y * cell, cell, cell, hexc(px))
+        for x, y, w, col in _generated_runs(KINDS[self.kind], n, self.seed, PALETTES[self.pal]):
+            c.rect(6 + x * cell, 18 + y * cell, w * cell, cell, col)
         return c
 
     def key(self, k):

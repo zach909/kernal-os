@@ -142,7 +142,10 @@ class Broker:
                 self.app_channel.sendall(b'{"cmd":"quit"}\n')
             except OSError:
                 pass
-            time.sleep(0.3)
+            # up to 0.3s for a clean exit, but stop waiting the moment it happens
+            end = time.monotonic() + 0.3
+            while self.app_proc.poll() is None and time.monotonic() < end:
+                time.sleep(0.01)
         if self.app_proc.poll() is None:
             try:
                 os.killpg(self.app_proc.pid, signal.SIGTERM)
