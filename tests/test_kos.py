@@ -463,6 +463,49 @@ class TestOpenAttachClose(Env):
         self.assertFalse(Registry(self.paths)._file(inst_id).exists())
         self.assertFalse(os.path.exists(inst.sock_path))
 
+    @staticmethod
+    def _wakeups(pid: int) -> int:
+        """How many times the kernel has put this process to sleep waiting (Linux)."""
+        import re
+        status = Path(f"/proc/{pid}/status").read_text()
+        return int(re.search(r"^voluntary_ctxt_switches:\s+(\d+)", status, re.M).group(1))
+
+    @unittest.skipUnless(hasattr(os, "pidfd_open"), "needs pidfd_open")
+    def test_idle_broker_does_not_poll_and_stops_promptly(self):
+        """A background app that nobody is using must cost nothing: the broker
+        sleeps until something happens (it used to wake once a second, and
+        needed up to a second to notice SIGTERM)."""
+        import signal
+        import time
+        registry, inst_id = self._open("cmd")
+        inst = self._wait_running(registry, inst_id)
+        time.sleep(0.5)                                   # let start-up settle
+        before = self._wakeups(inst.broker_pid)
+        time.sleep(3.0)
+        woke = self._wakeups(inst.broker_pid) - before
+        self.assertLessEqual(woke, 1, f"idle broker woke {woke} times in 3 s (was ~3 with polling)")
+        t0 = time.monotonic()
+        os.kill(inst.broker_pid, signal.SIGTERM)
+        while Registry(self.paths)._file(inst_id).exists() and time.monotonic() - t0 < 5:
+            time.sleep(0.01)
+        took = time.monotonic() - t0
+        self.assertFalse(Registry(self.paths)._file(inst_id).exists())
+        self.assertLess(took, 0.6, f"SIGTERM took {took:.2f}s to shut the broker down (was ~1.3 s)")
+
+    def test_broker_notices_when_its_app_exits_by_itself(self):
+        import time
+        registry, inst_id = self._open("cmd")
+        inst = self._wait_running(registry, inst_id)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(inst.sock_path)
+        c.sendall(b'{"cmd":"quit"}\n')                    # the app leaves on its own
+        t0 = time.monotonic()
+        while Registry(self.paths)._file(inst_id).exists() and time.monotonic() - t0 < 5:
+            time.sleep(0.01)
+        c.close()
+        self.assertFalse(Registry(self.paths)._file(inst_id).exists())
+        self.assertFalse(os.path.exists(inst.sock_path))
+
     def test_two_opens_are_independent(self):
         registry, id1 = self._open("cmd")
         registry, id2 = self._open("cmd")
