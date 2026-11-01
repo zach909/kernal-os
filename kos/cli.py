@@ -683,6 +683,11 @@ def cmd_cell(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_usb(args, paths: Paths) -> int:
+    from . import usb
+    return usb.cmd_usb(args, paths)
+
+
 def cmd_doctor(args, paths: Paths) -> int:
     r = report()
     ok = lambda b: "yes" if b else "NO"
@@ -917,6 +922,21 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
     s.add_argument("--lang", default="python")
     s.add_argument("--code", required=True)
+    s = sub.add_parser("usb", help="boot KOS from a USB stick: list | check IMG | write IMG /dev/sdX | test IMG")
+    us = s.add_subparsers(dest="usb_cmd", required=True)
+    u = us.add_parser("list", help="USB disks it would be willing to write")
+    u.add_argument("--all", action="store_true", help="show every disk, not just USB ones")
+    u.add_argument("--allow-non-usb", action="store_true")
+    u = us.add_parser("check", help="verify an image can boot from removable media")
+    u.add_argument("image")
+    u = us.add_parser("write", help="write an image to a USB disk, then read it back and compare")
+    u.add_argument("image")
+    u.add_argument("device", help="whole disk such as /dev/sdb (or a plain file)")
+    u.add_argument("--yes", action="store_true", help="skip the type-the-device-name confirmation")
+    u.add_argument("--allow-non-usb", action="store_true", help="permit a non-USB disk (still never a mounted one)")
+    u.add_argument("--no-verify", action="store_true", help="skip the read-back comparison")
+    u = us.add_parser("test", help="boot the image in QEMU attached as a USB stick")
+    u.add_argument("image")
     s = sub.add_parser("aios", help="AI OS: button clicker, app commands, kernel commands, skill maker")
     s.add_argument("layer", choices=["status", "gui", "app", "kernel", "skill"])
     s.add_argument("words", nargs="*")
@@ -933,7 +953,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
-            "desktop": cmd_desktop, "aios": cmd_aios}
+            "desktop": cmd_desktop, "aios": cmd_aios, "usb": cmd_usb}
 
 
 def main(argv: list[str] | None = None) -> int:

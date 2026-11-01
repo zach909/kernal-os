@@ -128,6 +128,7 @@ kos line [--explain]         the line shell: every line you type is a command
 kos cell start NAME --kernel K --initrd I --cpus 2,3
 kos aios status             the four AI OS layers and whether NeuroClaw answers
 kos aios gui|app|kernel|skill WORDS...   one request on one layer (no password)
+kos usb list|check|write|test   boot from a USB stick: write an image to one safely (see below)
 kos doctor                  which kernel protections this machine has
 kos audit                   every password decision
 ```
@@ -255,6 +256,26 @@ python3 -m unittest discover -s tests -v
 `kernel/kos.config` (hardening config fragment), `boot/mkinitramfs.sh`,
 `image/mkimage.sh` (UEFI + LUKS2 disk image), `image/run-qemu.sh`.
 
+### Booting from USB
+
+```
+sudo image/mkimage.sh --kernel bzImage --rootfs rootfs.tar --out kos.img
+bin/kos usb check kos.img              # GPT + EFI/BOOT/BOOTX64.EFI present?
+bin/kos usb test kos.img               # boot it in QEMU attached as a USB stick
+bin/kos usb list                       # which USB disks it would write
+sudo bin/kos usb write kos.img /dev/sdX   # then pick the stick in the firmware boot menu
+```
+
+`write` refuses anything that is not a whole, unmounted, writable USB disk big
+enough for the image (`--allow-non-usb` relaxes only the USB rule, never the
+mounted one), makes you type the device name, writes, reads the stick back and
+compares every byte, then moves the backup GPT to the end of the stick. UEFI
+boots removable media from `EFI/BOOT/BOOTX64.EFI`, which `mkimage.sh` writes
+(and now fails the build if missing). `kernel/kos.config` builds in
+xHCI/EHCI/usb-storage/UAS/SCSI-disk since the pre-boot initramfs cannot load
+modules, and the pre-boot waits up to 60s for the stick before giving up.
+Secure Boot: enroll the key you signed with, or the stick will be refused.
+
 ## Status (honest)
 
 * **Tested here:** password/grants/audit, app sealing and tamper detection,
@@ -278,7 +299,7 @@ python3 -m unittest discover -s tests -v
   the OS prompt through a real broker); and the real CLI end to end through a
   pseudo-terminal (`desktop install`, `admin boot`, `write`, EICAR blocked,
   `boot desktop` with switching, right-click, launching from the library).
-* **Written but not yet booted:** exclusive evdev capture for the admin
+* **Written but not yet booted on real hardware or QEMU:** `kos usb` end to end on a real stick (its logic, refusals, byte-for-byte verify and the QEMU argv are unit-tested), the USB kernel options, exclusive evdev capture for the admin
   keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the
   image builder, framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).
