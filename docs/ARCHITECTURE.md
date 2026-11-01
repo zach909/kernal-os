@@ -161,8 +161,7 @@ hypervisor) as a bare-metal backend.
   password, same as any other action that changes what's on disk.
 
 ## AI OS (`kos/aios.py`)
-KOS gates, NeuroClaw does the work. `Authority.authorize("aios.<layer>")` per request, then
-`POST /api/ai-os/layer` to the NeuroClaw engine (`KOS_AIOS_URL`, loopback only, default
+KOS carries requests, NeuroClaw does the work and decides (no KOS password). `POST /api/ai-os/layer` to the NeuroClaw engine (`KOS_AIOS_URL`, loopback only, default
 `http://127.0.0.1:7861`). The engine accepts only `gui`, `app`, `kernel`, `skill` and runs them
 through its normal tool gate. Gap: the NeuroClaw engine is a separate process that must already be
 running (KOS does not start it, by the no-background-services rule), and if it has a password set the
