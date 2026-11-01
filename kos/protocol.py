@@ -75,7 +75,7 @@ def clean_text(s: Any, limit: int) -> str:
 
 
 def _int(v: Any, lo: int = -MAX_COORD, hi: int = MAX_COORD) -> int:
-    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+    if type(v) is not int or not lo <= v <= hi:
         raise ProtocolError(f"expected an integer in [{lo}, {hi}]")
     return v
 
