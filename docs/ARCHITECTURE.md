@@ -34,8 +34,12 @@ Limits, stated plainly:
 * **The OS cannot disable these.** They have their own CPU and flash. KOS only detaches itself;
   the ME keeps its memory access and (with AMT) its network path. Actually disabling means the
   flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; KOS does not write flash.
-* **Most Intel (2008+) and AMD (Zen) machines will not boot under `enforce`**, because their ME
-  or PSP is mandatory and running. VMs, ARM boards and machines with a disabled ME will.
+* **Almost no physical machine boots under `enforce`.** Besides the ME/PSP/BMC, any chip with its own
+  firmware blocks it too: Thunderbolt/USB4, USB-C port controller, embedded controller, and network, GPU,
+  NVMe and wireless controllers (PCI classes in `FIRMWARE_CLASSES`), and so does DMA hardware with no
+  IOMMU. These are not unbound (that would break the machine); the strict IOMMU in `kernel/cmdline.txt`
+  confines them. VMs ignore the emulated ones. Use `kos.firmware=warn` to boot with the alert.
+* **No resident checker.** The gate runs once at boot and at each unlock; no daemon, loop or watcher.
 * **Absence is unprovable.** A BIOS may hide the ME's PCI function; on bare-metal Intel/AMD with
   nothing visible KOS prints a caveat and boots.
 * The HFSTS1 decoding follows coreboot/intelmetool and is untested on hardware here; the tests use

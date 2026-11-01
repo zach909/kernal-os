@@ -34,6 +34,18 @@ What is real here, and what is not
   metal x86 with nothing visible, :func:`probe` reports a *caveat* (printed,
   boot allowed): the OS cannot see what is deliberately hidden from it.
 
+There is no resident checker: the gate is a one-shot look at boot (and at each
+unlock). No daemon, no watchdog, no "check manager" process or chip - a thing
+that watches the OS would be one more thing the OS does not control.
+
+Beyond the ME/PSP/BMC, every other chip that runs its own firmware is reported
+and, under ``enforce``, blocks the boot too (Thunderbolt/USB4, USB-C port
+controller, embedded controller, network, GPU, NVMe, wireless/Bluetooth), as does
+a machine with such chips and no IOMMU. Those are not mitigated: unbinding a
+NIC, GPU or the root disk's controller would break the machine, and the IOMMU
+(``kernel/cmdline.txt``) is what confines them. Inside a VM they are emulated
+and ignored. On real hardware this means almost nothing boots under ``enforce``.
+
 Policy comes from the signed kernel command line (``kos.firmware=``):
 ``enforce`` (default, also for any unknown value) halts; ``warn`` mitigates,
 alerts and boots anyway. PID 1 ignores the environment; only a development run
@@ -56,6 +68,17 @@ ME_MODE_DISABLED = 3
 OVERRIDE = "kos-none"     # a driver name that does not exist: nothing can bind
 
 POLICIES = ("enforce", "warn")
+
+# Other chips that run their own firmware and can act below or beside the OS.
+# Every one is "running": the OS cannot see inside them or prove them benign.
+# (class prefix, kind, name). Skipped inside a VM, where they are emulated.
+FIRMWARE_CLASSES = (
+    ("0x0c0340", "thunderbolt", "Thunderbolt/USB4 controller"),
+    ("0x02", "network", "network controller"),
+    ("0x03", "display", "display/GPU controller"),
+    ("0x0108", "nvme", "NVMe storage controller"),
+    ("0x0d", "wireless", "wireless/Bluetooth controller"),
+)
 
 
 @dataclass
@@ -140,8 +163,13 @@ def me_operation_mode(config: Path) -> Optional[int]:
     return (struct.unpack("<I", raw)[0] >> 16) & 0xF
 
 
+def _in_vm(root: Path) -> bool:
+    return " hypervisor" in _read(root / "proc/cpuinfo")
+
+
 def _pci_findings(root: Path) -> list[Finding]:
     out = []
+    vm = _in_vm(root)
     base = root / "sys/bus/pci/devices"
     try:
         devices = sorted(base.iterdir())
@@ -163,7 +191,42 @@ def _pci_findings(root: Path) -> list[Finding]:
         elif vendor == AMD and klass.startswith(CLASS_CRYPTO):
             out.append(Finding("amd-psp", "AMD Platform Security Processor", rel, "active",
                                "cannot be queried or stopped from the OS", rel))
+        elif not vm:
+            for prefix, kind, name in FIRMWARE_CLASSES:
+                if klass.startswith(prefix):
+                    out.append(Finding(kind, name, rel, "active",
+                                       "runs its own firmware and can reach memory by DMA"))
+                    break
     return out
+
+
+def _other_findings(root: Path) -> list[Finding]:
+    """Firmware-bearing chips that are not PCI functions, plus the check that
+    the IOMMU is on whenever DMA-capable chips exist."""
+    out = []
+    if not _in_vm(root):
+        for pattern, kind, name in (
+                ("sys/class/typec/port*", "typec-port", "USB-C port controller"),
+                ("sys/bus/acpi/devices/PNP0C09*", "embedded-controller", "embedded controller"),
+                ("sys/bus/thunderbolt/devices/domain*", "thunderbolt", "Thunderbolt/USB4 controller")):
+            hit = sorted(root.glob(pattern))
+            if hit:
+                out.append(Finding(kind, name, hit[0].relative_to(root).as_posix(), "active",
+                                   "runs its own firmware; the OS cannot see inside it"))
+    return out
+
+
+def _iommu_finding(root: Path, findings: list[Finding]) -> list[Finding]:
+    dma = {"thunderbolt", "network", "display", "nvme", "wireless", "intel-me", "amd-psp"}
+    if not any(f.kind in dma and f.state == "active" for f in findings):
+        return []
+    try:
+        if any((root / "sys/kernel/iommu_groups").iterdir()):
+            return []
+    except OSError:
+        pass
+    return [Finding("no-iommu", "no IOMMU", "sys/kernel/iommu_groups", "active",
+                    "chips that do DMA are not confined to memory the OS gave them")]
 
 
 def _bmc_findings(root: Path) -> list[Finding]:
@@ -200,7 +263,8 @@ def _caveat(root: Path) -> str:
 def probe(root: Path = Path("/"), policy: Optional[str] = None) -> Verdict:
     root = Path(root)
     v = Verdict(policy or current_policy(root))
-    v.findings = _pci_findings(root) + _bmc_findings(root)
+    v.findings = _pci_findings(root) + _bmc_findings(root) + _other_findings(root)
+    v.findings += _iommu_finding(root, v.findings)
     if not v.findings:
         v.caveat = _caveat(root)
     return v

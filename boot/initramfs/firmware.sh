@@ -4,6 +4,10 @@
 # if a management processor (Intel ME, AMD PSP, a BMC) is running and not
 # provably off, the machine does not boot.
 #
+# Besides the ME/PSP/BMC, any other chip with its own firmware (Thunderbolt, USB-C
+# port controller, EC, NIC, GPU, NVMe, wireless) also stops the boot; there is no
+# resident checker, this runs once.
+#
 # Honest limits (see kos/firmware.py for the long version): the OS cannot switch
 # these off. All this does is detach the OS from them. "Off" is only believed for
 # an Intel ME whose own status register says "disabled".
@@ -24,6 +28,13 @@ fw_read() {
 # and sets fw_active=1 if any is running. Never run in a subshell.
 kos_firmware_scan() {
     fw_active=0
+    fw_vm=0
+    if [ -r "$FW_ROOT/proc/cpuinfo" ]; then
+        while read -r fw_l; do
+            case "$fw_l" in flags*" hypervisor"*) fw_vm=1; break ;; esac
+        done < "$FW_ROOT/proc/cpuinfo"
+    fi
+    fw_dma=0
     for dev in "$FW_ROOT"/sys/bus/pci/devices/*; do
         [ -e "$dev/vendor" ] || continue
         fw_read "$dev/vendor"; fw_v=$fw_val
@@ -41,15 +52,38 @@ kos_firmware_scan() {
                     echo "FINDING intel-me neutralized $rel"
                 else
                     echo "FINDING intel-me active $rel"
-                    fw_active=1
+                    fw_active=1; fw_dma=1
                 fi
                 ;;
             0x1022:0x1080*)
                 echo "FINDING amd-psp active $rel"
-                fw_active=1
+                fw_active=1; fw_dma=1
                 ;;
+            *:0x0c0340*) fw_kind=thunderbolt ;;
+            *:0x02*) fw_kind=network ;;
+            *:0x03*) fw_kind=display ;;
+            *:0x0108*) fw_kind=nvme ;;
+            *:0x0d*) fw_kind=wireless ;;
         esac
+        if [ -n "$fw_kind" ]; then
+            if [ "$fw_vm" -eq 0 ]; then
+                echo "FINDING $fw_kind active $rel"
+                fw_active=1; fw_dma=1
+            fi
+            fw_kind=""
+        fi
     done
+    if [ "$fw_vm" -eq 0 ]; then
+        for pair in typec-port:sys/class/typec/port* embedded-controller:sys/bus/acpi/devices/PNP0C09* \
+                    thunderbolt:sys/bus/thunderbolt/devices/domain*; do
+            for n in "$FW_ROOT"/${pair#*:}; do
+                [ -e "$n" ] || continue
+                echo "FINDING ${pair%%:*} active ${n#"$FW_ROOT"/}"
+                fw_active=1
+                break
+            done
+        done
+    fi
     for n in "$FW_ROOT"/dev/ipmi* "$FW_ROOT"/dev/ipmi/* "$FW_ROOT"/sys/class/ipmi/ipmi* \
              "$FW_ROOT"/sys/firmware/dmi/entries/38-*; do
         [ -e "$n" ] || continue
@@ -57,6 +91,16 @@ kos_firmware_scan() {
         fw_active=1
         break
     done
+    if [ "$fw_dma" -eq 1 ] || [ -e "$FW_ROOT"/sys/bus/thunderbolt/devices/domain0 ]; then
+        fw_grp=0
+        for g in "$FW_ROOT"/sys/kernel/iommu_groups/*; do
+            [ -e "$g" ] && fw_grp=1 && break
+        done
+        if [ "$fw_grp" -eq 0 ]; then
+            echo "FINDING no-iommu active sys/kernel/iommu_groups"
+            fw_active=1
+        fi
+    fi
 }
 
 # kos.firmware=enforce (default; any unknown value too) | warn
@@ -97,8 +141,9 @@ kos_firmware_gate() {
     [ "$fw_active" -eq 0 ] && return 0
     kos_firmware_policy
     echo
-    echo "kos-preboot: WARNING - this machine has a management processor running below the OS"
-    echo "kos-preboot: (Intel ME / AMD PSP / BMC). KOS cannot see or stop what it does."
+    echo "kos-preboot: WARNING - chips with their own firmware (Intel ME, AMD PSP, BMC, Thunderbolt,"
+    echo "kos-preboot: USB-C, EC, network, GPU, NVMe, wireless) run outside the OS's control."
+    echo "kos-preboot: KOS cannot see inside them or stop what they do."
     fw_detach
     if [ "$fw_policy" = warn ]; then
         echo "kos-preboot: kos.firmware=warn - continuing anyway."

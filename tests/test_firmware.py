@@ -31,6 +31,7 @@ class Tree:
     def __init__(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
+        (self.root / "sys/kernel/iommu_groups/0").mkdir(parents=True)   # a healthy machine has an IOMMU
 
     def close(self):
         self._tmp.cleanup()
@@ -127,8 +128,8 @@ class TestDetection(FirmwareCase):
         self.assertEqual(t.py_findings()[0], {("bmc-ipmi", "active")})
 
     def test_other_pci_devices_are_not_flagged(self):
-        self.t.pci("0000:00:02.0", "0x8086", "0x030000")     # an Intel GPU
-        self.t.pci("0000:06:00.0", "0x1022", "0x020000")     # an AMD NIC
+        self.t.pci("0000:00:00.0", "0x8086", "0x060000")     # a host bridge
+        self.t.pci("0000:00:14.0", "0x8086", "0x0c0330")     # a USB xHCI controller
         self.assertEqual(self.t.py_findings()[0], set())
 
     def test_bare_metal_with_nothing_visible_gets_a_caveat_but_boots(self):
@@ -140,6 +141,73 @@ class TestDetection(FirmwareCase):
         self.addCleanup(t.close)
         t.write("proc/cpuinfo", "vendor_id\t: GenuineIntel\nflags\t: fpu hypervisor\n")
         self.assertEqual(t.py_findings()[1].caveat, "")      # a VM has no ME of its own
+
+
+class TestOtherFirmwareChips(FirmwareCase):
+    CASES = [
+        ("thunderbolt", lambda t: t.pci("0000:00:0d.2", "0x8086", "0x0c0340")),
+        ("network", lambda t: t.pci("0000:02:00.0", "0x8086", "0x020000")),
+        ("display", lambda t: t.pci("0000:00:02.0", "0x8086", "0x030000")),
+        ("nvme", lambda t: t.pci("0000:01:00.0", "0x144d", "0x010802")),
+        ("wireless", lambda t: t.pci("0000:03:00.0", "0x8086", "0x0d1100")),
+        ("typec-port", lambda t: (t.root / "sys/class/typec/port0").mkdir(parents=True)),
+        ("embedded-controller", lambda t: (t.root / "sys/bus/acpi/devices/PNP0C09:00").mkdir(parents=True)),
+        ("thunderbolt", lambda t: (t.root / "sys/bus/thunderbolt/devices/domain0").mkdir(parents=True)),
+    ]
+
+    def test_each_is_found_and_blocks_boot_in_python_and_shell(self):
+        for kind, make in self.CASES:
+            t = Tree()
+            self.addCleanup(t.close)
+            make(t)
+            py, v = t.py_findings()
+            sh, gate = t.sh_findings()
+            self.assertEqual(py, {(kind, "active")}, kind)
+            self.assertEqual(sh, py, kind)
+            self.assertFalse(v.ok, kind)
+            self.assertEqual(gate, 1, kind)
+
+    def test_none_of_them_are_unbound_or_touched(self):
+        self.t.pci("0000:01:00.0", "0x144d", "0x010802", driver="nvme")
+        v = firmware.enforce(self.t.root, "enforce")
+        self.assertEqual(v.actions, [])
+        self.assertEqual((self.t.root / "sys/bus/pci/drivers/nvme/unbind").read_text(), "")
+
+    def test_inside_a_vm_emulated_chips_are_ignored_but_the_ME_is_not(self):
+        self.t.write("proc/cpuinfo", "flags\t: fpu hypervisor\n")
+        self.t.pci("0000:02:00.0", "0x8086", "0x020000")
+        self.assertEqual(self.t.py_findings()[0], set())
+        self.assertEqual(self.t.sh_findings(), (set(), 0))
+        self.t.intel_me()
+        self.assertEqual(self.t.py_findings()[0], {("intel-me", "active")})
+
+    def test_dma_chips_without_an_iommu_are_a_finding_of_their_own(self):
+        import shutil
+        shutil.rmtree(self.t.root / "sys/kernel/iommu_groups")
+        self.t.pci("0000:02:00.0", "0x8086", "0x020000")
+        want = {("network", "active"), ("no-iommu", "active")}
+        self.assertEqual(self.t.py_findings()[0], want)
+        self.assertEqual(self.t.sh_findings()[0], want)
+
+    def test_no_dma_chips_means_no_iommu_finding(self):
+        import shutil
+        shutil.rmtree(self.t.root / "sys/kernel/iommu_groups")
+        self.assertEqual(self.t.py_findings()[0], set())
+
+    def test_there_is_no_resident_checker(self):
+        import ast
+        tree = ast.parse(Path(firmware.__file__).read_text())
+        imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+        self.assertFalse(imported & {"threading", "subprocess", "multiprocessing", "sched", "asyncio", "signal"})
+        self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.While)])    # no loop that waits and watches
+        sh = SH.read_text()
+        self.assertNotRegex(sh, r"(?m)^\s*(while\s+(true|:)|sleep\b)|&\s*$")        # no sleep loop, no background job
+
+    def test_cmdline_turns_the_iommu_on_strictly(self):
+        cmd = (SH.parent.parent.parent / "kernel" / "cmdline.txt").read_text()
+        for arg in ("intel_iommu=on", "amd_iommu=force_isolation", "iommu.strict=1", "iommu.passthrough=0"):
+            self.assertIn(arg, cmd)
 
 
 class TestPolicy(FirmwareCase):
@@ -240,7 +308,7 @@ class TestShellAgreesWithPython(FirmwareCase):
         self.agree(1)
 
     def test_unrelated_devices(self):
-        self.t.pci("0000:00:02.0", "0x8086", "0x030000")
+        self.t.pci("0000:00:00.0", "0x8086", "0x060000")
         self.agree(0)
 
     def test_warn_policy(self):
