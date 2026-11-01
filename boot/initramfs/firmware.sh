@@ -17,7 +17,37 @@
 # cat, echo, od.
 
 FW_ROOT=${FW_ROOT:-}
+FW_ALLOW=${FW_ALLOW:-/firmware.allow}    # the owner's allow list, inside the signed image
 fw_active=0
+fw_pci=""
+fw_kinds=""
+
+# Load "pci VVVV:DDDD" and "kind NAME" lines. Unknown lines allow nothing.
+fw_load_allow() {
+    fw_pci=" "; fw_kinds=" "
+    [ -r "$FW_ALLOW" ] || return 0
+    while read -r fw_a fw_b fw_rest; do
+        case "$fw_a:$fw_b" in
+            pci:?*)   # lowercase hex, "0x" optional on either half
+                fw_b=${fw_b#0x}
+                case "$fw_b" in *:0x*) fw_b="${fw_b%%:*}:${fw_b#*:0x}" ;; esac
+                fw_pci="$fw_pci$fw_b " ;;
+            kind:?*) fw_kinds="$fw_kinds$fw_b " ;;
+        esac
+    done < "$FW_ALLOW"
+}
+
+# fw_emit KIND STATE PATH: prints the finding; an owner-allowed active chip becomes "allowed".
+fw_emit() {
+    fw_st=$2
+    if [ "$fw_st" = active ]; then
+        case "$fw_pci" in *" $fw_id "*) fw_st=allowed ;; esac
+        case "$fw_kinds" in *" $1 "*) fw_st=allowed ;; esac
+    fi
+    echo "FINDING $1 $fw_st $3"
+    if [ "$fw_st" = active ]; then fw_active=1; fi
+    if [ "$fw_st" = active ] || [ "$fw_st" = allowed ]; then fw_dma=1; fi   # allowed chips still do DMA
+}
 
 fw_read() {
     fw_val=""
@@ -35,10 +65,13 @@ kos_firmware_scan() {
         done < "$FW_ROOT/proc/cpuinfo"
     fi
     fw_dma=0
+    fw_load_allow
+    fw_id=""
     for dev in "$FW_ROOT"/sys/bus/pci/devices/*; do
         [ -e "$dev/vendor" ] || continue
         fw_read "$dev/vendor"; fw_v=$fw_val
         fw_read "$dev/class";  fw_c=$fw_val
+        fw_read "$dev/device"; fw_id="${fw_v#0x}:${fw_val#0x}"
         rel=${dev#"$FW_ROOT"/}
         case "$fw_v:$fw_c" in
             0x8086:0x0780*)
@@ -49,15 +82,13 @@ kos_firmware_scan() {
                 set -- $fw_bytes
                 if [ $# -eq 4 ]; then fw_mode=$((0x$3 & 15)); fi
                 if [ "$fw_mode" = 3 ]; then
-                    echo "FINDING intel-me neutralized $rel"
+                    fw_emit intel-me neutralized "$rel"
                 else
-                    echo "FINDING intel-me active $rel"
-                    fw_active=1; fw_dma=1
+                    fw_emit intel-me active "$rel"
                 fi
                 ;;
             0x1022:0x1080*)
-                echo "FINDING amd-psp active $rel"
-                fw_active=1; fw_dma=1
+                fw_emit amd-psp active "$rel"
                 ;;
             *:0x0c0340*) fw_kind=thunderbolt ;;
             *:0x02*) fw_kind=network ;;
@@ -74,10 +105,9 @@ kos_firmware_scan() {
                         case "$fw_val" in D3cold|d3cold) fw_off=1 ;; esac ;;
                 esac
                 if [ "$fw_off" -eq 1 ]; then
-                    echo "FINDING $fw_kind neutralized $rel"
+                    fw_emit "$fw_kind" neutralized "$rel"
                 else
-                    echo "FINDING $fw_kind active $rel"
-                    fw_active=1; fw_dma=1
+                    fw_emit "$fw_kind" active "$rel"
                 fi
             fi
             fw_kind=""
@@ -88,8 +118,9 @@ kos_firmware_scan() {
                     thunderbolt:sys/bus/thunderbolt/devices/domain*; do
             for n in "$FW_ROOT"/${pair#*:}; do
                 [ -e "$n" ] || continue
-                echo "FINDING ${pair%%:*} active ${n#"$FW_ROOT"/}"
-                fw_active=1
+                fw_id=""; fw_save=$fw_dma
+                fw_emit "${pair%%:*}" active "${n#"$FW_ROOT"/}"
+                case "${pair%%:*}" in thunderbolt) ;; *) fw_dma=$fw_save ;; esac   # only Thunderbolt counts as DMA here
                 break
             done
         done
@@ -97,8 +128,9 @@ kos_firmware_scan() {
     for n in "$FW_ROOT"/dev/ipmi* "$FW_ROOT"/dev/ipmi/* "$FW_ROOT"/sys/class/ipmi/ipmi* \
              "$FW_ROOT"/sys/firmware/dmi/entries/38-*; do
         [ -e "$n" ] || continue
-        echo "FINDING bmc-ipmi active ${n#"$FW_ROOT"/}"
-        fw_active=1
+        fw_id=""; fw_save=$fw_dma
+        fw_emit bmc-ipmi active "${n#"$FW_ROOT"/}"
+        fw_dma=$fw_save
         break
     done
     if [ "$fw_dma" -eq 1 ] || [ -e "$FW_ROOT"/sys/bus/thunderbolt/devices/domain0 ]; then

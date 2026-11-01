@@ -709,6 +709,9 @@ def cmd_firmware(args, paths: Paths) -> int:
     print(f"policy: kos.firmware={v.policy}")
     print("\n".join(v.lines()))
     print("boot: " + ("allowed" if v.ok else "REFUSED - " + (v.reason() or "")))
+    print("\nwhat the chips we cannot remove can still see:")
+    for name, status, note in firmware.protections():
+        print(f"  {name:24} {status}\n      {note}")
     return 0 if v.ok else 1
 
 

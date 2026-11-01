@@ -51,6 +51,12 @@ NIC, GPU or the root disk's controller would break the machine, and the IOMMU
 (``kernel/cmdline.txt``) is what confines them. Inside a VM they are emulated
 and ignored. On real hardware this means almost nothing boots under ``enforce``.
 
+Allow list: ``etc/kos/firmware.allow`` (``boot/firmware.allow`` in the pre-boot image) lists
+``pci VVVV:DDDD`` or ``kind NAME`` entries the owner accepts, for example after reflashing a
+chip with firmware they trust. Allowed chips are still printed (ALLOWED), never hidden. The OS
+does not check that the firmware is what the list claims - it cannot - so the list is the owner
+vouching for the hardware. KOS never uploads firmware to a chip.
+
 Policy comes from the signed kernel command line (``kos.firmware=``):
 ``enforce`` (default, also for any unknown value) halts; ``warn`` mitigates,
 alerts and boots anyway. PID 1 ignores the environment; only a development run
@@ -99,6 +105,7 @@ class Finding:
     detail: str = ""
     device: str = ""     # sysfs device directory, relative to the root, for mitigation
     detached: bool = False   # the OS side was cut by neutralize()
+    pci_id: str = ""     # "vvvv:dddd", for the allow list
 
     def line(self) -> str:
         tail = f" - {self.detail}" if self.detail else ""
@@ -115,7 +122,7 @@ class Verdict:
 
     @property
     def blocking(self) -> list[Finding]:
-        return [f for f in self.findings if f.state == "active"]
+        return [f for f in self.findings if f.state == "active"]   # "allowed" and "neutralized" do not block
 
     @property
     def ok(self) -> bool:
@@ -176,6 +183,36 @@ def _in_vm(root: Path) -> bool:
     return " hypervisor" in _read(root / "proc/cpuinfo")
 
 
+ALLOW_FILE = "etc/kos/firmware.allow"
+
+
+def load_allow(path: Path) -> tuple[set[str], set[str]]:
+    """The owner's allow list: ``pci VVVV:DDDD`` (one device) and ``kind NAME`` (a whole
+    class of chip, e.g. an open-source embedded controller). Unknown lines are ignored,
+    so a typo allows nothing. It lives where only the owner can write it: the signed
+    pre-boot image for the first check, the encrypted root for the second."""
+    pci, kinds = set(), set()
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return pci, kinds
+    for line in text.splitlines():
+        words = line.split("#", 1)[0].split()          # case-sensitive, like the shell scanner: use lowercase hex
+        if len(words) == 2 and words[0] == "pci":
+            pci.add(words[1].replace("0x", ""))
+        elif len(words) == 2 and words[0] == "kind":
+            kinds.add(words[1])
+    return pci, kinds
+
+
+def apply_allow(findings: list[Finding], allow: tuple[set[str], set[str]]) -> None:
+    pci, kinds = allow
+    for f in findings:
+        if f.state == "active" and f.kind != "no-iommu" and (f.pci_id in pci or f.kind in kinds):
+            f.state = "allowed"
+            f.detail = "on the owner's allow list (" + f.detail + ")"
+
+
 def _pci_findings(root: Path) -> list[Finding]:
     out = []
     vm = _in_vm(root)
@@ -187,6 +224,7 @@ def _pci_findings(root: Path) -> list[Finding]:
     for dev in devices:
         vendor, klass = _read(dev / "vendor"), _read(dev / "class")
         rel = str(dev.relative_to(root))
+        n0 = len(out)
         if vendor == INTEL and klass.startswith(CLASS_MEI):
             mode = me_operation_mode(dev / "config")
             if mode == ME_MODE_DISABLED:
@@ -212,6 +250,8 @@ def _pci_findings(root: Path) -> list[Finding]:
                                            "runs its own firmware and can reach memory by DMA",
                                            rel if off else ""))
                     break
+        for f in out[n0:]:
+            f.pci_id = f"{vendor[2:]}:{_read(dev / 'device')[2:]}"
     return out
 
 
@@ -233,7 +273,7 @@ def _other_findings(root: Path) -> list[Finding]:
 
 def _iommu_finding(root: Path, findings: list[Finding]) -> list[Finding]:
     dma = {"thunderbolt", "network", "display", "nvme", "wireless", "intel-me", "amd-psp"}
-    if not any(f.kind in dma and f.state == "active" for f in findings):
+    if not any(f.kind in dma and f.state in ("active", "allowed") for f in findings):   # allowed chips still do DMA
         return []
     try:
         if any((root / "sys/kernel/iommu_groups").iterdir()):
@@ -275,10 +315,12 @@ def _caveat(root: Path) -> str:
     return ""
 
 
-def probe(root: Path = Path("/"), policy: Optional[str] = None) -> Verdict:
+def probe(root: Path = Path("/"), policy: Optional[str] = None,
+          allow_file: Optional[Path] = None) -> Verdict:
     root = Path(root)
     v = Verdict(policy or current_policy(root))
     v.findings = _pci_findings(root) + _bmc_findings(root) + _other_findings(root)
+    apply_allow(v.findings, load_allow(allow_file or root / ALLOW_FILE))
     v.findings += _iommu_finding(root, v.findings)
     if not v.findings:
         v.caveat = _caveat(root)
@@ -347,3 +389,54 @@ def enforce(root: Path = Path("/"), policy: Optional[str] = None, *, mitigate: b
     for f in second.findings:
         f.detached = any(g.detached and g.where == f.where for g in first.findings)
     return second
+
+
+# --- what the chips can and cannot see: the protections actually in effect ----------
+
+def protections(root: Path = Path("/")) -> list[tuple[str, str, str]]:
+    """(protection, status, what it does and does not buy you). Read-only and
+    non-blocking: these narrow what a chip we cannot remove can read; none of them
+    stops one that legitimately shares the memory bus (the ME, PSP, a GPU)."""
+    root = Path(root)
+    out = []
+
+    try:
+        groups = any((root / "sys/kernel/iommu_groups").iterdir())
+    except OSError:
+        groups = False
+    out.append(("IOMMU", "on" if groups else "OFF",
+                "DMA-capable chips can only reach memory the OS maps for them"
+                if groups else "DMA-capable chips can read any memory"))
+
+    cpu = _read(root / "proc/cpuinfo")
+    flags = set()
+    for line in cpu.splitlines():
+        if line.startswith("flags"):
+            flags = set(line.split(":", 1)[-1].split())
+            break
+    mem = [f for f in ("tme", "sme", "sev") if f in flags]
+    out.append(("memory encryption", f"CPU supports {'/'.join(mem)}" if mem else "not offered by this CPU",
+                "RAM is ciphertext on the memory bus and in the chips (cold-boot, DRAM probes). The OS "
+                "cannot confirm firmware switched it on, and a chip that reads RAM through the CPU "
+                "still sees plaintext"))
+
+    crypt = []
+    try:
+        crypt = [p for p in (root / "sys/block").glob("dm-*/dm/uuid")
+                 if _read(p).startswith("crypt-luks")]
+    except OSError:
+        pass
+    out.append(("disk encryption (LUKS2)", "on" if crypt else "not seen",
+                "the SSD's own controller only ever handles ciphertext; KOS does not rely on its "
+                "built-in encryption" if crypt else "no unlocked LUKS volume seen"))
+
+    tb = [_read(p) for p in sorted((root / "sys/bus/thunderbolt/devices").glob("domain*/security"))]
+    if tb:
+        weak = [t for t in tb if t in ("", "none")]
+        out.append(("Thunderbolt security", "OFF (none)" if weak else ", ".join(tb),
+                    "devices are authorised before they get PCIe/DMA" if not weak
+                    else "any plugged-in device is connected at once"))
+    out.append(("network", "not checked",
+                "NIC/ME/AMT firmware sees every packet; only end-to-end encryption (TLS, WireGuard) hides "
+                "the contents, never who you talk to"))
+    return out

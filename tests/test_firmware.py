@@ -42,9 +42,14 @@ class Tree:
         p.write_text(text)
         return p
 
-    def pci(self, bdf, vendor, klass, hfsts1=None, driver=None):
+    def allow(self, *lines):
+        self.write("etc/kos/firmware.allow", "\n".join(lines) + "\n")
+        return self.root / "etc/kos/firmware.allow"
+
+    def pci(self, bdf, vendor, klass, hfsts1=None, driver=None, device="0x1234"):
         d = f"sys/bus/pci/devices/{bdf}"
         self.write(f"{d}/vendor", vendor + "\n")
+        self.write(f"{d}/device", device + "\n")
         self.write(f"{d}/class", klass + "\n")
         self.write(f"{d}/driver_override", "(null)\n")
         self.write(f"{d}/d3cold_allowed", "0\n")
@@ -66,7 +71,7 @@ class Tree:
 
     def sh_findings(self):
         """(kind, state) pairs and the gate's exit status from the shell script."""
-        script = (f'FW_ROOT="{self.root}"; . "{SH}"; kos_firmware_scan; '
+        script = (f'FW_ROOT="{self.root}"; FW_ALLOW="{self.root}/etc/kos/firmware.allow"; . "{SH}"; kos_firmware_scan; '
                   f'echo "ACTIVE=$fw_active"; kos_firmware_gate >/dev/null; echo "GATE=$?"')
         out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=True).stdout
         found = {tuple(l.split()[1:3]) for l in out.splitlines() if l.startswith("FINDING ")}
@@ -430,6 +435,102 @@ class TestInitGate(FirmwareCase):
         with self.assertRaises(Unsatisfied) as ctx:
             good.ensure("session.unlock")
         self.assertEqual(ctx.exception.chain[-1], "admin.keyboard")   # got past firmware, stopped at the next link
+
+
+class TestAllowList(FirmwareCase):
+    def both(self):
+        return self.t.py_findings(), self.t.sh_findings()
+
+    def test_an_allowed_device_stops_blocking_but_is_still_reported(self):
+        self.t.pci("0000:03:00.0", "0x8086", "0x0d1100", device="0x2725")
+        self.t.allow("# my reflashed card", "pci 8086:2725")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("wireless", "allowed")})
+        self.assertEqual(sh, py)
+        self.assertTrue(v.ok)
+        self.assertEqual(gate, 0)
+        self.assertIn("ALLOWED", v.findings[0].line())
+
+    def test_it_matches_the_exact_device_only(self):
+        self.t.pci("0000:03:00.0", "0x8086", "0x0d1100", device="0x2725")
+        self.t.allow("pci 8086:9999", "pci 1022:2725")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("wireless", "active")})
+        self.assertEqual((sh, gate), (py, 1))
+
+    def test_a_kind_entry_covers_non_pci_chips_too(self):
+        (self.t.root / "sys/bus/acpi/devices/PNP0C09:00").mkdir(parents=True)
+        self.t.allow("kind embedded-controller")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("embedded-controller", "allowed")})
+        self.assertEqual((sh, gate), (py, 0))
+
+    def test_allowing_the_me_still_shows_it_and_a_typo_allows_nothing(self):
+        self.t.intel_me()
+        self.t.allow("pci 8086:1234x", "kinds intel-me", "pci", "kind")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("intel-me", "active")})
+        self.assertEqual((sh, gate), (py, 1))
+        self.t.allow("pci 0x8086:0x1234")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("intel-me", "allowed")})
+        self.assertEqual((sh, gate), (py, 0))
+
+    def test_matching_is_case_sensitive_in_both_scanners(self):
+        self.t.pci("0000:03:00.0", "0x8086", "0x0d1100", device="0x2a2b")
+        self.t.allow("pci 8086:2A2B")                    # uppercase: not the id sysfs reports
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("wireless", "active")})
+        self.assertEqual((sh, gate), (py, 1))
+
+    def test_the_missing_iommu_cannot_be_allowed_away(self):
+        import shutil
+        shutil.rmtree(self.t.root / "sys/kernel/iommu_groups")
+        self.t.pci("0000:02:00.0", "0x8086", "0x020000", device="0x15f3")
+        self.t.allow("kind no-iommu", "pci 8086:15f3")
+        (py, v), (sh, gate) = self.both()
+        self.assertFalse(v.ok)       # the NIC is allowed, but with no IOMMU the finding stands
+        self.assertEqual(gate, 1)
+
+    def test_the_image_ships_the_list_in_both_places(self):
+        mk = (SH.parent.parent / "mkinitramfs.sh").read_text()
+        img = (SH.parent.parent.parent / "image" / "mkimage.sh").read_text()
+        self.assertIn("firmware.allow", mk)
+        self.assertIn("etc/kos/firmware.allow", img)
+        self.assertEqual(firmware.load_allow(SH.parent.parent / "firmware.allow"), (set(), set()))   # ships empty
+
+
+class TestProtections(FirmwareCase):
+    def by_name(self):
+        return {n: (st, note) for n, st, note in firmware.protections(self.t.root)}
+
+    def test_reports_what_is_on_and_is_honest_about_the_rest(self):
+        self.t.write("proc/cpuinfo", "flags\t: fpu tme\n")
+        self.t.write("sys/block/dm-0/dm/uuid", "CRYPT-LUKS2-abc-kosroot\n")
+        self.t.write("sys/bus/thunderbolt/devices/domain0/security", "user\n")
+        p = self.by_name()
+        self.assertEqual(p["IOMMU"][0], "on")
+        self.assertIn("tme", p["memory encryption"][0])
+        self.assertIn("cannot confirm", p["memory encryption"][1])
+        self.assertEqual(p["disk encryption (LUKS2)"][0], "on")
+        self.assertEqual(p["Thunderbolt security"][0], "user")
+        self.assertIn("never who you talk to", p["network"][1])
+
+    def test_missing_protections_are_called_out_not_hidden(self):
+        import shutil
+        shutil.rmtree(self.t.root / "sys/kernel/iommu_groups")
+        self.t.write("sys/bus/thunderbolt/devices/domain0/security", "none\n")
+        p = self.by_name()
+        self.assertEqual(p["IOMMU"][0], "OFF")
+        self.assertEqual(p["memory encryption"][0], "not offered by this CPU")
+        self.assertEqual(p["disk encryption (LUKS2)"][0], "not seen")
+        self.assertEqual(p["Thunderbolt security"][0], "OFF (none)")
+
+    def test_protections_never_change_the_boot_verdict(self):
+        self.t.intel_me()
+        before = firmware.probe(self.t.root).ok
+        firmware.protections(self.t.root)
+        self.assertEqual(firmware.probe(self.t.root).ok, before)
 
 
 class TestCli(unittest.TestCase):
