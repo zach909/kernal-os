@@ -30,6 +30,14 @@ from .sandbox import SandboxPolicy
 
 SDK_DIR = str(Path(__file__).resolve().parent.parent)
 
+# memfd sealing constants. Linux kernel ABI (include/uapi/linux/fcntl.h), stable
+# forever; Python's ``fcntl`` only exports them on some versions, and without
+# them every app launch used to crash before the sandbox even started.
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1024 + 9)
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1024 + 10)
+F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = 0x1, 0x2, 0x4, 0x8
+ALL_SEALS = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE
+
 _BOOTSTRAP = r"""
 import sys, importlib
 kapp, entry, sdk = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -47,8 +55,10 @@ def sealed_memfd(label: str, data: bytes) -> int:
         while view:
             n = os.write(fd, view)
             view = view[n:]
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS,
-                    fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, F_ADD_SEALS, ALL_SEALS)
+        # Fail closed: never hand out a memfd the kernel did not actually seal.
+        if fcntl.fcntl(fd, F_GET_SEALS) & ALL_SEALS != ALL_SEALS:
+            raise OSError("memfd sealing did not take effect")
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)

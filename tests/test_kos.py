@@ -243,6 +243,30 @@ class TestSandboxedRun(Env):
         self.assertIn("vhost-vsock-device,guest-cid=5", argv)
 
 
+class TestSealedMemfd(unittest.TestCase):
+    """The memfd holding the verified app is what actually runs, so the kernel
+    must refuse to change it (no swap between "checked" and "run"). This used to
+    crash on Pythons whose ``fcntl`` lacks the F_*SEAL* constants."""
+
+    def test_sealed_image_cannot_be_modified(self):
+        import errno
+        import fcntl
+        fd = loader.sealed_memfd("probe", b"verified bytes")
+        try:
+            self.assertEqual(fcntl.fcntl(fd, loader.F_GET_SEALS) & loader.ALL_SEALS, loader.ALL_SEALS)
+            self.assertEqual(os.pread(fd, 64, 0), b"verified bytes")
+            for attempt in (lambda: os.pwrite(fd, b"X", 0),           # overwrite
+                            lambda: os.ftruncate(fd, 1 << 16),        # grow
+                            lambda: os.ftruncate(fd, 1),              # shrink
+                            lambda: fcntl.fcntl(fd, loader.F_ADD_SEALS, loader.F_SEAL_WRITE)):  # re-seal
+                with self.assertRaises(OSError) as cm:
+                    attempt()
+                self.assertEqual(cm.exception.errno, errno.EPERM)
+            self.assertEqual(os.pread(fd, 64, 0), b"verified bytes")  # still intact
+        finally:
+            os.close(fd)
+
+
 class TestVFS(Env):
     def test_cd_into_zip_without_extracting(self):
         vfs = VFS(self.tmp.name)
