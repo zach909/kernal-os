@@ -7,10 +7,9 @@ AI OS has exactly four layers and nothing else of NeuroClaw is reachable through
 * ``kernel`` kernel commands (NeuroClaw's Linux permission tools)
 * ``skill``  the auto skill maker
 
-KOS's part is the gate. Each request asks for your password for *that* request (``aios.<layer>``),
-writes the decision to the audit log, and only then is handed to the NeuroClaw engine on this computer
-(``POST /api/ai-os/layer``). NeuroClaw's own tool gate, Computer Access switches and approval queue
-still apply after that, so KOS adds a check; it never removes one.
+KOS carries a request to the NeuroClaw engine on this computer (``POST /api/ai-os/layer``). It asks for
+no password of its own. NeuroClaw's own tool gate, Computer Access switches and approval queue decide
+what happens next, exactly as they do for chat.
 
 Nothing here starts at boot or runs in the background, in keeping with the rest of KOS: the engine is
 asked, once, when you ask. The engine address must be this computer (loopback); anything else is refused.
@@ -26,8 +25,6 @@ import re
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
-
-from .auth import Authority
 
 LAYERS: dict[str, str] = {
     "gui": "graphical button clicker",
@@ -45,10 +42,6 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 class AiosError(Exception):
     pass
-
-
-def action_for(layer: str) -> str:
-    return f"aios.{layer}"
 
 
 def engine_url(env: dict | None = None) -> str:
@@ -97,12 +90,10 @@ def status(opener=urllib.request.urlopen, env: dict | None = None) -> dict:
     return _call(engine_url(env) + "/api/ai-os/layer", "GET", opener=opener)
 
 
-def run_layer(authority: Authority, layer: str, words: list[str] | str,
+def run_layer(layer: str, words: list[str] | str,
               opener=urllib.request.urlopen, env: dict | None = None) -> dict:
-    """Ask your password for this one request, then hand it to the engine. Returns the engine's outcome."""
+    """Hand one request to the engine. Returns the engine's outcome."""
     if layer not in LAYERS:
         raise AiosError(f"AI OS has four layers: {', '.join(LAYERS)}")
     request = clean_request(words)
-    url = engine_url(env)                       # refuse a bad address before asking for the password
-    with authority.authorize(action_for(layer), request[:60]):
-        return _call(url + "/api/ai-os/layer", "POST", {"layer": layer, "request": request}, opener=opener)
+    return _call(engine_url(env) + "/api/ai-os/layer", "POST", {"layer": layer, "request": request}, opener=opener)
