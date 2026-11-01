@@ -65,10 +65,6 @@ ACTIONS: dict[str, str] = {
     "file.write": "write file",
     "code.run": "run code",
     "admin.boot": "boot the administrator keyboard",
-    "aios.gui": "use the AI OS button clicker",
-    "aios.app": "run an AI OS app command",
-    "aios.kernel": "run an AI OS kernel command",
-    "aios.skill": "use the AI OS skill maker",
 }
 
 

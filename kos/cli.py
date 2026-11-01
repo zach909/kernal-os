@@ -528,15 +528,14 @@ def cmd_permit(args, paths: Paths) -> int:
 
 def cmd_aios(args, paths: Paths) -> int:
     """AI OS: `kos aios status` lists the four layers; `kos aios gui|app|kernel|skill WORDS...` runs one
-    request on a layer, asking your password for it first. NeuroClaw does the work; KOS is the gate."""
+    request on a layer. No password: NeuroClaw's own approvals decide what happens."""
     from . import aios
     if args.layer == "status":
         info = aios.status()
         for l in info.get("layers", []):
             print(f"{'ok ' if l.get('available') else 'no '} {l['id']:7} {l['label']}" + (f" ({l['reason']})" if l.get("reason") else ""))
         return 0
-    authority, _ = _authority(paths)
-    out = aios.run_layer(authority, args.layer, args.words)
+    out = aios.run_layer(args.layer, args.words)
     print(out.get("text", ""))
     status = out.get("status")
     return 0 if status == "ran" else 4 if status == "held" else 1

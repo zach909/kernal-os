@@ -1303,8 +1303,8 @@ class TestCodeIsACommand(Env):
         self.assertIn("NameError", out)
 
 
-class TestAiOs(Env):
-    """AI OS: KOS asks the password for each request, then hands it to the NeuroClaw engine on this computer."""
+class TestAiOs(unittest.TestCase):
+    """AI OS: KOS hands a request to the NeuroClaw engine on this computer. No password."""
 
     class Fake:
         """Stands in for urllib.request.urlopen; records what would have been sent."""
@@ -1316,30 +1316,22 @@ class TestAiOs(Env):
             body = json.dumps(self.reply).encode()
             return type("R", (), {"read": lambda s: body, "__enter__": lambda s: s, "__exit__": lambda s, *a: False})()
 
-    def test_request_asks_password_then_calls_engine(self):
+    def test_request_goes_to_engine_with_no_password(self):
         from kos import aios
         fake = self.Fake({"status": "ran", "text": "done"})
-        a = self.authority(PW)
-        out = aios.run_layer(a, "gui", ["click", "Save"], opener=fake)
+        out = aios.run_layer("gui", ["click", "Save"], opener=fake)
         self.assertEqual(out["text"], "done")
         url, method, data = fake.sent[0]
         self.assertEqual((url, method), ("http://127.0.0.1:7861/api/ai-os/layer", "POST"))
         self.assertEqual(json.loads(data), {"layer": "gui", "request": "click Save"})
-        self.assertEqual([e["action"] for e in a.audit.entries()][-1], "aios.gui")
+        self.assertNotIn("aios.gui", __import__("kos.auth", fromlist=["ACTIONS"]).ACTIONS)
 
-    def test_wrong_password_sends_nothing(self):
-        from kos import aios
-        fake = self.Fake({"status": "ran", "text": "x"})
-        with self.assertRaises(AuthorizationDenied):
-            aios.run_layer(self.authority("no", "no", "no"), "kernel", ["list", "services"], opener=fake)
-        self.assertEqual(fake.sent, [])
-
-    def test_only_four_layers_and_bad_requests_never_ask_for_a_password(self):
+    def test_only_four_layers_and_bad_requests_send_nothing(self):
         from kos import aios
         fake = self.Fake({})
         for layer, words in (("email", ["hi"]), ("gui", []), ("app", ["x" * 601])):
             with self.assertRaises(aios.AiosError):
-                aios.run_layer(self.authority(), layer, words, opener=fake)   # no answers: any prompt fails the test
+                aios.run_layer(layer, words, opener=fake)
         self.assertEqual(fake.sent, [])
 
     def test_engine_must_be_on_this_computer(self):
@@ -1353,7 +1345,7 @@ class TestAiOs(Env):
         from kos import aios
         self.assertEqual(aios.clean_request(["a\x1b[31m", "b\x00c"]), "a [31m b c")
 
-    def test_status_lists_layers_without_a_password(self):
+    def test_status_lists_layers(self):
         from kos import aios
         fake = self.Fake({"layers": [{"id": "gui", "label": "x", "available": True}]})
         self.assertEqual(aios.status(opener=fake)["layers"][0]["id"], "gui")
