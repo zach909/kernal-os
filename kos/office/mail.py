@@ -135,8 +135,9 @@ def to_mbox(msgs: list) -> str:
 
 # ---------------------------------------------------------------- client ----
 class MailClient(Screen):
-    def __init__(self, host, title="Mail"):
+    def __init__(self, host, title="Mail", contacts=None):
         self.host, self.title, self.ms, self.st = host, title, MailStore(host), Store(host)
+        self.contacts = contacts          # callable(prefix) -> addresses, from the shared 'contacts' space
         self.acct = self.st.load("account", "")
         if not self.acct and self.ms.users.items: self.acct = self.ms.users.items[0]["addr"]
         self.folder = "inbox"
@@ -216,8 +217,7 @@ class MailClient(Screen):
                 self.msg = " | ".join(res)
                 return ("pop", None)
             return ("push", Editor("Compose: " + s, body, extra_keys={"ctrl-x": send}, hint="Ctrl-X send   Esc discard"))
-        if to: return ("push", Prompt("Compose", "To (comma separated):", ", ".join(to), got_to))
-        return ("push", Prompt("Compose", "To (comma separated):", "", got_to))
+        return ("push", Prompt("Compose", "To (comma separated):", ", ".join(to or []), got_to, suggest=self.contacts))
 
 
 # ---------------------------------------------------------------- server ----

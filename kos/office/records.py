@@ -141,8 +141,11 @@ class Data:
     def items(self) -> list:
         return self.d["items"]
 
+    error = ""
+
     def save(self) -> None:
-        self.store.save(self.key, self.d)
+        ok = self.store.save(self.key, self.d)
+        self.error = "" if ok else (getattr(self.store.host, "error", "") or "could not save")
 
     def derive(self, rec: dict) -> dict:
         if self.spec.calc:
@@ -327,6 +330,8 @@ class RecordList(Screen):
         out += [tbl[0], tbl[1]]
         for i, line in enumerate(tbl[2:]):
             out.append(("> " if top + i == self.nav.sel else "  ") + line)
+        if self.data.error:
+            out += ["", " ! NOT SAVED: " + self.data.error]
         if self.msg:
             out += ["", " " + self.msg]
         return out

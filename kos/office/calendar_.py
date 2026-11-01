@@ -134,8 +134,9 @@ class SlotScheduler(Screen):
 
     CFG = {"days": [0, 1, 2, 3, 4], "open": "09:00", "close": "17:00", "slot": 30, "horizon": 14}
 
-    def __init__(self, host, title="Appointments"):
+    def __init__(self, host, title="Appointments", calendar_host=None, contacts=None):
         self.title, self.st = title, Store(host)
+        self.calendar_host, self.contacts = calendar_host, contacts      # shared spaces, if this app was let in
         self.cfg = {**self.CFG, **self.st.load("config", {})}
         self.book = self.st.load("bookings", [])
         self.nav = ListNav(0)
@@ -171,7 +172,7 @@ class SlotScheduler(Screen):
         s = self.slots()
         if k == "enter" and s:
             d, t = s[self.nav.sel]
-            return ("push", Prompt("Book", f"Name for {d} {t}:", "", lambda v: self._book(d, t, v)))
+            return ("push", Prompt("Book", f"Name for {d} {t}:", "", lambda v: self._book(d, t, v), suggest=self.contacts))
         if k == "b":
             return ("push", TextView("Bookings", [f"{b['date']} {b['time']}  {b['who']}" for b in sorted(self.book, key=lambda b: (b['date'], b['time']))] or ["none"]))
         if k == "c":
@@ -186,6 +187,11 @@ class SlotScheduler(Screen):
         if any(b["date"] == d and b["time"] == t for b in self.book): self.msg = "slot already taken"; return
         self.book.append({"date": d, "time": t, "who": who, "at": now_stamp()}); self.st.save("bookings", self.book)
         self.msg = f"booked {d} {t} for {who}"
+        if self.calendar_host is not None:      # also put it on the shared calendar, if we were let in
+            cal = Data(self.calendar_host, EVENT_SPEC)
+            end = mins(t) + int(self.cfg["slot"])
+            cal.add({"title": f"Appointment: {who}", "date": d, "start": t, "end": f"{end // 60:02d}:{end % 60:02d}", "repeat": "none", "until": "", "notes": ""})
+            self.msg += "; on the shared calendar" if not cal.error else f"; NOT on the calendar: {cal.error}"
 
     def _cancel(self, v):
         n = len(self.book); p = v.split()

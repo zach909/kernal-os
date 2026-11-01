@@ -45,6 +45,7 @@ RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
 PERMISSIONS = {"network", "system", "storage"}
+SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description"}
 
 
@@ -87,8 +88,10 @@ class Manifest:
         if not modes or not set(modes) <= MODES or not all(isinstance(m, str) for m in modes):
             raise KAppError(f"modes must be a non-empty subset of {sorted(MODES)}")
         perms = tuple(d.get("permissions", []))
-        if not set(perms) <= PERMISSIONS:
-            raise KAppError(f"permissions must be a subset of {sorted(PERMISSIONS)}")
+        for perm in perms:
+            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)):
+                raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
+                                "'owns:NAME' (create a shared folder) or 'uses:NAME' (look for one)")
         desc = d.get("description", "")
         if not isinstance(desc, str) or len(desc) > 200:
             raise KAppError("description must be a string of at most 200 characters")

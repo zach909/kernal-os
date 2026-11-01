@@ -19,7 +19,7 @@ OS -> app
     {"cmd": "apps", "installed": [{name, version, description, modes, permitted}],
                     "open": [{id, name, mode, status}]}                  (answer to request apps)
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
-    {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?}
+    {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
     {"cmd": "quit"}
 
@@ -34,8 +34,9 @@ app -> OS
     {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
-    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete", "key": str?, "value": str?}
-                                         durable per-app storage (needs the 'storage' permission)
+    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
+                                         durable storage: the app's private data ('storage' permission) or a
+                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
     {"cmd": "exit", "code": int}
 
 ``request`` is how an app does anything beyond drawing: it *asks*. The OS only
@@ -120,7 +121,8 @@ def _request(msg: dict) -> dict:
     raise ProtocolError(f"unknown request {action!r}")
 
 
-VAULT_OPS = ("put", "get", "list", "delete")
+VAULT_OPS = ("put", "get", "list", "delete", "spaces")
+_SPACE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _VAULT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MAX_VAULT_VALUE = 400_000
 
@@ -131,7 +133,11 @@ def _vault(msg: dict) -> dict:
         raise ProtocolError(f"vault.op must be one of {VAULT_OPS}")
     ident = _int(ident, 0, 2**31)
     out = {"cmd": "vault", "op": op, "id": ident}
-    if op != "list":
+    if msg.get("space") is not None:
+        if not isinstance(msg["space"], str) or not _SPACE_RE.match(msg["space"]) or op == "spaces":
+            raise ProtocolError("vault.space must be a plain space name (and not used with 'spaces')")
+        out["space"] = msg["space"]
+    if op not in ("list", "spaces"):
         key = msg.get("key")
         if not isinstance(key, str) or not _VAULT_KEY_RE.match(key):
             raise ProtocolError("vault.key must be a plain lowercase name")

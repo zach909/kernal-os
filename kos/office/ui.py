@@ -20,10 +20,12 @@ class Host:
 
     def events(self) -> Iterator[dict]: raise NotImplementedError
     def screen(self, title: str, lines: list, status: str = "") -> None: raise NotImplementedError
-    def get(self, key: str) -> Optional[str]: raise NotImplementedError
-    def put(self, key: str, value: str) -> bool: raise NotImplementedError
-    def keys(self) -> list: raise NotImplementedError
-    def delete(self, key: str) -> bool: raise NotImplementedError
+    error = ""      # why the last storage call was refused (shown by apps instead of failing silently)
+
+    def get(self, key: str, space: Optional[str] = None) -> Optional[str]: raise NotImplementedError
+    def put(self, key: str, value: str, space: Optional[str] = None) -> bool: raise NotImplementedError
+    def keys(self, space: Optional[str] = None) -> list: raise NotImplementedError
+    def delete(self, key: str, space: Optional[str] = None) -> bool: raise NotImplementedError
     def exit(self, code: int = 0) -> None: raise NotImplementedError
     def present(self, canvas) -> None: raise NotImplementedError
 
@@ -42,18 +44,23 @@ class AppHost(Host):
     def events(self): return self.app.events()
     def screen(self, title, lines, status=""): self.app.screen(title, lines, status)
     def present(self, canvas): self.app.present(canvas)
-    def get(self, key): return self.app.vault_get(key)
-    def put(self, key, value): return self.app.vault_put(key, value)
-    def keys(self): return self.app.vault_keys()
-    def delete(self, key): return self.app.vault_delete(key)
+    @property
+    def error(self): return self.app.vault_error
+
+    def get(self, key, space=None): return self.app.vault_get(key, space)
+    def put(self, key, value, space=None): return self.app.vault_put(key, value, space)
+    def keys(self, space=None): return self.app.vault_keys(space)
+    def delete(self, key, space=None): return self.app.vault_delete(key, space)
     def exit(self, code=0): self.app.exit(code)
 
 
 class FakeHost(Host):
     """Scripted host for tests: feed keys, read back the last screen."""
 
-    def __init__(self, keys: list | str = (), width: int = 80, height: int = 22, data=None, mode: str = "tui"):
+    def __init__(self, keys: list | str = (), width: int = 80, height: int = 22, data=None, mode: str = "tui", storage=None):
         self.width, self.height, self.mode = width, height, mode
+        self.storage = storage              # a real kos.spaces.AppStorage: shared spaces are then truly enforced
+        self.spaces: dict = {}              # without storage, spaces are plain in-memory dicts
         self.data: dict = dict(data or {})
         raw = list(keys) if not isinstance(keys, str) else self.tokens(keys)
         self.script = [c for k in raw for c in self.expand(k)]
@@ -91,16 +98,58 @@ class FakeHost(Host):
         self.frames.append((title, list(lines), status))
 
     def present(self, canvas): self.canvases.append(canvas.ops)
-    def get(self, key): return self.data.get(key)
-    def put(self, key, value): self.data[key] = value; return True
-    def keys(self): return sorted(self.data)
-    def delete(self, key): return self.data.pop(key, None) is not None
+    def _vault(self, space, op):
+        from kos.spaces import StorageError
+        try:
+            self.error = ""
+            return self.storage.vault(space, op)
+        except StorageError as e:
+            self.error = str(e)
+            return None
+
+    def get(self, key, space=None):
+        if space and self.storage:
+            v = self._vault(space, "get"); return v.get(key) if v else None
+        return (self.spaces.setdefault(space, {}) if space else self.data).get(key)
+
+    def put(self, key, value, space=None):
+        if space and self.storage:
+            v = self._vault(space, "put")
+            if not v: return False
+            v.put(key, value); return True
+        (self.spaces.setdefault(space, {}) if space else self.data)[key] = value
+        return True
+
+    def keys(self, space=None):
+        if space and self.storage:
+            v = self._vault(space, "list"); return v.keys() if v else []
+        return sorted(self.spaces.setdefault(space, {}) if space else self.data)
+
+    def delete(self, key, space=None):
+        if space and self.storage:
+            v = self._vault(space, "delete"); return bool(v and v.delete(key))
+        return (self.spaces.setdefault(space, {}) if space else self.data).pop(key, None) is not None
     def exit(self, code=0): self.exited = code
 
     @property
     def text(self) -> str:
         t, lines, st = self.frames[-1]
         return "\n".join([t, *lines, st])
+
+
+class SpaceHost:
+    """The same host API, pointed at a shared space instead of the app's private data."""
+
+    def __init__(self, host, space: str):
+        self._h, self.space = host, space
+
+    def __getattr__(self, n): return getattr(self._h, n)
+    @property
+    def error(self): return self._h.error
+    def get(self, key): return self._h.get(key, space=self.space)
+    def put(self, key, value): return self._h.put(key, value, space=self.space)
+    def keys(self): return self._h.keys(space=self.space)
+    def delete(self, key): return self._h.delete(key, space=self.space)
 
 
 # --------------------------------------------------------- persistence ----
@@ -325,19 +374,30 @@ class Prompt(Screen):
     """One-line input. ``on_done(text)`` runs after this screen has popped."""
 
     def __init__(self, title: str, label: str, initial: str = "", on_done: Callable = None,
-                 secret: bool = False):
-        self.title, self.label, self.on_done, self.secret = title, label, on_done, secret
+                 secret: bool = False, suggest: Callable = None):
+        self.title, self.label, self.on_done, self.secret, self.suggest = title, label, on_done, secret, suggest
         self.inp = TextInput(initial)
-        self.help = "Enter accept   Esc cancel"
+        self.help = "Enter accept   Esc cancel" + ("   Tab complete" if suggest else "")
+
+    def _suggestions(self):
+        if not self.suggest: return []
+        last = self.inp.value.rsplit(",", 1)[-1].strip()
+        return self.suggest(last)[:5] if last else []
 
     def render(self, w, h):
         v = self.inp.render()
         if self.secret:
             v = "*" * len(self.inp.value) + CURSOR
-        return ["", f"  {self.label}", "", f"  > {v}"]
+        sug = self._suggestions()
+        return ["", f"  {self.label}", "", f"  > {v}"] + (["", "  suggestions:"] + [f"    {x}" for x in sug] if sug else [])
 
     def key(self, k):
         if k == "escape": return ("pop", None)
+        if k == "tab" and self.suggest:
+            sug = self._suggestions()
+            if sug:
+                head = self.inp.value.rsplit(",", 1)[0] + ", " if "," in self.inp.value else ""
+                self.inp = TextInput(head + sug[0]); return None
         if k == "enter":
             val = self.inp.value
             return ("pop", (lambda: self.on_done(val)) if self.on_done else None)

@@ -75,17 +75,32 @@ following ones via `preboot`.
 Gap: the desktop's first-session password also covers every later app it
 switches to for *devices*; opening an app still always asks.
 
-## Vault (`kos/vault.py`)
-The sandbox's only writable place is a cache wiped on exit, so apps could never keep anything. The vault is
-the OS-mediated answer: an app with the `storage` permission sends `{"cmd":"vault","op":"put|get|list|delete",
-"id":N,"key":..,"value":..}`; the *session* (not the app) validates it (`protocol._vault`), checks it was given
-a `Vault` (built by `cli._vault_for` from the installed manifest, never from anything the app says), does the
-disk I/O under `<state>/vault/<app>/`, and replies. Keys are `[a-z0-9._-]{1,64}` (no traversal), items are
-capped at 400k chars / 500 items / 64 MiB per app. `sdk.App.vault_*` are blocking round trips that keep any
-other event that arrives meanwhile.
-Gaps: values are clear text on the (LUKS2) volume, not sealed with the password-derived key (the session does
-not hold the master key while an app runs); an app cannot read another app's vault, so apps that conceptually
-belong together (mail client/server, calendar/automation) do not exchange data; cells get no vault.
+## App folders, permissions and shared spaces
+`appdirs.py` gives every app `<state>/appdata/<app>/{cache,data,run}`. **cache** is the per-run scratch the
+sandbox may write, wiped by whoever owns the process when it ends (`cache.py`, unchanged in behaviour but now
+under the app's own folder). **data** is the vault (`vault.py`): the app's private, durable text items.
+**run** holds the live instance record, socket and log (`registry.py`, `system.py`); the registry globs
+`appdata/*/run/*.json`. Only `cache/<run>` is ever handed to the sandbox as writable.
+
+`permissions.py` is the one universal store, `<state>/permissions/grants.json`: entries `{app, resource, level}`
+with resources `run` and `space:NAME` and levels `use < read < write < own`. The run permit (`permit.py`) is
+just resource `run` plus the manifest permissions the owner approved (`declared`); `check_declared` refuses to
+start an app whose manifest has since grown (e.g. gained `network`). Old `<state>/permits/*.json` files migrate
+on first read.
+
+`spaces.py` (`AppStorage`) is what a session holds for its app, built by `cli._vault_for` from the verified
+manifest: `storage` opens the private data; `owns:NAME` creates/uses the shared folder
+`<state>/spaces/NAME/` and records `own` for the app the first time; `uses:NAME` needs a `read`/`write` grant
+in the store. Both the manifest and the grant are required, a name already owned by another app is refused,
+and every access still goes through `Vault` (plain-name keys, 400k chars / 500 items / 64 MiB caps).
+Wire: `{"cmd":"vault","op":"put|get|list|delete|spaces","id":N,"key":..,"value":..,"space":..}`, validated by
+`protocol._vault`, executed by `Session._on_vault`, with `sdk.App.vault_*(…, space=)` as blocking round trips
+that keep any other event that arrives meanwhile, and `vault_error` saying why a call was refused.
+Gaps: values are clear text on the (LUKS2) volume, not sealed with the password-derived key (the session
+does not hold the master key while an app runs); grants are by app *name*, so they rely on install/permit
+being the trust boundary (a reinstalled app of the same name inherits them - revoke with `kos permit --revoke`
+or `kos grant --revoke`); the instance socket path is now `appdata/<app>/run/<id>.sock`, which stays under
+the 108-byte limit for real `/var/lib/kos` roots but can exceed it for deep dev `KOS_ROOT`s; cells get no vault.
 
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short

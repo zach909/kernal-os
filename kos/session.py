@@ -254,8 +254,9 @@ class Session:
         self.stop_requested = True
 
     def _on_vault(self, msg: dict) -> None:
-        """Durable storage for the app, done by the OS. Never prompts: the
-        grant is the manifest's 'storage' permission plus the run permit."""
+        """Durable storage for the app, done by the OS. Never prompts: the grant
+        is the manifest plus the universal permission store (see spaces.py)."""
+        from .spaces import StorageError
         from .vault import VaultError
         reply = {"cmd": "vault", "op": msg["op"], "id": msg["id"], "ok": False, "detail": ""}
         if self.vault is None:
@@ -263,21 +264,25 @@ class Session:
             self._send(reply)
             return
         try:
-            if msg["op"] == "put":
-                self.vault.put(msg["key"], msg["value"])
-            elif msg["op"] == "get":
-                value = self.vault.get(msg["key"])
-                if value is None:
-                    reply["detail"] = "no such key"
-                    self._send(reply)
-                    return
-                reply["value"] = value
-            elif msg["op"] == "list":
-                reply["keys"] = self.vault.keys()
+            if msg["op"] == "spaces":
+                reply["spaces"] = self.vault.visible_spaces()
             else:
-                self.vault.delete(msg["key"])
+                v = self.vault.vault(msg.get("space"), msg["op"])
+                if msg["op"] == "put":
+                    v.put(msg["key"], msg["value"])
+                elif msg["op"] == "get":
+                    value = v.get(msg["key"])
+                    if value is None:
+                        reply["detail"] = "no such key"
+                        self._send(reply)
+                        return
+                    reply["value"] = value
+                elif msg["op"] == "list":
+                    reply["keys"] = v.keys()
+                else:
+                    v.delete(msg["key"])
             reply["ok"] = True
-        except (VaultError, OSError) as e:
+        except (StorageError, VaultError, OSError) as e:
             reply["detail"] = str(e)[:200]
         self._send(reply)
 

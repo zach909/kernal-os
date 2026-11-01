@@ -32,6 +32,10 @@ from kos.protocol import ProtocolError, validate_app_message  # noqa: E402
 from kos.sdk import App  # noqa: E402
 from kos.session import Session  # noqa: E402
 from kos.vault import MAX_ITEM, Vault, VaultError  # noqa: E402
+from kos.spaces import AppStorage, StorageError  # noqa: E402
+from kos.permissions import Permissions  # noqa: E402
+from kos.permit import PermitError, PermitStore  # noqa: E402
+from kos.appdirs import AppDirs  # noqa: E402
 from kos.kapp import KApp, Manifest  # noqa: E402
 
 
@@ -72,6 +76,10 @@ class TestVault(unittest.TestCase):
         Vault(self.paths, "one").put("k", "1")
         self.assertIsNone(Vault(self.paths, "two").get("k"))
 
+    def test_private_data_lives_in_the_apps_data_folder(self):
+        Vault(self.paths, "notes").put("k", "1")
+        self.assertTrue((AppDirs(self.paths, "notes").data / "k").exists())
+
     def test_storage_permission_is_a_valid_manifest_permission(self):
         m = Manifest.parse(json.dumps({"name": "x", "version": "1", "runtime": "python", "entry": "a:main", "permissions": ["storage"]}).encode())
         self.assertEqual(m.permissions, ("storage",))
@@ -110,8 +118,8 @@ class TestSdkVaultRoundTrip(unittest.TestCase):
 
     def test_app_sdk_talks_to_the_real_session_handler(self):
         with tempfile.TemporaryDirectory() as td:
-            a, b = socket.socketpair()
-            stub = StubOS(Vault(Paths(Path(td)), "demo"), b)
+            a, b = socket.socketpair(); a.settimeout(10)
+            stub = StubOS(AppStorage(Paths(Path(td)), "demo", ["storage"]), b)
             t = threading.Thread(target=self.serve, args=(b, stub, {"cmd": "key", "key": "z"}), daemon=True); t.start()
             os.environ["KOS_MODE"] = "tui"
             app = App(a)
@@ -126,12 +134,184 @@ class TestSdkVaultRoundTrip(unittest.TestCase):
             a.close(); b.close()
 
     def test_no_storage_permission_is_refused_not_ignored(self):
-        a, b = socket.socketpair()
+        a, b = socket.socketpair(); a.settimeout(10)
         stub = StubOS(None, b)
         t = threading.Thread(target=self.serve, args=(b, stub), daemon=True); t.start()
         app = App(a)
         self.assertFalse(app.vault_put("k", "v"))
         a.close(); b.close()
+
+
+class TestAppDirsAndPermissions(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.paths = Paths(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_layout_cache_data_run_and_cache_is_per_app(self):
+        from kos import cache
+        d = AppDirs(self.paths, "hello").ensure()
+        self.assertEqual({p.name for p in d.root.iterdir()}, {"cache", "data", "run"})
+        c = cache.alloc(self.paths, "hello")
+        self.assertEqual(c.parent, d.cache); cache.wipe(c); self.assertFalse(c.exists())
+        with self.assertRaises(Exception): AppDirs(self.paths, "../evil")
+
+    def test_universal_store_levels_owner_revoke(self):
+        P = Permissions(self.paths)
+        P.grant("a", "space:contacts", "own"); P.grant("b", "space:contacts", "read")
+        self.assertTrue(P.has("a", "space:contacts", "write")); self.assertTrue(P.has("b", "space:contacts", "read"))
+        self.assertFalse(P.has("b", "space:contacts", "write")); self.assertFalse(P.has("c", "space:contacts", "read"))
+        self.assertEqual(P.owner_of("space:contacts"), "a")
+        self.assertEqual(P.revoke("b"), 1); self.assertFalse(P.has("b", "space:contacts", "read"))
+
+    def test_run_permit_is_in_the_same_store_and_legacy_files_migrate(self):
+        ps = PermitStore(self.paths)
+        legacy = self.paths.state / "permits"; legacy.mkdir(parents=True)
+        (legacy / "old.json").write_text('{"name":"old","granted_at":1}')
+        self.assertTrue(ps.is_permitted("old")); self.assertFalse((legacy / "old.json").exists())
+        ps.grant("new"); self.assertTrue(Permissions(self.paths).has("new", "run"))
+        ps.revoke("new"); self.assertFalse(ps.is_permitted("new"))
+
+    def test_revoking_the_run_permit_does_not_give_away_a_shared_folder(self):
+        P, ps = Permissions(self.paths), PermitStore(self.paths)
+        ps.grant("contacts-app"); P.grant("contacts-app", "space:contacts", "own")
+        ps.revoke("contacts-app")
+        self.assertFalse(ps.is_permitted("contacts-app")); self.assertEqual(P.owner_of("space:contacts"), "contacts-app")
+        squatter = AppStorage(self.paths, "squatter", ["owns:contacts"])
+        with self.assertRaises(StorageError): squatter.vault("contacts", "get")
+
+    def test_an_update_that_asks_for_more_than_was_approved_is_refused(self):
+        ps = PermitStore(self.paths); ps.grant("app", ["storage"])
+        ps.check_declared("app", ["storage"])
+        with self.assertRaises(PermitError): ps.check_declared("app", ["storage", "network"])
+        ps.grant("app", ["storage", "network"]); ps.check_declared("app", ["storage", "network"])
+
+
+class TestSharedSpaces(unittest.TestCase):
+    """'contacts' is created by the Contacts app; everyone else looks for it and needs a grant."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.paths = Paths(Path(self.tmp.name)); self.P = Permissions(self.paths)
+        self.owner = AppStorage(self.paths, "contacts-app", ["owns:contacts"])
+        self.mail = AppStorage(self.paths, "mail-app", ["storage", "uses:contacts"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_owner_creates_the_space_and_its_permission_on_first_use(self):
+        self.assertIsNone(self.P.owner_of("space:contacts"))
+        self.owner.vault("contacts", "put").put("records", "ann")
+        self.assertEqual(self.P.owner_of("space:contacts"), "contacts-app")
+        self.assertTrue((self.paths.state / "spaces" / "contacts" / "records").exists())
+
+    def test_consumer_needs_both_the_manifest_and_a_grant(self):
+        self.owner.vault("contacts", "put").put("records", "ann")
+        with self.assertRaises(StorageError): self.mail.vault("contacts", "get")             # declared, not granted
+        self.P.grant("mail-app", "space:contacts", "read")
+        self.assertEqual(self.mail.vault("contacts", "get").get("records"), "ann")
+        with self.assertRaises(StorageError): self.mail.vault("contacts", "put")            # read is not write
+        self.P.grant("mail-app", "space:contacts", "write"); self.mail.vault("contacts", "put").put("x", "1")
+        stranger = AppStorage(self.paths, "stranger", ["storage"])
+        self.P.grant("stranger", "space:contacts", "write")                                  # granted but never declared
+        with self.assertRaises(StorageError): stranger.vault("contacts", "get")
+
+    def test_nobody_can_take_over_an_owned_space(self):
+        self.owner.vault("contacts", "put").put("records", "ann")
+        squatter = AppStorage(self.paths, "squatter", ["owns:contacts"])
+        with self.assertRaises(StorageError): squatter.vault("contacts", "get")
+
+    def test_private_data_and_spaces_are_separate_and_revocation_works(self):
+        self.mail.vault(None, "put").put("mine", "private")
+        self.assertEqual(self.owner.visible_spaces(), [{"space": "contacts", "access": "own", "owner": "contacts-app"}])
+        self.assertEqual(self.mail.visible_spaces(), [])                                      # nothing granted yet
+        self.owner.vault("contacts", "put").put("records", "ann"); self.P.grant("mail-app", "space:contacts", "read")
+        self.assertEqual(self.mail.visible_spaces()[0]["access"], "read")
+        self.assertNotIn("mine", self.owner.vault("contacts", "list").keys())
+        self.P.revoke("mail-app", "space:contacts")
+        with self.assertRaises(StorageError): self.mail.vault("contacts", "get")
+
+    def test_private_storage_needs_the_storage_permission(self):
+        with self.assertRaises(StorageError): self.owner.vault(None, "get")
+
+
+class TestSpacesOverTheWire(unittest.TestCase):
+    def test_two_real_sdk_apps_share_a_space_through_the_session_handler(self):
+        with tempfile.TemporaryDirectory() as td:
+            paths = Paths(Path(td)); sdk = []
+            for name, perms in (("contacts-app", ["owns:contacts"]), ("mail-app", ["storage", "uses:contacts"])):
+                a, b = socket.socketpair(); a.settimeout(10)
+                stub = StubOS(AppStorage(paths, name, perms), b)
+                threading.Thread(target=TestSdkVaultRoundTrip.serve, args=(self, b, stub), daemon=True).start()
+                sdk.append(App(a))
+            owner, mail = sdk
+            self.assertTrue(owner.vault_put("records", "ann", space="contacts"))
+            self.assertIsNone(mail.vault_get("records", space="contacts"))
+            self.assertIn("no read access", mail.vault_error)                       # the app can show why
+            Permissions(paths).grant("mail-app", "space:contacts", "read")
+            self.assertEqual(mail.vault_get("records", space="contacts"), "ann")
+            self.assertFalse(mail.vault_put("records", "evil", space="contacts"))
+            self.assertEqual(owner.vault_get("records", space="contacts"), "ann")
+            self.assertEqual(mail.vault_spaces()[0]["space"], "contacts")
+            self.assertFalse(mail.vault_put("k", "v", space="calendar"))
+            self.assertIn("does not declare", mail.vault_error)
+
+    def test_protocol_rejects_bad_space_names(self):
+        for bad in ("../x", "Contacts", "a b", 5):
+            with self.assertRaises(ProtocolError):
+                validate_app_message({"cmd": "vault", "id": 1, "op": "get", "key": "k", "space": bad}, "tui")
+
+
+class TestSharedSuite(unittest.TestCase):
+    """Contacts creates the folder; the other apps look for it; the device owner decides who gets in."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.paths = Paths(Path(self.tmp.name)); self.P = Permissions(self.paths)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def host(self, name, keys=(), **kw):
+        e = BY_NAME[name]
+        from suite.gen import manifest
+        return FakeHost(keys, storage=AppStorage(self.paths, name, manifest(e)["permissions"]), **kw), e
+
+    def test_contacts_calendar_and_scheduler_end_to_end(self):
+        h, e = self.host("contact-manager", ["a", "enter", *"Ann", "enter", "down", "down", "enter", *"ann@x.io", "enter", "ctrl-s"])
+        run(h, build(h, e))
+        self.assertEqual(self.P.owner_of("space:contacts"), "contact-manager")               # the Contacts app made the folder + permission
+        self.assertTrue((self.paths.state / "spaces" / "contacts" / "records").exists())
+        # the mail client looks for it: nothing until the owner of the device grants read access
+        mh, me = self.host("email-client", ["c", "A", "n"])
+        mail.MailStore(mh).users.add({"addr": "me@kos.local", "quota": "50", "active": "yes"})
+        run(mh, build(mh, me)); self.assertNotIn("ann@x.io", mh.text)
+        self.P.grant("email-client", "space:contacts", "read")
+        mh2, _ = self.host("email-client", ["c", "A", "n", "tab"], data=mh.data); run(mh2, build(mh2, me))
+        self.assertIn("> ann@x.io", mh2.text)                                                  # Tab completed the address
+        # the scheduler: books fine either way, but only reaches the shared calendar once granted write
+        sh, se = self.host("appointment-scheduler"); s = build(sh, se); first = s.slots()[0]
+        s._book(*first, "Ann"); self.assertIn("NOT on the calendar", s.msg)
+        self.P.grant("appointment-scheduler", "space:calendar", "write")
+        s2 = build(sh, se); second = s2.slots()[1]; s2._book(*second, "Bob"); self.assertIn("on the shared calendar", s2.msg)
+        ch, ce = self.host("calendar-manager"); events = records.Data(SpaceHostForTest(ch, "calendar"), calendar_.EVENT_SPEC).items
+        self.assertEqual([x["title"] for x in events], ["Appointment: Bob"])
+        self.assertEqual(events[0]["date"], second[0])
+
+    def test_a_read_only_consumer_cannot_change_the_owners_data(self):
+        h, e = self.host("contact-manager", ["a", "enter", *"Ann", "enter", "ctrl-s"]); run(h, build(h, e))
+        before = (self.paths.state / "spaces" / "contacts" / "records").read_text()
+        self.P.grant("email-client", "space:contacts", "read")
+        mh, _ = self.host("email-client"); self.assertFalse(mh.put("records", "{}", space="contacts"))
+        self.assertIn("no write access", mh.error)
+        self.assertEqual((self.paths.state / "spaces" / "contacts" / "records").read_text(), before)
+
+    def test_every_manifest_that_uses_or_owns_a_space_is_valid(self):
+        from suite.gen import manifest
+        for e in CATALOG:
+            if e.scope != "none": Manifest.parse(json.dumps(manifest(e)).encode())
+
+
+from kos.office.ui import SpaceHost as SpaceHostForTest  # noqa: E402
 
 
 class TestSheet(unittest.TestCase):
@@ -428,6 +608,48 @@ class TestGraphics(unittest.TestCase):
         for ops in h.canvases: validate_app_message({"cmd": "frame", "ops": ops}, "graphical")
 
 
+sys.path.insert(0, str(ROOT / "tests"))
+from test_kos import Env, PW  # noqa: E402
+
+
+@unittest.skipUnless(hasattr(__import__("fcntl"), "F_ADD_SEALS"), "needs memfd sealing (fcntl.F_ADD_SEALS)")
+class TestSuiteInTheRealSandbox(Env):
+    """A suite app launched exactly like any app: sealed zip, Landlock sandbox, real Session."""
+
+    def test_contact_manager_creates_the_shared_folder_from_inside_the_sandbox(self):
+        from kos import loader
+        from kos.auth import Authority, Throttle
+        from kos.display import HeadlessBackend, GraphicalSurface
+        from kos.devices import ScriptedDevices
+        from kos.protocol import Channel
+        from kos.sandbox import SandboxPolicy
+        from kos.store import AppStore
+        from kos.tui import TUISurface
+        from suite import gen
+        gen.build(Path(self.tmp.name) / "k")
+        kapp = Path(self.tmp.name) / "k" / "contact-manager.kapp"
+        store = AppStore(self.paths); store.install(kapp, self.authority(PW))
+        with self.authority(PW).authorize("app.run", "contact-manager") as g:
+            app = store.load_verified("contact-manager", g)
+        self.assertIn("owns:contacts", app.manifest.permissions)
+        a, b = socket.socketpair()
+        proc = loader.launch(loader.plan(app, b.fileno(), "tui"), SandboxPolicy(), None); b.close()
+        devices = ScriptedDevices()
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        s = Session(name="contact-manager", mode="tui", channel=Channel(a), proc=proc, surface=TUISurface(devnull, 100, 30, "contact-manager"),
+                    devices=devices, authority=auth, boot_devices=("keyboard",), vault=AppStorage(self.paths, "contact-manager", app.manifest.permissions))
+        key = lambda *names: [{"type": "key", "key": n} for n in names]
+        devices.push(*key("y", *PW, "enter"))                                              # boot the keyboard with the password
+        devices.push(*key("a", "enter", *"Ann", "enter", "down", "down", "enter", *"ann@x.io", "enter", "ctrl-s", "escape"))
+        self.assertEqual(s.run(first_frame_timeout=5), 0)
+        os.close(devnull)
+        self.assertEqual(Permissions(self.paths).owner_of("space:contacts"), "contact-manager")
+        saved = json.loads((self.paths.state / "spaces" / "contacts" / "records").read_text())
+        self.assertEqual(saved["items"][0]["email"], "ann@x.io")
+        self.assertFalse(list(AppDirs(self.paths, "contact-manager").cache.glob("*")))      # the run's scratch was wiped
+
+
 class TestRealProcess(unittest.TestCase):
     """A packed .kapp, started the way the loader starts apps (isolated interpreter, imported
     from the zip), talking over a real socket to the real vault handler."""
@@ -446,7 +668,7 @@ class TestRealProcess(unittest.TestCase):
             p = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", self.BOOT, str(Path(td) / "k" / "document-editor.kapp"), "app:main", str(ROOT)],
                                  env=env, pass_fds=[a.fileno()], stdin=subprocess.DEVNULL, stderr=subprocess.PIPE)
             a.close()
-            paths = Paths(Path(td) / "root"); stub = StubOS(Vault(paths, "document-editor"), b)
+            paths = Paths(Path(td) / "root"); stub = StubOS(AppStorage(paths, "document-editor", ["storage"]), b)
             f = b.makefile("rb"); last = [None]
 
             def send(o): b.sendall(json.dumps(o).encode() + b"\n")

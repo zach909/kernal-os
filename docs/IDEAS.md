@@ -9,9 +9,13 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
-- **Shared spaces between apps.** Each app's vault is private, so the mail client and server, the calendar and
-  calendar automation, or cloud storage and file sync cannot exchange data. A `space` permission naming a
-  shared, OS-owned namespace (granted per pair of apps, with the password) would fix that.
+- **More shared spaces.** The mechanism exists (`owns:`/`uses:`, `kos grant`); only `contacts`, `calendar` and
+  `tasks` are wired. Candidates: the mail client and server sharing mailboxes, cloud storage and file sync,
+  and calendar automation writing to `calendar`.
+- **Grants that survive a reinstall safely.** Grants are by app name. Binding them to the app's sealed hash
+  (and asking again when the hash changes) would stop a replaced app inheriting access.
+- **`kos remove --purge`.** Removing an app keeps its `data/` (user data should not die by accident); an
+  explicit purge that also deletes it and its grants would be the intentional way to wipe an app.
 - **Seal the vault with a key.** Vault items are clear text on the LUKS volume. Derive a per-app key at launch
   (the password is available then) and keep it in the session, so items are sealed like `.kapp`s.
 - **Audio / video / camera channel.** Conferencing, voice calling, speech recognition, text-to-speech, scanning

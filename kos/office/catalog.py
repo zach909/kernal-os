@@ -28,7 +28,7 @@ from .security import AuditLog, AuthSystem, RbacApp
 from .sheet import Sheet, SheetEditor
 from .specs import S
 from .sqlapp import SqlConsole
-from .ui import Editor, Menu, Screen
+from .ui import Editor, Menu, Screen, SpaceHost
 from .workbench import Chat, ModelSettings, TOOLS, Workbench
 from . import tools
 
@@ -43,6 +43,8 @@ class Entry:
     args: dict = field(default_factory=dict)
     network: bool = False
     graphical: bool = False
+    owns: list = field(default_factory=list)       # shared folders this app creates (manifest 'owns:NAME')
+    uses: list = field(default_factory=list)       # shared folders it looks for (manifest 'uses:NAME'); needs the owner's grant
 
     def __post_init__(self):
         if not self.name:
@@ -78,7 +80,24 @@ def _sheet_opener(host):
 def _sheets(host, e): return Library(host, e.title, "spreadsheet", _sheet_opener(host), "{}", "sheet-")
 def _slides(host, e): return Library(host, e.title, "deck", lambda n, t, s: slide_editor(host, n, t, s), e.args.get("template", SLIDE_TEMPLATE), "deck-")
 def _diagram(host, e): return Library(host, e.title, "diagram", lambda n, t, s: diagram_editor(host, n, t, s), DIAGRAM_SAMPLE, "dia-")
-def _records(host, e): r = RecordList(Data(host, S[e.args["spec"]])); r.title = e.title; return r
+def contacts_lookup(host):
+    """Addresses from the shared 'contacts' space (empty if this app was not let in)."""
+    sh = SpaceHost(host, "contacts")
+    def look(prefix):
+        p = prefix.lower()
+        return [r["email"] for r in Data(sh, S["contacts"]).items
+                if r.get("email") and (r.get("name", "").lower().startswith(p) or r["email"].lower().startswith(p))]
+    return look
+
+
+def _shared(host, e, space):
+    return SpaceHost(host, space) if space in e.owns or space in e.uses else host
+
+
+def _records(host, e):
+    sp = e.args["spec"]
+    h = _shared(host, e, sp) if sp in ("contacts", "tasks") else host
+    r = RecordList(Data(h, S[sp])); r.title = e.title; return r
 def _wb(host, e): return Workbench(host, e.title, e.args["tools"], e.args.get("intro", ""))
 def _search(host, e): return extras.SearchLibrary(host, e.title, e.args.get("noun", "document"), ask=e.args.get("ask", False), hold=e.args.get("hold", False))
 
@@ -138,8 +157,8 @@ def _hub(host, e):
         elif kind == "flow": parts.append((label, lambda h: FlowApp(h, label, "builder")))
         elif kind == "api": parts.append((label, lambda h: extras.ApiTool(h, label)))
         elif kind == "builder": parts.append((label, lambda h: AppBuilder(h, label)))
-        elif kind == "tasks": parts.append((label, lambda h: RecordList(Data(h, S["tasks"]))))
-        elif kind == "calendar": parts.append((label, lambda h: CalendarView(h, label)))
+        elif kind == "tasks": parts.append((label, lambda h: RecordList(Data(SpaceHost(host, "tasks") if "tasks" in e.uses else h, S["tasks"]))))
+        elif kind == "calendar": parts.append((label, lambda h: CalendarView(SpaceHost(host, "calendar") if "calendar" in e.uses else h, label)))
         elif kind == "channels": parts.append((label, lambda h: extras.Channels(h, label)))
         elif kind == "docs": parts.append((label, lambda h: Library(h, label, "document", lambda n, t, s: DocEditor(h, n, t, s), "# Untitled\n\n")))
     return extras.Hub(host, e.title, parts, e.args.get("intro", ""))
@@ -148,9 +167,10 @@ def _hub(host, e):
 BUILD = {
     "docs": _docs, "sheets": _sheets, "slides": _slides, "diagram": _diagram, "records": _records, "wb": _wb, "search": _search,
     "notes": lambda h, e: NoteBook(h, e.title, e.args.get("noun", "note")), "sql": lambda h, e: SqlConsole(h, e.title),
-    "calendar": lambda h, e: CalendarView(h, e.title), "scheduler": lambda h, e: SlotScheduler(h, e.title),
+    "calendar": lambda h, e: CalendarView(_shared(h, e, "calendar"), e.title),
+    "scheduler": lambda h, e: SlotScheduler(h, e.title, SpaceHost(h, "calendar") if "calendar" in e.uses else None, contacts_lookup(h) if "contacts" in e.uses else None),
     "board": lambda h, e: Board(h, e.title, e.args.get("snap", 1)), "pixels": lambda h, e: ImageEditor(h, e.title), "imagegen": lambda h, e: ImageGenerator(h, e.title),
-    "mail": lambda h, e: MailClient(h, e.title), "mailadmin": lambda h, e: MailAdmin(h, e.title),
+    "mail": lambda h, e: MailClient(h, e.title, contacts_lookup(h) if "contacts" in e.uses else None), "mailadmin": lambda h, e: MailAdmin(h, e.title),
     "quiz": lambda h, e: QuizApp(h, e.title, "quiz"), "survey": lambda h, e: QuizApp(h, e.title, "survey"),
     "builder": lambda h, e: AppBuilder(h, e.title, guided=e.args.get("guided", False)),
     "site": lambda h, e: SiteBuilder(h, e.title, e.args.get("site", "website")), "bot": lambda h, e: BotConsole(h, e.title, e.args.get("slots", True)),
@@ -168,7 +188,8 @@ def build(host, e: Entry) -> Screen: return BUILD[e.kind](host, e)
 # ---------------------------------------------------------------- catalogue ----
 def E(title, kind, scope="full", note="", **args):
     net = args.pop("network", False); gfx = args.pop("graphical", False); name = args.pop("name", "")
-    return Entry(title, kind, scope, note, name, args, net, gfx)
+    owns = args.pop("owns", []); uses = args.pop("uses", [])
+    return Entry(title, kind, scope, note, name, args, net, gfx, owns, uses)
 
 
 def R_(title, spec, scope="full", note="", **kw): return E(title, "records", scope, note or S[spec].scope, spec=spec, **kw)
@@ -189,24 +210,24 @@ CATALOG: list[Entry] = [
  E("Desktop Publishing Tool", "docs", "partial", "Writes Markdown and exports a two-column A4 print layout as HTML (Ctrl-L). No WYSIWYG page designer, fonts or images.", layout=True, template="# Headline\n\nBody text flows into two justified columns when exported.\n"),
  E("Diagram Editor", "diagram", note="Text-defined flow diagrams drawn as boxes and arrows; SVG export."),
  E("Interactive Presentation Builder", "slides", template="# Quick poll\n---\n## Which option?\n? Pick one | Option A | Option B | Option C\n[See the answer](#3)\n---\n# Thanks\n> poll votes are saved; press a/b/c while presenting\n", note="Slides with live polls (votes counted on this device) and branching links."),
- E("Email Client", "mail", "partial", "Local accounts, folders, compose/reply/forward, search, rules and a relay queue. SMTP/IMAP to other servers only via an optional relay with network access; it does not fetch mail from other providers.", network=True),
+ E("Email Client", "mail", "partial", "Local accounts, folders, compose/reply/forward, search, rules and a relay queue. SMTP/IMAP to other servers only via an optional relay with network access; it does not fetch mail from other providers.", network=True, uses=["contacts"]),
  E("Email Server", "mailadmin", "partial", "The mail system without sockets: mailboxes, aliases, routing rules, quotas, bounces, relay queue, mbox export. It does not listen on SMTP/IMAP ports (KOS apps cannot), and does not exchange mail with the Email Client app.", network=True),
- E("Calendar Manager", "calendar"), R_("Contact Manager", "contacts"),
- E("Appointment Scheduler", "scheduler", note="Working hours, slot length, free-slot list, booking with double-booking prevention. No public booking page."),
+ E("Calendar Manager", "calendar", owns=["calendar"], note="Creates the shared folder `calendar`; the Appointment Scheduler can put bookings on it once you grant write access."), R_("Contact Manager", "contacts", owns=["contacts"], note="Creates the shared folder `contacts`; the Email Client and Appointment Scheduler can look people up in it once you grant them access."),
+ E("Appointment Scheduler", "scheduler", uses=["calendar", "contacts"], note="Working hours, slots, double-booking prevention. If granted, offers names from `contacts` and puts bookings on the shared `calendar`. No public booking page."),
  R_("Workplace Planner", "workplace"), R_("Team Management Tool", "team"),
  E("Cloud Storage", "docs", "partial", "A local text-object store (create, edit, copy, search, export). There is no cloud: no remote storage, accounts or sync.", noun="object", template=""),
  E("File Synchronization Tool", "wb", "partial", "Computes the sync plan (copy/update/delete/conflict, three-way with a base listing) from pasted file listings. It cannot read or move files itself.", tools=["sync"]),
  R_("Document Management System", "docmgmt", "partial", "A document register with versions, owners, approval status and review dates; documents themselves are not stored."),
  E("Content Management System", "site", site="cms", note="Markdown entries with draft/published status; build writes only published ones as a linked static site."),
  E("Intranet Builder", "site", site="intranet"),
- R_("Task Manager", "tasks"), R_("Project Planner", "planner"), R_("Project Management System", "projects"),
- E("Team Collaboration Tool", "hub", "partial", "Tasks, notes, calendar and channels in one place. Single device: no shared real-time editing with other people.", parts=[("Tasks", "tasks", None), ("Channels", "channels", None), ("Notes", "notes", None), ("Calendar", "calendar", None)]),
+ R_("Task Manager", "tasks", owns=["tasks"], note="Creates the shared folder `tasks`; the collaboration and workspace apps can show and edit the same tasks once granted."), R_("Project Planner", "planner"), R_("Project Management System", "projects"),
+ E("Team Collaboration Tool", "hub", "partial", "Tasks, notes, calendar and channels in one place. Single device: no shared real-time editing with other people.", parts=[("Tasks", "tasks", None), ("Channels", "channels", None), ("Notes", "notes", None), ("Calendar", "calendar", None)], uses=["tasks", "calendar"]),
  E("Messaging Platform", "channels", "partial", "Local channels with @mentions, search, pins. Messages stay on this device: no delivery to other people."),
  R_("Video Conferencing Tool", "meetings", "partial"),
  E("Voice Calling System", "none", "none", "Needs real-time audio and a network stack; the KOS command protocol carries text and pixels only."),
  R_("Webinar Platform", "webinars", "partial"), R_("Virtual Meeting Room System", "rooms", "partial"),
  E("Collaborative Whiteboard", "board", "partial", "Pen, line, rectangle, box, text, eraser, undo, SVG export (graphical mode, mouse). One person at a time: no live sharing.", graphical=True),
- E("Collaborative Workspace", "hub", "partial", "Notes, tasks, documents and a calendar in one workspace. Single device; no live co-editing.", parts=[("Notes", "notes", None), ("Tasks", "tasks", None), ("Documents", "docs", None), ("Calendar", "calendar", None)]),
+ E("Collaborative Workspace", "hub", "partial", "Notes, tasks, documents and a calendar in one workspace. Single device; no live co-editing.", parts=[("Notes", "notes", None), ("Tasks", "tasks", None), ("Documents", "docs", None), ("Calendar", "calendar", None)], uses=["tasks", "calendar"]),
  E("Online Form Builder", "builder", guided=True, note="Define fields, then fill in the form and review/export responses. Forms are not published to a web address."),
  E("Survey Builder", "survey"), E("Quiz Creator", "quiz"),
  E("Website Builder", "site", site="website", note="Markdown pages to a linked static site (HTML written to the vault). It does not host it."),
@@ -297,7 +318,7 @@ CATALOG: list[Entry] = [
  E("Spreadsheet Automation Tool", "flow", sample=SAMPLE_SHEET_AUTO, input=SHEET_INPUT, note="Repeatable table clean-up pipelines (dedupe, computed columns, sort)."),
  E("Document Automation Tool", "flow", sample=SAMPLE_MERGE_DOC, input=MERGE_INPUT, note="Mail-merge: one document per row from a template."),
  E("Email Automation Tool", "flow", "partial", "Generates personalised email text per row. It does not send; paste into the Email Client.", sample=SAMPLE_MERGE_MAIL, input=MERGE_INPUT),
- E("Calendar Automation Tool", "wb", "partial", "Expands recurrence rules ('every weekday 09:00 …') into dated events. It does not write to the Calendar Manager (apps cannot share data).", tools=["recur"]),
+ E("Calendar Automation Tool", "wb", "partial", "Expands recurrence rules ('every weekday 09:00 …') into dated events. It does not yet write to the shared `calendar` folder.", tools=["recur"]),
  E("Chatbot Builder", "bot", slots=False, note="Intents with patterns and replies, a test console, unhandled-question log."),
  E("Conversational AI Platform", "bot", "partial", "Intent matching with multi-turn slot filling and analytics. Rule-based; not a generative model.", slots=True),
  E("Custom AI Assistant Builder", "persona", "partial", "Persona + searchable knowledge + chat. Offline it answers from your knowledge; a connected model makes it conversational.", network=True),

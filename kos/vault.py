@@ -12,6 +12,9 @@ command), the OS decides, the OS touches the disk.
 * keys are plain names (no paths, so no traversal), values are text;
 * item size, item count and total size are capped.
 
+Shared folders are the same store at a different path; who may open one is decided
+by spaces.py and the universal permission store.
+
 Gap, stated honestly: values are stored in clear on the (LUKS2-encrypted)
 root volume. They are not sealed with the password-derived key, because the
 session does not hold the master key while an app runs.
@@ -36,8 +39,12 @@ class VaultError(Exception):
 
 
 class Vault:
-    def __init__(self, paths: Paths, app: str):
-        self.dir = paths.state / "vault" / app
+    """A folder of named text items. By default an app's private data folder;
+    pass ``directory`` for a shared space (see spaces.py)."""
+
+    def __init__(self, paths: Paths, app: str = "", directory: Path | None = None):
+        from .appdirs import AppDirs
+        self.dir = directory if directory is not None else AppDirs(paths, app).data
 
     def _path(self, key: str) -> Path:
         if not isinstance(key, str) or not KEY_RE.match(key):

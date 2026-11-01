@@ -46,7 +46,8 @@ class Paths:
         return self.etc / "auth.json"
 
     def ensure(self) -> None:
-        for d in (self.etc, self.state, self.apps, self.logs, self.cells):
+        for d in (self.etc, self.state, self.apps, self.logs, self.cells, self.state / "appdata",
+                  self.state / "spaces", self.state / "permissions"):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
 

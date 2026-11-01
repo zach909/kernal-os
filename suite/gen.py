@@ -25,7 +25,7 @@ LAUNCHER = 'from kos.office.launch import entry\n\n\ndef main():\n    entry({nam
 
 
 def manifest(e) -> dict:
-    perms = ["storage"] + (["network"] if e.network else [])
+    perms = ["storage"] + [f"owns:{x}" for x in e.owns] + [f"uses:{x}" for x in e.uses] + (["network"] if e.network else [])
     modes = ["tui", "graphical"] if e.graphical else ["tui"]
     desc = f"{e.title}" + (f" - {e.note}" if e.note else "")
     return {"name": e.name, "version": "1.0", "runtime": "python", "entry": "app:main", "modes": modes,
@@ -62,11 +62,14 @@ def catalog_md() -> str:
     for e in CATALOG:
         counts[e.scope] += 1
     lines += [f"**{len(CATALOG)} products: {counts['full']} full, {counts['partial']} partial, {counts['none']} not built.**", "",
-              "| Product | App | Scope | What it is / what it is not |", "|---|---|---|---|"]
+              "Shared folders: an app that **owns** one creates it (and its permission); an app that **uses** one can look "
+             "for it, but is only let in after you run `kos grant APP space:NAME --level read|write`.", "",
+             "| Product | App | Scope | Shared folders | What it is / what it is not |", "|---|---|---|---|---|"]
     for e in CATALOG:
         app = f"`{e.name}`" if e.scope != "none" else "-"
         net = " (network)" if e.network else ""
-        lines.append(f"| {e.title} | {app}{net} | {e.scope} | {e.note.replace('|', '/') or '-'} |")
+        sh = ", ".join([f"owns `{x}`" for x in e.owns] + [f"uses `{x}`" for x in e.uses]) or "-"
+        lines.append(f"| {e.title} | {app}{net} | {e.scope} | {sh} | {e.note.replace('|', '/') or '-'} |")
     return "\n".join(lines) + "\n"
 
 
