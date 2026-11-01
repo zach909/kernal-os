@@ -1301,3 +1301,60 @@ class TestCodeIsACommand(Env):
         self.run_line("x = 5", "assignment", PW)
         _, out = self.run_line("print(x)", "code call", PW)
         self.assertIn("NameError", out)
+
+
+class TestAiOs(Env):
+    """AI OS: KOS asks the password for each request, then hands it to the NeuroClaw engine on this computer."""
+
+    class Fake:
+        """Stands in for urllib.request.urlopen; records what would have been sent."""
+        def __init__(self, reply):
+            self.reply, self.sent = reply, []
+
+        def __call__(self, req, timeout=None):
+            self.sent.append((req.full_url, req.get_method(), req.data))
+            body = json.dumps(self.reply).encode()
+            return type("R", (), {"read": lambda s: body, "__enter__": lambda s: s, "__exit__": lambda s, *a: False})()
+
+    def test_request_asks_password_then_calls_engine(self):
+        from kos import aios
+        fake = self.Fake({"status": "ran", "text": "done"})
+        a = self.authority(PW)
+        out = aios.run_layer(a, "gui", ["click", "Save"], opener=fake)
+        self.assertEqual(out["text"], "done")
+        url, method, data = fake.sent[0]
+        self.assertEqual((url, method), ("http://127.0.0.1:7861/api/ai-os/layer", "POST"))
+        self.assertEqual(json.loads(data), {"layer": "gui", "request": "click Save"})
+        self.assertEqual([e["action"] for e in a.audit.entries()][-1], "aios.gui")
+
+    def test_wrong_password_sends_nothing(self):
+        from kos import aios
+        fake = self.Fake({"status": "ran", "text": "x"})
+        with self.assertRaises(AuthorizationDenied):
+            aios.run_layer(self.authority("no", "no", "no"), "kernel", ["list", "services"], opener=fake)
+        self.assertEqual(fake.sent, [])
+
+    def test_only_four_layers_and_bad_requests_never_ask_for_a_password(self):
+        from kos import aios
+        fake = self.Fake({})
+        for layer, words in (("email", ["hi"]), ("gui", []), ("app", ["x" * 601])):
+            with self.assertRaises(aios.AiosError):
+                aios.run_layer(self.authority(), layer, words, opener=fake)   # no answers: any prompt fails the test
+        self.assertEqual(fake.sent, [])
+
+    def test_engine_must_be_on_this_computer(self):
+        from kos import aios
+        for bad in ("http://example.com:7861", "http://192.168.1.5:7861", "https://127.0.0.1:7861"):
+            with self.assertRaises(aios.AiosError):
+                aios.engine_url({"KOS_AIOS_URL": bad})
+        self.assertEqual(aios.engine_url({"KOS_AIOS_URL": "http://localhost:9000/"}), "http://localhost:9000")
+
+    def test_control_characters_are_stripped(self):
+        from kos import aios
+        self.assertEqual(aios.clean_request(["a\x1b[31m", "b\x00c"]), "a [31m b c")
+
+    def test_status_lists_layers_without_a_password(self):
+        from kos import aios
+        fake = self.Fake({"layers": [{"id": "gui", "label": "x", "available": True}]})
+        self.assertEqual(aios.status(opener=fake)["layers"][0]["id"], "gui")
+        self.assertEqual(fake.sent[0][1], "GET")
