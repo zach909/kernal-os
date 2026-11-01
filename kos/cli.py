@@ -526,6 +526,22 @@ def cmd_permit(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_aios(args, paths: Paths) -> int:
+    """AI OS: `kos aios status` lists the four layers; `kos aios gui|app|kernel|skill WORDS...` runs one
+    request on a layer, asking your password for it first. NeuroClaw does the work; KOS is the gate."""
+    from . import aios
+    if args.layer == "status":
+        info = aios.status()
+        for l in info.get("layers", []):
+            print(f"{'ok ' if l.get('available') else 'no '} {l['id']:7} {l['label']}" + (f" ({l['reason']})" if l.get("reason") else ""))
+        return 0
+    authority, _ = _authority(paths)
+    out = aios.run_layer(authority, args.layer, args.words)
+    print(out.get("text", ""))
+    status = out.get("status")
+    return 0 if status == "ran" else 4 if status == "held" else 1
+
+
 def cmd_scan(args, paths: Paths) -> int:
     """`kos scan file PATH` checks one file or zip right now, no password
     needed (it's read-only, like `kos list`). `kos scan watch DIR...` is
@@ -819,6 +835,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
     s.add_argument("--lang", default="python")
     s.add_argument("--code", required=True)
+    s = sub.add_parser("aios", help="AI OS: button clicker, app commands, kernel commands, skill maker")
+    s.add_argument("layer", choices=["status", "gui", "app", "kernel", "skill"])
+    s.add_argument("words", nargs="*")
     s = sub.add_parser("line", help="the line shell: every line you type is a command")
     s.add_argument("--explain", action="store_true", help="show how each line was understood")
     return p
@@ -832,7 +851,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
-            "desktop": cmd_desktop}
+            "desktop": cmd_desktop, "aios": cmd_aios}
 
 
 def main(argv: list[str] | None = None) -> int:
