@@ -133,6 +133,17 @@ kos_firmware_scan() {
         fw_dma=$fw_save
         break
     done
+    # kos.machine=framework (signed command line): boot only on Framework hardware
+    fw_cl=""
+    if [ -r "$FW_ROOT/proc/cmdline" ]; then read -r fw_cl < "$FW_ROOT/proc/cmdline" || true; fi
+    case " $fw_cl " in
+        *" kos.machine=framework "*)
+            fw_read "$FW_ROOT/sys/class/dmi/id/sys_vendor"
+            case "$fw_val" in
+                Framework|framework) ;;
+                *) echo "FINDING wrong-machine active sys/class/dmi/id/sys_vendor"; fw_active=1 ;;
+            esac ;;
+    esac
     if [ "$fw_dma" -eq 1 ] || [ -e "$FW_ROOT"/sys/bus/thunderbolt/devices/domain0 ]; then
         fw_grp=0
         for g in "$FW_ROOT"/sys/kernel/iommu_groups/*; do

@@ -133,7 +133,7 @@ class Verdict:
         if self.ok:
             return None
         return ("the OS does not have complete control of this machine: "
-                + "; ".join(f.name for f in self.blocking) + " still running")
+                + "; ".join(f.name for f in self.blocking))
 
     def lines(self) -> list[str]:
         out = [f.line() for f in self.findings]
@@ -208,7 +208,7 @@ def load_allow(path: Path) -> tuple[set[str], set[str]]:
 def apply_allow(findings: list[Finding], allow: tuple[set[str], set[str]]) -> None:
     pci, kinds = allow
     for f in findings:
-        if f.state == "active" and f.kind != "no-iommu" and (f.pci_id in pci or f.kind in kinds):
+        if f.state == "active" and f.kind not in ("no-iommu", "wrong-machine") and (f.pci_id in pci or f.kind in kinds):
             f.state = "allowed"
             f.detail = "on the owner's allow list (" + f.detail + ")"
 
@@ -304,6 +304,26 @@ def _bmc_findings(root: Path) -> list[Finding]:
     return out
 
 
+def machine_rule(root: Path) -> str:
+    """``kos.machine=framework`` on the signed command line: boot only on a Framework
+    laptop (DMI sys_vendor). Default ``any``. The vendor string is what the firmware
+    reports, so this limits mistakes and swapped hardware, not a hostile BIOS."""
+    for word in _read(root / "proc/cmdline").split():
+        if word == "kos.machine=framework":
+            return "framework"
+    return "any"
+
+
+def _machine_findings(root: Path) -> list[Finding]:
+    if machine_rule(root) != "framework":
+        return []
+    vendor = _read(root / "sys/class/dmi/id/sys_vendor")
+    if vendor == "framework":
+        return []
+    return [Finding("wrong-machine", "not a Framework laptop", "sys/class/dmi/id/sys_vendor", "active",
+                    f"this image only boots on Framework hardware; DMI says {vendor or 'nothing'!r}")]
+
+
 def _caveat(root: Path) -> str:
     cpu = _read(root / "proc/cpuinfo")
     if not cpu or " hypervisor" in cpu:
@@ -321,6 +341,7 @@ def probe(root: Path = Path("/"), policy: Optional[str] = None,
     v = Verdict(policy or current_policy(root))
     v.findings = _pci_findings(root) + _bmc_findings(root) + _other_findings(root)
     apply_allow(v.findings, load_allow(allow_file or root / ALLOW_FILE))
+    v.findings += _machine_findings(root)        # not allow-listable
     v.findings += _iommu_finding(root, v.findings)
     if not v.findings:
         v.caveat = _caveat(root)
@@ -440,3 +461,85 @@ def protections(root: Path = Path("/")) -> list[tuple[str, str, str]]:
                 "NIC/ME/AMT firmware sees every packet; only end-to-end encryption (TLS, WireGuard) hides "
                 "the contents, never who you talk to"))
     return out
+
+
+# --- the plan: read-only advice on what it would take to pass the gate ----------------
+
+# kind -> (can it be replaced with open firmware?, what to do). Static knowledge, stated
+# plainly; the OS cannot check any of it on the machine in front of it.
+PLAN = {
+    "intel-me": ("partly", "Open boot firmware (coreboot) plus me_cleaner can strip the ME and set the "
+                 "HAP bit, which this gate then reads as 'disabled'. Offline, with an SPI programmer. "
+                 "Impossible if Intel Boot Guard is fused on, which many OEM boards are."),
+    "amd-psp": ("no", "There is no open replacement. Some boards have a firmware-setup option to "
+                "disable it; the OS cannot verify that, so it stays blocking until you allow-list it."),
+    "bmc-ipmi": ("sometimes", "OpenBMC supports a list of server boards. Otherwise disable or unplug the "
+                 "BMC network port and allow-list the kind yourself."),
+    "embedded-controller": ("sometimes", "Open EC firmware exists for Framework laptops, Chromebooks and "
+                            "System76 machines. Flash it per the vendor's guide, then allow-list "
+                            "'kind embedded-controller'."),
+    "typec-port": ("no", "USB-C port/PD controllers run vendor firmware with no open replacement. "
+                   "Choose hardware without one, or allow-list the kind knowingly."),
+    "thunderbolt": ("no", "Vendor firmware only. Disable Thunderbolt/USB4 in firmware setup; the OS then "
+                    "powers it down (D3cold) and it stops blocking."),
+    "wireless": ("no", "Vendor firmware only. Remove the card or disable it in firmware setup; or let the "
+                 "OS power it down (D3cold), which it verifies."),
+    "network": ("no", "NIC firmware is a vendor blob. Keep it behind the IOMMU and end-to-end encryption, "
+                "and allow-list it knowingly."),
+    "display": ("no", "GPU firmware is a vendor blob. Allow-list knowingly; the IOMMU confines its DMA."),
+    "nvme": ("no", "The controller firmware is inside the drive. LUKS2 means it only handles ciphertext; "
+             "allow-list knowingly."),
+    "no-iommu": ("n/a", "Turn on VT-d / AMD-Vi (IOMMU) in firmware setup. This cannot be allow-listed."),
+    "wrong-machine": ("n/a", "Boot this image on the machine it was built for, or remove kos.machine= "
+                      "from kernel/cmdline.txt."),
+}
+
+
+@dataclass
+class PlanItem:
+    kind: str
+    name: str
+    state: str
+    open_replacement: str
+    advice: str
+
+
+def platform_firmware(root: Path = Path("/")) -> str:
+    root = Path(root)
+    vendor = _read(root / "sys/class/dmi/id/bios_vendor")
+    version = _read(root / "sys/class/dmi/id/bios_version")
+    board = " ".join(x for x in (_read(root / "sys/class/dmi/id/sys_vendor"),
+                                 _read(root / "sys/class/dmi/id/product_name")) if x)
+    if not vendor:
+        return "platform firmware: not reported"
+    kind = ("open (coreboot)" if "coreboot" in vendor else "vendor firmware")
+    return f"platform firmware: {vendor} {version} - {kind}; board: {board or 'unknown'}"
+
+
+def plan(root: Path = Path("/"), verdict: Optional[Verdict] = None) -> list[PlanItem]:
+    """What each chip that blocks (or was accepted) would need. Read-only: nothing here
+    writes to a chip or to the machine."""
+    v = verdict or probe(root)
+    out = []
+    for f in v.findings:
+        replace, advice = PLAN.get(f.kind, ("unknown", "No advice for this kind of chip."))
+        if f.state == "neutralized":
+            advice = "Already believed off: " + f.detail
+        elif f.state == "allowed":
+            advice = "Accepted by your allow list; KOS cannot verify the firmware on it."
+        out.append(PlanItem(f.kind, f.name, f.state, replace, advice))
+    return out
+
+
+def plan_summary(items: list[PlanItem]) -> str:
+    blocking = [i for i in items if i.state == "active"]
+    if not blocking:
+        return "Nothing blocks the boot."
+    stuck = [i for i in blocking if i.open_replacement == "no"]
+    if stuck:
+        return (f"{len(blocking)} chip(s) block the boot; {len(stuck)} of them have no open replacement "
+                "(" + ", ".join(sorted({i.kind for i in stuck})) + "). On this machine the gate passes only if "
+                "you disable them in firmware setup, allow-list them knowingly, or boot with "
+                "kos.firmware=warn.")
+    return (f"{len(blocking)} chip(s) block the boot; each has a route (flash open firmware offline, or "
+            "disable it), then re-run this.")

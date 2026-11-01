@@ -709,6 +709,14 @@ def cmd_firmware(args, paths: Paths) -> int:
     print(f"policy: kos.firmware={v.policy}")
     print("\n".join(v.lines()))
     print("boot: " + ("allowed" if v.ok else "REFUSED - " + (v.reason() or "")))
+    if getattr(args, "fw_cmd", None) == "plan":
+        print("\n" + firmware.platform_firmware())
+        items = firmware.plan(verdict=v)
+        for i in items:
+            print(f"\n- {i.name} [{i.state}] open replacement: {i.open_replacement}\n    {i.advice}")
+        print("\n" + firmware.plan_summary(items))
+        print("\nThis plan is read-only. KOS never writes to a chip; flashing is an offline job.")
+        return 0 if v.ok else 1
     print("\nwhat the chips we cannot remove can still see:")
     for name, status, note in firmware.protections():
         print(f"  {name:24} {status}\n      {note}")
@@ -920,7 +928,9 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
-    sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
+    s = sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
+    s.add_argument("fw_cmd", nargs="?", choices=["status", "plan"],
+                   help="plan: read-only advice on what each blocking chip would need")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
     s = sub.add_parser("admin", help="the elevated administrator keyboard")

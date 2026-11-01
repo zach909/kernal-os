@@ -131,6 +131,7 @@ kos aios status             the four AI OS layers and whether NeuroClaw answers
 kos aios gui|app|kernel|skill WORDS...   one request on one layer (no password)
 kos doctor                  which kernel protections this machine has
 kos firmware                management processors (Intel ME, AMD PSP, BMC) and whether the OS would boot
+kos firmware plan           read-only advice: which blocking chips have open firmware, which must be disabled or allow-listed
 kos audit                   every password decision
 ```
 

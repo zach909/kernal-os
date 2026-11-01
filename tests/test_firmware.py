@@ -500,6 +500,97 @@ class TestAllowList(FirmwareCase):
         self.assertEqual(firmware.load_allow(SH.parent.parent / "firmware.allow"), (set(), set()))   # ships empty
 
 
+class TestMachineRule(FirmwareCase):
+    def both(self):
+        return self.t.py_findings(), self.t.sh_findings()
+
+    def test_off_by_default_so_other_machines_and_vms_boot(self):
+        self.t.write("sys/class/dmi/id/sys_vendor", "Dell Inc.\n")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual((py, sh, gate), (set(), set(), 0))
+
+    def test_framework_only_refuses_everything_else_in_both_scanners(self):
+        self.t.cmdline("quiet kos.machine=framework")
+        self.t.write("sys/class/dmi/id/sys_vendor", "Dell Inc.\n")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("wrong-machine", "active")})
+        self.assertEqual((sh, gate), (py, 1))
+        self.assertFalse(v.ok)
+
+    def test_a_framework_passes_and_nothing_reported_is_refused_too(self):
+        self.t.cmdline("kos.machine=framework")
+        self.t.write("sys/class/dmi/id/sys_vendor", "Framework\n")
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual((py, sh, gate), (set(), set(), 0))
+        (self.t.root / "sys/class/dmi/id/sys_vendor").unlink()
+        (py, v), (sh, gate) = self.both()
+        self.assertEqual(py, {("wrong-machine", "active")})
+        self.assertEqual((sh, gate), (py, 1))
+
+    def test_the_allow_list_cannot_waive_it(self):
+        self.t.cmdline("kos.machine=framework")
+        self.t.allow("kind wrong-machine")
+        self.assertFalse(self.t.py_findings()[1].ok)
+
+    def test_it_is_shipped_off(self):
+        cmd = (SH.parent.parent.parent / "kernel" / "cmdline.txt").read_text()
+        self.assertNotIn("kos.machine=framework", cmd)
+
+
+class TestPlan(FirmwareCase):
+    def test_every_blocking_kind_has_advice_and_nothing_is_written(self):
+        self.t.intel_me()
+        self.t.pci("0000:02:00.0", "0x8086", "0x020000")
+        (self.t.root / "sys/bus/acpi/devices/PNP0C09:00").mkdir(parents=True)
+        before = sorted(str(p) for p in self.t.root.rglob("*"))
+        before_text = {p: p.read_bytes() for p in self.t.root.rglob("*") if p.is_file()}
+        items = firmware.plan(self.t.root)
+        self.assertEqual({i.kind for i in items}, {"intel-me", "network", "embedded-controller"})
+        self.assertTrue(all(i.advice and i.open_replacement for i in items))
+        self.assertEqual(sorted(str(p) for p in self.t.root.rglob("*")), before)
+        self.assertEqual({p: p.read_bytes() for p in self.t.root.rglob("*") if p.is_file()}, before_text)
+        self.assertEqual({i.kind: i.open_replacement for i in items}["network"], "no")
+
+    def test_every_kind_the_scanner_can_emit_is_in_the_plan_table(self):
+        emitted = {"intel-me", "amd-psp", "bmc-ipmi", "thunderbolt", "network", "display", "nvme",
+                   "wireless", "typec-port", "embedded-controller", "no-iommu", "wrong-machine"}
+        self.assertEqual(emitted - set(firmware.PLAN), set())
+
+    def test_accepted_and_off_chips_are_not_advised_to_do_anything(self):
+        self.t.intel_me(mode=3)
+        self.t.pci("0000:03:00.0", "0x8086", "0x0d1100", device="0x2725")
+        self.t.allow("pci 8086:2725")
+        items = {i.kind: i for i in firmware.plan(self.t.root)}
+        self.assertIn("Already believed off", items["intel-me"].advice)
+        self.assertIn("allow list", items["wireless"].advice)
+        self.assertEqual(firmware.plan_summary(list(items.values())), "Nothing blocks the boot.")
+
+    def test_summary_says_when_no_open_replacement_exists(self):
+        self.t.pci("0000:02:00.0", "0x8086", "0x020000")
+        text = firmware.plan_summary(firmware.plan(self.t.root))
+        self.assertIn("no open replacement", text)
+        self.assertIn("kos.firmware=warn", text)
+
+    def test_platform_firmware_names_coreboot_only_when_it_says_so(self):
+        self.t.write("sys/class/dmi/id/bios_vendor", "coreboot\n")
+        self.t.write("sys/class/dmi/id/bios_version", "4.19\n")
+        self.assertIn("open (coreboot)", firmware.platform_firmware(self.t.root))
+        self.t.write("sys/class/dmi/id/bios_vendor", "American Megatrends\n")
+        self.assertIn("vendor firmware", firmware.platform_firmware(self.t.root))
+
+    def test_cli_plan_runs_read_only(self):
+        from contextlib import redirect_stdout
+        from kos import cli
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, redirect_stdout(buf):
+            os.environ["KOS_ROOT"] = d
+            try:
+                cli.main(["firmware", "plan"])
+            finally:
+                del os.environ["KOS_ROOT"]
+        self.assertIn("read-only", buf.getvalue())
+
+
 class TestProtections(FirmwareCase):
     def by_name(self):
         return {n: (st, note) for n, st, note in firmware.protections(self.t.root)}

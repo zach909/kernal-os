@@ -43,6 +43,13 @@ Limits, stated plainly:
   (`d3cold_allowed`, `power/control=auto`); they stop blocking only if `power_state` then reads D3cold, in both the
   shell and Python scanners. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down on a running machine.
   KOS does not erase, corrupt or overvolt anything, and does not try to rewrite other chips' firmware.
+* **`kos firmware plan` is read-only advice**, from a static table (`PLAN`): per blocking chip, whether open firmware
+  exists (coreboot + me_cleaner for some Intel boards, OpenBMC for some servers, open EC for Framework/Chromebook/
+  System76; none for PSP, USB-C/Thunderbolt, NIC, GPU, NVMe), and a verdict on whether this machine can pass. The OS
+  cannot verify any of it on the hardware in front of it, and flashing is an offline job KOS does not do.
+* **`kos.machine=framework`** (signed command line, shipped off) refuses to boot on anything whose DMI `sys_vendor` is
+  not `Framework`. The vendor string is what the firmware reports: it prevents mistakes and swapped hardware, not a
+  hostile BIOS. The allow list cannot waive it. Turning it on makes VMs and the QEMU flow refuse to boot.
 * **No resident checker.** The gate runs once at boot and at each unlock; no daemon, loop or watcher.
 * **Absence is unprovable.** A BIOS may hide the ME's PCI function; on bare-metal Intel/AMD with
   nothing visible KOS prints a caveat and boots.
