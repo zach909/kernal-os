@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from collections import deque
 from typing import Iterator, Optional
 
 
@@ -60,16 +61,29 @@ class App:
         self.width = 80
         self.height = 24
         self.devices: set[str] = set()
+        self._queue: deque = deque()     # events that arrived while waiting for a vault reply
+        self._seq = 0
+        self.vault_error = ""           # why the last vault call was refused, for the app to show
 
     def send(self, obj: dict) -> None:
         self._sock.sendall(json.dumps(obj, separators=(",", ":")).encode() + b"\n")
 
-    def events(self) -> Iterator[dict]:
+    def _read_event(self) -> Optional[dict]:
+        """Next decoded message from the OS, or None when the channel closes."""
         for line in self._rfile:
             try:
                 ev = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(ev, dict):
+                return ev
+        return None
+
+    def events(self) -> Iterator[dict]:
+        while True:
+            ev = self._queue.popleft() if self._queue else self._read_event()
+            if ev is None:
+                return
             cmd = ev.get("cmd")
             if cmd == "hello":
                 self.mode = ev.get("mode", self.mode)
@@ -80,6 +94,52 @@ class App:
             elif cmd == "quit":
                 return
             yield ev
+
+    # --- durable storage (needs the 'storage' permission) -----------------
+    # Blocking round trips: the OS answers a vault command straight away and
+    # never prompts. Any other event that arrives meanwhile is kept for events().
+    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None) -> dict:
+        self._seq += 1
+        msg = {"cmd": "vault", "op": op, "id": self._seq}
+        if op not in ("list", "spaces"):
+            msg["key"] = key
+        if value is not None:
+            msg["value"] = value
+        if space is not None:
+            msg["space"] = space
+        self.send(msg)
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return {"ok": False, "detail": "channel closed"}
+            if ev.get("cmd") == "vault" and ev.get("id") == self._seq:
+                self.vault_error = "" if ev.get("ok") or ev.get("detail") == "no such key" else ev.get("detail", "")
+                return ev
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return {"ok": False, "detail": "quit"}
+            self._queue.append(ev)
+
+    # ``space`` names a shared folder (manifest 'owns:NAME' to create it, 'uses:NAME' to look for it
+    # once the device owner granted access). Without it you get your own private data.
+    def vault_put(self, key: str, value: str, space: Optional[str] = None) -> bool:
+        return bool(self._vault("put", key, value, space).get("ok"))
+
+    def vault_get(self, key: str, space: Optional[str] = None) -> Optional[str]:
+        r = self._vault("get", key, space=space)
+        return r.get("value") if r.get("ok") else None
+
+    def vault_keys(self, space: Optional[str] = None) -> list:
+        r = self._vault("list", space=space)
+        return list(r.get("keys", [])) if r.get("ok") else []
+
+    def vault_delete(self, key: str, space: Optional[str] = None) -> bool:
+        return bool(self._vault("delete", key, space=space).get("ok"))
+
+    def vault_spaces(self) -> list:
+        """Shared spaces this app can open right now: [{space, access, owner}]."""
+        r = self._vault("spaces")
+        return list(r.get("spaces", [])) if r.get("ok") else []
 
     # --- commands the app can issue -------------------------------------
     def screen(self, title: str, lines: list[str], status: str = "") -> None:

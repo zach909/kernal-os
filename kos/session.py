@@ -114,7 +114,7 @@ class Session:
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
-                 outcome: Optional[dict] = None):
+                 outcome: Optional[dict] = None, vault=None):
         self.name, self.mode = name, mode
         self.channel = channel
         self.proc = proc
@@ -125,6 +125,7 @@ class Session:
         self.boot_queue = [d for d in boot_devices if d not in self.preboot]
         self.booted: set[str] = set()
         self.bridge = bridge
+        self.vault = vault
         self.right_click_to = right_click_to
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
@@ -238,6 +239,8 @@ class Session:
                 self._log("app: " + msg["msg"])
             elif msg["cmd"] == "request":
                 self._on_request(msg)
+            elif msg["cmd"] == "vault":
+                self._on_vault(msg)
             elif msg["cmd"] == "exit":
                 self.exit_code = msg["code"]
                 self.stop_requested = True
@@ -249,6 +252,39 @@ class Session:
         if self.detach_on_interrupt:
             self.detached = True
         self.stop_requested = True
+
+    def _on_vault(self, msg: dict) -> None:
+        """Durable storage for the app, done by the OS. Never prompts: the grant
+        is the manifest plus the universal permission store (see spaces.py)."""
+        from .spaces import StorageError
+        from .vault import VaultError
+        reply = {"cmd": "vault", "op": msg["op"], "id": msg["id"], "ok": False, "detail": ""}
+        if self.vault is None:
+            reply["detail"] = "this app does not have the 'storage' permission"
+            self._send(reply)
+            return
+        try:
+            if msg["op"] == "spaces":
+                reply["spaces"] = self.vault.visible_spaces()
+            else:
+                v = self.vault.vault(msg.get("space"), msg["op"])
+                if msg["op"] == "put":
+                    v.put(msg["key"], msg["value"])
+                elif msg["op"] == "get":
+                    value = v.get(msg["key"])
+                    if value is None:
+                        reply["detail"] = "no such key"
+                        self._send(reply)
+                        return
+                    reply["value"] = value
+                elif msg["op"] == "list":
+                    reply["keys"] = v.keys()
+                else:
+                    v.delete(msg["key"])
+            reply["ok"] = True
+        except (StorageError, VaultError, OSError) as e:
+            reply["detail"] = str(e)[:200]
+        self._send(reply)
 
     def _on_request(self, msg: dict) -> None:
         if self.bridge is None:

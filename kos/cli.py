@@ -50,7 +50,7 @@ from .admin import AdminError, WriteBlocked
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
-from .kapp import KAppError, pack
+from .kapp import KApp, KAppError, pack
 from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
@@ -199,10 +199,12 @@ def cmd_run(args, paths: Paths) -> int:
     action = "app.graphical" if mode == "graphical" else "app.run"
     with authority.authorize(action, name) as grant:
         app = store.load_verified(name, grant)
+    PermitStore(paths).check_declared(name, app.manifest.permissions)
     policy = _authorize_app_action(name, app, mode, authority, prompter) if not args.cell else \
         SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
     paths.ensure()
-    log_path = paths.logs / f"{name}.log"
+    from .appdirs import AppDirs
+    log_path = AppDirs(paths, name).ensure().run / f"{name}.log"
     cache_dir = None
     if args.cell:
         from .cells import CellManager, connect_cell, send_app
@@ -219,8 +221,9 @@ def cmd_run(args, paths: Paths) -> int:
     prompter.close()
     try:
         bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge)
+                            bridge=bridge, vault=vault)
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -261,8 +264,14 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
     bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    perms = ()
+    try:
+        perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
+    except (KAppError, OSError):
+        pass
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True, bridge=bridge, **session_kwargs)
+                        detach_on_interrupt=True, bridge=bridge,
+                        vault=_vault_for(paths, inst.name, perms), **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:
@@ -483,6 +492,12 @@ def _build_surface(mode, name, term):
     return GraphicalSurface(TerminalBackend(1, cols, rows)), TerminalDevices(term, cell_to_pixels=True)
 
 
+def _vault_for(paths: Paths, name: str, permissions):
+    from .spaces import AppStorage
+    st = AppStorage(paths, name, permissions)
+    return st if st.usable() else None
+
+
 def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) -> int:
     from .session import Session
     from .term import RawTerminal
@@ -521,8 +536,67 @@ def cmd_permit(args, paths: Paths) -> int:
             PermitStore(paths).revoke(args.name)
             print(f"revoked: {args.name} may no longer run")
         else:
-            PermitStore(paths).grant(args.name)
+            declared = KApp.from_file(paths.apps / f"{args.name}.kapp").manifest.permissions
+            PermitStore(paths).grant(args.name, declared)
             print(f"permitted: {args.name} may now run (still asks for your password every time)")
+            if declared:
+                print(f"  approved permissions: {', '.join(declared)}  (an update asking for more is refused until you permit again)")
+    return 0
+
+
+def cmd_grant(args, paths: Paths) -> int:
+    """`kos grant APP space:NAME [--level read|write]` lets an app that *uses* a shared folder in.
+    Everyone holding a grant of at least the level asked for may do it - that is the whole rule."""
+    from .permissions import LEVELS, Permissions
+    if args.list or not args.app:
+        entries = Permissions(paths).list("space:")
+        if not entries:
+            print("no shared-folder access granted yet")
+        for e in sorted(entries, key=lambda e: (e["resource"], e["app"])):
+            print(f"{e['resource']:24} {e['app']:24} {e['level']}")
+        return 0
+    if not args.resource or not args.resource.startswith("space:"):
+        raise KAppError("usage: kos grant APP space:NAME [--level read|write]   |   kos grant --list")
+    if args.level not in ("read", "write"):
+        raise KAppError("--level must be read or write (only the app that creates a space owns it)")
+    authority, _ = _authority(paths)
+    with authority.authorize("space.revoke" if args.revoke else "space.grant", f"{args.app}:{args.resource}"):
+        if args.revoke:
+            n = Permissions(paths).revoke(args.app, args.resource)
+            print(f"revoked {args.app} from {args.resource}" if n else "nothing to revoke")
+        else:
+            if Permissions(paths).get(args.app, args.resource) and \
+                    Permissions(paths).get(args.app, args.resource)["level"] == "own":
+                raise KAppError(f"{args.app} owns {args.resource}")
+            Permissions(paths).grant(args.app, args.resource, args.level)
+            print(f"{args.app} may now {args.level} {args.resource}")
+    return 0
+
+
+def cmd_spaces(args, paths: Paths) -> int:
+    """Shared folders: who created each one and who else is let in."""
+    from .permissions import Permissions
+    entries = Permissions(paths).list("space:")
+    names = sorted({e["resource"] for e in entries})
+    if not names:
+        print("no shared folders yet (an app with 'owns:NAME' creates one the first time it uses it)")
+    for r in names:
+        owner = next((e["app"] for e in entries if e["resource"] == r and e["level"] == "own"), "(none)")
+        others = ", ".join(f"{e['app']}({e['level']})" for e in entries if e["resource"] == r and e["level"] != "own") or "nobody else"
+        n = len(list((paths.state / "spaces" / r[6:]).glob("*"))) if (paths.state / "spaces" / r[6:]).is_dir() else 0
+        print(f"{r[6:]:20} owner {owner:20} items {n:<4} access: {others}")
+    return 0
+
+
+def cmd_dirs(args, paths: Paths) -> int:
+    """Where an app's stuff lives: cache (wiped), data (kept), run (live state)."""
+    from .appdirs import AppDirs
+    d = AppDirs(paths, args.name)
+    for label, p, note in (("cache", d.cache, "scratch, wiped when the app ends"), ("data", d.data, "private user data, kept"),
+                           ("run", d.run, "running instances: record, socket, log")):
+        n = len(list(p.glob("*"))) if p.is_dir() else 0
+        print(f"{label:6} {p}  [{n} entries]  {note}")
+    print(f"perms  {paths.state / 'permissions' / 'grants.json'}  universal, for every app")
     return 0
 
 
@@ -800,6 +874,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--revoke", action="store_true", help="take away permission instead of granting it")
     s.add_argument("--list", action="store_true", help="list every app with permission to run")
+    s = sub.add_parser("grant", help="let an app into a shared folder (space:NAME), or list who has access")
+    s.add_argument("app", nargs="?")
+    s.add_argument("resource", nargs="?")
+    s.add_argument("--level", default="read", help="read or write (default read)")
+    s.add_argument("--revoke", action="store_true")
+    s.add_argument("--list", action="store_true")
+    sub.add_parser("spaces", help="list shared folders, their owner and who has access")
+    s = sub.add_parser("dirs", help="show an app's cache / data / run folders")
+    s.add_argument("name")
     s = sub.add_parser("scan", help="scan a file/zip for known-bad patterns, or watch a directory")
     ss = s.add_subparsers(dest="scan_cmd", required=True)
     sf = ss.add_parser("file", help="scan one file or zip right now (no password needed)")
@@ -848,7 +931,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "scan": cmd_scan, "optimize": cmd_optimize,
+            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize,
             "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop, "aios": cmd_aios}

@@ -36,6 +36,7 @@ from kos.scan import EICAR, scan_bytes  # noqa: E402
 from kos.permit import PermitError, PermitStore  # noqa: E402
 from kos.optimize import optimize  # noqa: E402
 from kos import cache as kcache  # noqa: E402
+from kos.appdirs import AppDirs  # noqa: E402
 from kos.store import VirusFoundError  # noqa: E402
 from kos.watch import Watcher  # noqa: E402
 from kos import cli as kcli  # noqa: E402
@@ -306,8 +307,8 @@ class TestOpenAttachClose(Env):
         registry = Registry(self.paths)
         inst_id = registry.new_id("hello")
         inst = Instance(id=inst_id, name="hello", mode=mode, broker_pid=0,
-                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
-                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+                        sock_path=str(AppDirs(self.paths, "hello").ensure().run / f"{inst_id}.sock"),
+                        log_path=str(AppDirs(self.paths, "hello").ensure().run / f"{inst_id}.log"), started=0)
         spawn(inst, app, mode, SandboxPolicy(), registry, Path(inst.log_path))
         return registry, inst_id
 
@@ -360,10 +361,10 @@ class TestOpenAttachClose(Env):
         import time
         os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
         for _ in range(50):
-            if not (self.paths.state / "instances" / f"{inst_id}.json").exists():
+            if not Registry(self.paths)._file(inst_id).exists():
                 break
             time.sleep(0.1)
-        self.assertFalse((self.paths.state / "instances" / f"{inst_id}.json").exists())
+        self.assertFalse(Registry(self.paths)._file(inst_id).exists())
         self.assertFalse(os.path.exists(inst.sock_path))
 
     def test_two_opens_are_independent(self):
@@ -905,8 +906,9 @@ class TestRequestProtocol(unittest.TestCase):
     def test_old_instance_records_without_the_system_flag_still_load(self):
         with tempfile.TemporaryDirectory() as d:
             reg = Registry(Paths(Path(d)))
-            reg.dir.mkdir(parents=True)
-            (reg.dir / "old-aaaaaa.json").write_text(json.dumps(
+            f = reg._file("old-aaaaaa")
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps(
                 {"id": "old-aaaaaa", "name": "old", "mode": "tui", "broker_pid": os.getpid(),
                  "sock_path": "/x", "log_path": "/y", "started": 0, "app_pid": 1,
                  "status": "running"}))

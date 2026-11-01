@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import cache
+from .appdirs import AppDirs
 from .auth import AuthError, Authority, AuthorizationDenied
 from .broker import spawn
 from .kapp import KApp, KAppError
@@ -105,6 +106,7 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     action = "app.graphical" if mode == "graphical" else "app.open"
     with authority.authorize(action, name) as grant:
         app = store.load_verified(name, grant)
+    PermitStore(paths).check_declared(name, app.manifest.permissions)
     policy = authorize_app_action(name, app, mode, authority, authority.prompter)
     if release:
         release()                          # e.g. close the TTY before forking the broker
@@ -114,9 +116,10 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     registry = Registry(paths)
     registry.prune()
     inst_id = registry.new_id(name)
+    run_dir = AppDirs(paths, name).ensure().run
     inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
-                    sock_path=str(paths.state / "instances" / f"{inst_id}.sock"),
-                    log_path=str(paths.logs / f"{inst_id}.log"), started=time.time(),
+                    sock_path=str(run_dir / f"{inst_id}.sock"),
+                    log_path=str(run_dir / f"{inst_id}.log"), started=time.time(),
                     system="system" in app.manifest.permissions)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
@@ -134,7 +137,7 @@ def close_instance(paths: Paths, authority: Authority, instance_id: str) -> Inst
             except ProcessLookupError:
                 pass
             for _ in range(20):  # give the broker a moment to shut the app down cleanly
-                if not (paths.state / "instances" / f"{inst.id}.json").exists():
+                if not registry._file(inst.id).exists():
                     break
                 time.sleep(0.1)
         registry.remove(inst.id)

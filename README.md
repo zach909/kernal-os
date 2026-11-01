@@ -40,6 +40,53 @@ power on
 | AI OS: KOS is the engine | `kos/aios.py`: four layers only - the graphical button clicker (`gui`), terminal app commands (`app`), kernel commands (`kernel`, NeuroClaw's Linux permission tools) and the auto skill maker (`skill`). Each request asks for your password for that request (`aios.<layer>`), is audit-logged, then is handed to the NeuroClaw engine on this computer, whose own tool gate and approvals still apply. Nothing else of NeuroClaw is reachable, nothing autostarts, and the engine address must be loopback. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
+## Productivity suite
+
+149 products were asked for (document/spreadsheet/slides editors, mail, calendar, databases, project and
+security tools, AI assistants, ...). **144 are built as apps; 5 are not, with the reason in the catalogue.**
+Honest breakdown: 51 full, 93 partial (a real, useful part - the catalogue says exactly what is missing),
+5 not built. See [docs/CATALOG.md](docs/CATALOG.md) for every product, its app name and its scope.
+
+```
+bin/suite list                list every product, scope and app name
+bin/suite build DIR           pack one .kapp per app into DIR
+kos install DIR/document-editor.kapp && kos permit document-editor && run document-editor
+```
+
+How it fits the security model: apps are ordinary sandboxed `.kapp`s (manifest + 3-line launcher); all code
+lives in `kos/office`, on every app's import path like `kos.sdk`. Each app gets one folder:
+
+```
+<state>/appdata/<app>/cache/   scratch for each run, wiped the instant the app ends
+<state>/appdata/<app>/data/    private user data (the vault); never wiped, survives updates
+<state>/appdata/<app>/run/     live state of its running instances (record, socket, log)
+<state>/permissions/grants.json  ONE universal permission store, for every app
+<state>/spaces/<name>/         shared folders, created by the app that owns them
+```
+
+Apps *ask* the OS (a `vault` command) to put/get/list/delete named text items - never paths. No password
+prompt for that (the run permit + the password at launch still apply), size/count caps apply.
+
+**Shared folders.** An app whose manifest says `owns:contacts` creates the `contacts` folder, and its
+permission, the first time it uses it. Any other app that says `uses:contacts` can look for it, but is only
+let in after you grant it (`kos grant email-client space:contacts --level read`, with the password): the
+manifest has to ask *and* the permission store has to say yes, and nobody can take over a name someone else
+owns. Anyone holding a grant of at least the level asked for may use it - that is the whole rule. Wired so
+far: Contact Manager owns `contacts` (Email Client and Appointment Scheduler look people up in it),
+Calendar Manager owns `calendar` (the scheduler books onto it), Task Manager owns `tasks` (the collaboration
+and workspace apps show the same tasks). `kos spaces` shows who owns what and who has access; `kos dirs APP`
+shows an app's folders.
+
+`kos permit` now records which manifest permissions you approved; if an update asks for more (say `network`)
+it is refused until you permit again. AI apps additionally declare `network` (password at launch) and work
+**without** a model using local deterministic tools; connect a model in the app's settings for open-ended
+answers.
+
+What is real vs. what is not: SQL is real SQLite; spreadsheets have a real formula parser (no `eval`); mail has
+a real delivery pipeline; TOTP matches RFC 6238; the audit log is hash-chained; search is BM25. What is not:
+anything needing audio/video/camera/screen/other machines (conferencing, voice, capture, scanning, speech) and
+anything that needs two *people* or two *machines* to share live data - every app is single-user and local, and apps share only through the owned folders above.
+
 ## Commands
 
 ```
@@ -59,6 +106,9 @@ kos explore [PATH]          interactively cd/ls/cat, straight into zip files
 kos activity                one feed: what's open + recent password decisions
 kos view FILE               view a file (password first)
 kos permit NAME             give an app permission to run (password still needed every run)
+kos grant APP space:NAME    let an app into a shared folder (--level read|write; --revoke; --list)
+kos spaces                  shared folders: owner, item count, who has access
+kos dirs APP                an app's cache / data / run folders
 kos scan file PATH          scan a file/zip right now (no password needed)
 kos scan watch DIR...       scan every file written here until Ctrl-C (password to start)
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
