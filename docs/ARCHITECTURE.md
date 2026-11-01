@@ -11,6 +11,51 @@
    login exists.
 4. Every action after that goes through `Authority.authorize(action, target)`.
 
+## Firmware control (`kos/firmware.py`, `boot/initramfs/firmware.sh`)
+Rule: the OS must be in control of the machine or it does not boot. Intel's
+Management Engine (with AMT), AMD's Platform Security Processor and server BMCs
+are separate computers that start before the OS and keep running under it.
+1. **Scan** (sysfs only): PCI `8086` class `0780` = Intel MEI, `1022` class `1080` = AMD PSP,
+   DMI type 38 or `/dev/ipmi*` or `/sys/class/ipmi` = BMC. The pre-boot shell script and the
+   Python module implement the same scan; `tests/test_firmware.py` runs both on the same fake
+   sysfs and requires the same verdict.
+2. **Alert**, then **mitigate**: unbind the driver and write a nonexistent name to
+   `driver_override`. The device is *left visible* so a later scan cannot mistake "we hid it"
+   for "absent". Mitigation never changes a verdict.
+3. **Verdict**: an Intel ME is believed off only if HFSTS1 (PCI config 0x40) bits 19:16 read 3
+   (disabled). Any other mode, an unreadable register, a PSP or a BMC is "running" and stops
+   the boot (`enforce`, the default and the result of any unknown value). `kos.firmware=warn`
+   in the signed command line continues after alerting. PID 1 ignores the environment; a dev
+   run honours `KOS_DEV_FIRMWARE=warn`.
+4. Placed twice: in `/init` before the disk or the password, and in `kos-init` before the login
+   prompt; also a `before` of `session.unlock` in `requires.py`, so every unlock re-checks.
+
+Limits, stated plainly:
+* **The OS cannot disable these.** They have their own CPU and flash. KOS only detaches itself;
+  the ME keeps its memory access and (with AMT) its network path. Actually disabling means the
+  flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; KOS does not write flash.
+* **Almost no physical machine boots under `enforce`.** Besides the ME/PSP/BMC, any chip with its own
+  firmware blocks it too: Thunderbolt/USB4, USB-C port controller, embedded controller, and network, GPU,
+  NVMe and wireless controllers (PCI classes in `FIRMWARE_CLASSES`), and so does DMA hardware with no
+  IOMMU. These are not unbound (that would break the machine); the strict IOMMU in `kernel/cmdline.txt`
+  confines them. VMs ignore the emulated ones. Use `kos.firmware=warn` to boot with the alert.
+* **Power-down for optional chips.** Thunderbolt/USB4 and wireless controllers are unbound and asked for D3cold
+  (`d3cold_allowed`, `power/control=auto`); they stop blocking only if `power_state` then reads D3cold, in both the
+  shell and Python scanners. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down on a running machine.
+  KOS does not erase, corrupt or overvolt anything, and does not try to rewrite other chips' firmware.
+* **`kos firmware plan` is read-only advice**, from a static table (`PLAN`): per blocking chip, whether open firmware
+  exists (coreboot + me_cleaner for some Intel boards, OpenBMC for some servers, open EC for Framework/Chromebook/
+  System76; none for PSP, USB-C/Thunderbolt, NIC, GPU, NVMe), and a verdict on whether this machine can pass. The OS
+  cannot verify any of it on the hardware in front of it, and flashing is an offline job KOS does not do.
+* **`kos.machine=framework`** (signed command line, shipped off) refuses to boot on anything whose DMI `sys_vendor` is
+  not `Framework`. The vendor string is what the firmware reports: it prevents mistakes and swapped hardware, not a
+  hostile BIOS. The allow list cannot waive it. Turning it on makes VMs and the QEMU flow refuse to boot.
+* **No resident checker.** The gate runs once at boot and at each unlock; no daemon, loop or watcher.
+* **Absence is unprovable.** A BIOS may hide the ME's PCI function; on bare-metal Intel/AMD with
+  nothing visible KOS prints a caveat and boots.
+* The HFSTS1 decoding follows coreboot/intelmetool and is untested on hardware here; the tests use
+  synthetic config space. The kernel config also drops the in-kernel MEI, CCP and IPMI drivers.
+
 ## Keys
 `master = scrypt(password, salt)`. Stored: salt, params, `HMAC(master,
 "verifier")`. Derived: `HMAC(master, "kapp-seal")` seals apps. The master key

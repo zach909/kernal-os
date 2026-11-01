@@ -4,7 +4,8 @@
 happen at all, or what it leaves owed once it has happened:
 
 * **before** - what must already be in place. Unlocking the computer requires
-  the elevated administrator keyboard; the keyboard requires the kernel. If
+  the firmware to be under the OS's control (kos/firmware.py) and the elevated
+  administrator keyboard; the keyboard requires the kernel. If
   the kernel can't run, the keyboard can't boot; if the keyboard can't boot,
   the computer does not unlock. The chain is followed all the way down and
   the refusal names it ("session.unlock requires admin.keyboard requires
@@ -38,7 +39,7 @@ class Rule:
 
 
 RULES: dict[str, Rule] = {
-    "session.unlock": Rule(before=("admin.keyboard",)),
+    "session.unlock": Rule(before=("firmware", "admin.keyboard")),
     "admin.keyboard": Rule(before=("kernel",)),
     "file.write": Rule(before=("admin.keyboard",), after=("scan", "optimize")),
 }
