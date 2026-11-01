@@ -22,7 +22,12 @@ What is real here, and what is not
   The layout follows coreboot/intelmetool's description; it has not been
   checked against hardware in this repository (the tests use synthetic config
   space).
-* **Switching them off from the OS is not possible.** The ME, PSP and BMC run
+* **Power is the one real lever, for optional chips only.** Thunderbolt and wireless
+  controllers are unbound and put into D3cold through runtime PM; if the kernel then
+  reports ``power_state`` D3cold they count as off (and stop blocking the boot). That is
+  verified, never assumed. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down
+  while the machine runs, and KOS does not try to destroy, erase or overvolt anything.
+* **Switching the ME/PSP/BMC off from the OS is not possible.** The ME, PSP and BMC run
   on their own processor with their own flash, and the OS cannot stop them.
   All KOS can do - and does, as "mitigation" - is to cut *its own side*: unbind
   the driver and forbid rebinding, so nothing on this machine talks to them.
@@ -65,6 +70,10 @@ CLASS_MEI = "0x0780"      # PCI "communication controller, other" = Intel MEI/HE
 CLASS_CRYPTO = "0x1080"   # PCI "encryption controller" = AMD PSP (ccp)
 HFSTS1 = 0x40             # ME host firmware status 1, in the MEI function's config space
 ME_MODE_DISABLED = 3
+# Optional peripherals the OS may power down (PCI runtime PM). Verified, not assumed:
+# they only count as off if the kernel reports power_state D3cold. The ME, PSP, EC,
+# GPU, NIC and the boot NVMe stay powered whenever the machine is on - never in here.
+POWER_OFFABLE = ("thunderbolt", "wireless")
 OVERRIDE = "kos-none"     # a driver name that does not exist: nothing can bind
 
 POLICIES = ("enforce", "warn")
@@ -194,8 +203,14 @@ def _pci_findings(root: Path) -> list[Finding]:
         elif not vm:
             for prefix, kind, name in FIRMWARE_CLASSES:
                 if klass.startswith(prefix):
-                    out.append(Finding(kind, name, rel, "active",
-                                       "runs its own firmware and can reach memory by DMA"))
+                    off = kind in POWER_OFFABLE
+                    if off and _read(dev / "power_state") == "d3cold":
+                        out.append(Finding(kind, name, rel, "neutralized",
+                                           "powered off (D3cold)", rel))
+                    else:
+                        out.append(Finding(kind, name, rel, "active",
+                                           "runs its own firmware and can reach memory by DMA",
+                                           rel if off else ""))
                     break
     return out
 
@@ -270,7 +285,8 @@ def probe(root: Path = Path("/"), policy: Optional[str] = None) -> Verdict:
     return v
 
 
-# --- mitigation: cut the OS's side. This is NOT switching the thing off. -------------
+# --- mitigation: cut the OS's side (and power down optional peripherals). The ME/PSP/BMC
+# keep running; only a chip that reads back D3cold is believed off. -------------
 
 def _unbind(root: Path, device: str) -> Optional[str]:
     dev = root / device
@@ -288,6 +304,17 @@ def _unbind(root: Path, device: str) -> Optional[str]:
     return None
 
 
+def _power_down(root: Path, device: str) -> None:
+    """Ask the kernel to put an unbound PCI function into D3cold. Whether it
+    worked is decided by the next probe reading power_state, not by this."""
+    dev = root / device
+    for name, value in (("d3cold_allowed", "1"), ("power/control", "auto")):
+        try:
+            (dev / name).write_text(value + "\n")
+        except OSError:
+            pass
+
+
 def neutralize(root: Path, verdict: Verdict) -> Verdict:
     """Detach every active finding from the OS. The ME/PSP/BMC keep running."""
     root = Path(root)
@@ -297,6 +324,11 @@ def neutralize(root: Path, verdict: Verdict) -> Verdict:
         err = _unbind(root, f.device)
         if err:
             verdict.actions.append(err)
+        elif f.kind in POWER_OFFABLE:
+            _power_down(root, f.device)
+            f.detached = True
+            verdict.actions.append(f"unbound {f.name} and asked the kernel to power it down "
+                                   "(counted off only if it then reads D3cold)")
         else:
             f.detached = True
             verdict.actions.append(f"detached the OS from {f.name} (driver unbound, rebinding "

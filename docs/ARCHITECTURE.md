@@ -39,6 +39,10 @@ Limits, stated plainly:
   NVMe and wireless controllers (PCI classes in `FIRMWARE_CLASSES`), and so does DMA hardware with no
   IOMMU. These are not unbound (that would break the machine); the strict IOMMU in `kernel/cmdline.txt`
   confines them. VMs ignore the emulated ones. Use `kos.firmware=warn` to boot with the alert.
+* **Power-down for optional chips.** Thunderbolt/USB4 and wireless controllers are unbound and asked for D3cold
+  (`d3cold_allowed`, `power/control=auto`); they stop blocking only if `power_state` then reads D3cold, in both the
+  shell and Python scanners. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down on a running machine.
+  KOS does not erase, corrupt or overvolt anything, and does not try to rewrite other chips' firmware.
 * **No resident checker.** The gate runs once at boot and at each unlock; no daemon, loop or watcher.
 * **Absence is unprovable.** A BIOS may hide the ME's PCI function; on bare-metal Intel/AMD with
   nothing visible KOS prints a caveat and boots.

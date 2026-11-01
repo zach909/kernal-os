@@ -67,8 +67,18 @@ kos_firmware_scan() {
         esac
         if [ -n "$fw_kind" ]; then
             if [ "$fw_vm" -eq 0 ]; then
-                echo "FINDING $fw_kind active $rel"
-                fw_active=1; fw_dma=1
+                fw_off=0
+                case "$fw_kind" in
+                    thunderbolt|wireless)   # optional peripherals: believed off only if D3cold
+                        fw_read "$dev/power_state"
+                        case "$fw_val" in D3cold|d3cold) fw_off=1 ;; esac ;;
+                esac
+                if [ "$fw_off" -eq 1 ]; then
+                    echo "FINDING $fw_kind neutralized $rel"
+                else
+                    echo "FINDING $fw_kind active $rel"
+                    fw_active=1; fw_dma=1
+                fi
             fi
             fw_kind=""
         fi
@@ -131,6 +141,15 @@ fw_detach() {
                 fi
                 echo kos-none > "$dev/driver_override" 2>/dev/null || true
                 ;;
+            *:0x0c0340*|*:0x0d*)   # Thunderbolt/USB4, wireless: unbind and ask for D3cold
+                if [ -e "$dev/driver" ]; then
+                    echo "${dev##*/}" > "$dev/driver/unbind" 2>/dev/null || true
+                fi
+                echo kos-none > "$dev/driver_override" 2>/dev/null || true
+                echo 1 > "$dev/d3cold_allowed" 2>/dev/null || true
+                echo auto > "$dev/power/control" 2>/dev/null || true
+                echo "kos-preboot: asked ${dev##*/} to power down (believed off only if it reads D3cold)"
+                ;;
         esac
     done
 }
@@ -145,6 +164,11 @@ kos_firmware_gate() {
     echo "kos-preboot: USB-C, EC, network, GPU, NVMe, wireless) run outside the OS's control."
     echo "kos-preboot: KOS cannot see inside them or stop what they do."
     fw_detach
+    kos_firmware_scan >/dev/null     # the second look decides: did anything actually go off?
+    if [ "$fw_active" -eq 0 ]; then
+        echo "kos-preboot: everything that was running is now verifiably off."
+        return 0
+    fi
     if [ "$fw_policy" = warn ]; then
         echo "kos-preboot: kos.firmware=warn - continuing anyway."
         return 0

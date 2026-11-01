@@ -47,6 +47,8 @@ class Tree:
         self.write(f"{d}/vendor", vendor + "\n")
         self.write(f"{d}/class", klass + "\n")
         self.write(f"{d}/driver_override", "(null)\n")
+        self.write(f"{d}/d3cold_allowed", "0\n")
+        self.write(f"{d}/power/control", "on\n")
         cfg = bytearray(256)
         if hfsts1 is not None:
             cfg[0x40:0x44] = struct.pack("<I", hfsts1)
@@ -166,6 +168,43 @@ class TestOtherFirmwareChips(FirmwareCase):
             self.assertEqual(sh, py, kind)
             self.assertFalse(v.ok, kind)
             self.assertEqual(gate, 1, kind)
+
+    def test_optional_peripherals_off_only_if_the_kernel_says_d3cold(self):
+        for kind, klass in (("thunderbolt", "0x0c0340"), ("wireless", "0x0d1100")):
+            for state, want in (("D3cold", "neutralized"), ("D0", "active"), ("D3hot", "active")):
+                t = Tree()
+                self.addCleanup(t.close)
+                bdf = t.pci("0000:03:00.0", "0x8086", klass)
+                t.write(f"sys/bus/pci/devices/{bdf}/power_state", state + "\n")
+                py, v = t.py_findings()
+                self.assertEqual(py, {(kind, want)}, (kind, state))
+                self.assertEqual(t.sh_findings(), (py, 0 if want == "neutralized" else 1), (kind, state))
+                self.assertEqual(v.ok, want == "neutralized")
+
+    def test_things_that_must_stay_powered_are_never_counted_off(self):
+        for klass in ("0x020000", "0x030000", "0x010802"):       # NIC, GPU, NVMe
+            t = Tree()
+            self.addCleanup(t.close)
+            bdf = t.pci("0000:03:00.0", "0x8086", klass)
+            t.write(f"sys/bus/pci/devices/{bdf}/power_state", "D3cold\n")
+            self.assertEqual({s for _, s in t.py_findings()[0]}, {"active"}, klass)
+            self.assertEqual(t.sh_findings()[1], 1, klass)
+
+    def test_mitigation_unbinds_and_requests_power_down_but_does_not_decide(self):
+        bdf = self.t.pci("0000:03:00.0", "0x8086", "0x0d1100", driver="iwlwifi")
+        v = firmware.enforce(self.t.root, "enforce")
+        d = self.t.root / "sys/bus/pci/devices" / bdf
+        self.assertEqual((self.t.root / "sys/bus/pci/drivers/iwlwifi/unbind").read_text().strip(), bdf)
+        self.assertEqual((d / "d3cold_allowed").read_text().strip(), "1")
+        self.assertEqual((d / "power/control").read_text().strip(), "auto")
+        self.assertEqual({(f.kind, f.state) for f in v.findings}, {("wireless", "active")})   # not off: no D3cold
+        self.assertFalse(v.ok)
+
+    def test_shell_requests_power_down_then_rescans(self):
+        bdf = self.t.pci("0000:03:00.0", "0x8086", "0x0d1100", driver="iwlwifi")
+        self.t.sh_findings()
+        d = self.t.root / "sys/bus/pci/devices" / bdf
+        self.assertEqual((d / "power/control").read_text().strip(), "auto")
 
     def test_none_of_them_are_unbound_or_touched(self):
         self.t.pci("0000:01:00.0", "0x144d", "0x010802", driver="nvme")
