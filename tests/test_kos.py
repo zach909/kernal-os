@@ -267,6 +267,172 @@ class TestSealedMemfd(unittest.TestCase):
             os.close(fd)
 
 
+class TestAuditChain(Env):
+    """The authorization log is tamper-evident: editing, deleting or reordering
+    lines is noticed, and recomputing the chain needs the password."""
+
+    def setUp(self):
+        super().setUp()
+        from kos.auth import AUDIT_KEY_LABEL, AuditLog, subkey
+        self.log = AuditLog(self.paths)
+        master = PasswordStore(self.paths).verify(PW.encode())
+        self.key = subkey(master, AUDIT_KEY_LABEL)
+
+    def _lines(self):
+        return self.log.file.read_bytes().split(b"\n")[:-1]
+
+    def _write(self, lines):
+        self.log.file.write_bytes(b"\n".join(lines) + b"\n")
+
+    def _fill(self, n=6):
+        for i in range(n):
+            self.log.record("app.run", f"app{i}", "bad-password" if i % 2 else "cancelled")
+
+    def test_grants_are_chained_and_anchored_to_the_password(self):
+        from kos.auth import GENESIS
+        self.authority(PW).authorize("app.run", "hello").close()
+        self.log.record("app.run", "x", "denied")
+        first, last = self.log.entries()
+        self.assertEqual(first["p"], GENESIS)
+        self.assertEqual(last["p"], first["h"])
+        self.assertIn("m", first)                 # a grant: anchored
+        self.assertNotIn("m", last)               # a refusal: nothing to anchor to
+        rep = self.log.verify(self.key)
+        self.assertTrue(rep.ok and rep.anchors_checked and rep.anchored == 1 and rep.chained == 2)
+        self.assertFalse(self.log.verify(b"x" * 32).ok)        # the wrong password's key fails
+
+    def test_editing_deleting_or_reordering_a_line_is_detected(self):
+        self._fill()
+        good = self._lines()
+        self.assertTrue(self.log.verify().ok)
+        edited = list(good); edited[2] = edited[2].replace(b"cancelled", b"denied")
+        self.assertNotEqual(edited[2], good[2])          # the edit must really change something
+        deleted = good[:2] + good[3:]
+        swapped = good[:2] + [good[3], good[2]] + good[4:]
+        for label, lines, bad in (("edit", edited, 3), ("delete", deleted, 3), ("reorder", swapped, 3)):
+            self._write(lines)
+            rep = self.log.verify()
+            self.assertFalse(rep.ok, label)
+            self.assertEqual(rep.bad_line, bad, label)
+
+    def test_recomputing_the_chain_without_the_password_is_caught_by_the_anchors(self):
+        """The cover-up: delete an embarrassing line, then re-link everything after it."""
+        from kos.auth import GENESIS, _link
+        self.log.record("app.install", "evil", "bad-password")        # to be hidden
+        self.authority(PW).authorize("app.run", "hello").close()      # anchored grant
+        self.log.record("app.run", "x", "denied")
+        lines = self._lines()[1:]                                      # drop the first line ...
+        prev, forged = GENESIS, []
+        for raw in lines:                                              # ... and re-link what is left
+            e = json.loads(raw)
+            e["p"] = prev
+            e["h"] = prev = _link(e["p"], e)
+            forged.append(json.dumps(e, separators=(",", ":")).encode())
+        self._write(forged)
+        self.assertTrue(self.log.verify().ok)             # a plain chain cannot tell ...
+        rep = self.log.verify(self.key)                   # ... the password can
+        self.assertFalse(rep.ok)
+        self.assertEqual(rep.bad_line, 1)
+        self.assertIn("password", rep.problem)
+
+    def test_a_grant_cannot_lose_its_anchor(self):
+        self.authority(PW).authorize("app.run", "hello").close()
+        (line,) = self._lines()
+        e = json.loads(line)
+        del e["m"]
+        self._write([json.dumps(e, separators=(",", ":")).encode()])
+        rep = self.log.verify()
+        self.assertFalse(rep.ok)
+        self.assertIn("anchor", rep.problem)
+
+    def test_lines_from_before_the_chain_existed_are_tolerated(self):
+        old = [json.dumps({"t": 1.0, "action": "app.run", "target": "a", "outcome": "granted"}).encode(),
+               json.dumps({"t": 2.0, "action": "app.run", "target": "b", "outcome": "denied"}).encode()]
+        self._write(old)
+        self.log.record("app.run", "c", "denied")
+        rep = self.log.verify(self.key)
+        self.assertTrue(rep.ok)
+        self.assertEqual((rep.legacy, rep.chained), (2, 1))
+        self.assertEqual(len(self.log.entries()), 3)
+
+    def test_concurrent_writers_keep_one_unbroken_chain(self):
+        def writer(k):
+            for i in range(30):
+                self.log.record("app.run", f"w{k}-{i}", "denied")
+        threads = [threading.Thread(target=writer, args=(k,)) for k in range(6)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        rep = self.log.verify()
+        self.assertEqual(rep.entries, 180)
+        self.assertTrue(rep.ok, rep.problem)
+
+    def test_trim_keeps_the_chain_valid_and_never_loses_a_concurrent_record(self):
+        errors, recorded = [], []
+        def writer(k):
+            try:
+                for i in range(40):
+                    self.log.record("app.run", f"w{k}-{i}", "denied")
+                    recorded.append(1)
+            except Exception as e:                       # pragma: no cover
+                errors.append(e)
+        threads = [threading.Thread(target=writer, args=(k,)) for k in range(3)]
+        for t in threads: t.start()
+        dropped = 0
+        while any(t.is_alive() for t in threads):
+            dropped += self.log.trim(25)
+        for t in threads: t.join()
+        dropped += self.log.trim(25)
+        self.assertEqual(errors, [])
+        rep = self.log.verify()
+        self.assertTrue(rep.ok, rep.problem)
+        self.assertEqual(rep.entries, 25)
+        self.assertTrue(rep.trimmed)
+        # every record is either still there or was counted as trimmed: none vanished
+        self.assertEqual(rep.entries + dropped, len(recorded))
+        self.log.record("app.run", "after", "denied")      # and the log still accepts records
+        self.assertTrue(self.log.verify().ok)
+
+    def test_tail_matches_a_full_read_including_across_chunks(self):
+        import kos.auth as kauth
+        self._fill(60)
+        with mock.patch.object(kauth, "_TAIL_CHUNK", 100):
+            for n in (1, 5, 59, 60, 500):
+                self.assertEqual(self.log.tail(n), self.log.entries()[-n:], n)
+        self.assertEqual(self.log.tail(0), [])
+        import kos.auth
+        self.assertEqual(kos.auth.AuditLog(Paths(Path(self.tmp.name) / "none")).tail(5), [])
+
+    def test_a_damaged_log_never_blocks_recording_but_is_reported(self):
+        self._fill(3)
+        with open(self.log.file, "ab") as f:
+            f.write(b'{"t": 1, "action": "app.r')      # a torn last line
+        self.log.record("app.run", "after", "denied")  # must not raise
+        rep = self.log.verify()
+        self.assertFalse(rep.ok)
+        self.assertEqual(rep.bad_line, 4)
+
+    def test_kos_audit_verify_checks_the_anchors_with_the_password(self):
+        import contextlib
+        import types
+        self.authority(PW).authorize("app.run", "hello").close()
+        self.log.record("app.run", "x", "denied")
+        def run():
+            out = io.StringIO()
+            with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(PW), None)), \
+                    contextlib.redirect_stdout(out):
+                code = kcli.cmd_audit(types.SimpleNamespace(n=5, verify=True), self.paths)
+            return code, out.getvalue()
+        code, text = run()
+        self.assertEqual(code, 0, text)
+        self.assertIn("intact", text)
+        lines = self._lines()
+        lines[0] = lines[0].replace(b'"app.run"', b'"app.xxx"', 1)
+        self._write(lines)
+        code, text = run()
+        self.assertEqual(code, 3)
+        self.assertIn("TAMPERED at line 1", text)
+
+
 class TestHostileInput(Env):
     """Names and leftovers from disks, zips and crashes are not trusted."""
 
@@ -330,7 +496,7 @@ class TestHostileInput(Env):
         AuditLog(self.paths).record("file.view", f"{d}/evil.zip/{self.ESC_NAME}", "granted")
         for label, call in (
                 ("kos ls", lambda: kcli.cmd_ls(types.SimpleNamespace(path=str(d / "evil.zip")), self.paths)),
-                ("kos audit", lambda: kcli.cmd_audit(types.SimpleNamespace(n=10), self.paths)),
+                ("kos audit", lambda: kcli.cmd_audit(types.SimpleNamespace(n=10, verify=False), self.paths)),
                 ("kos activity", lambda: print(render_feed(build_feed(self.paths))))):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):

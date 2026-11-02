@@ -701,10 +701,31 @@ def cmd_audit(args, paths: Paths) -> int:
     import time
     from .auth import AuditLog
     from .protocol import escape_text
-    for e in AuditLog(paths).entries()[-args.n:]:
+    log = AuditLog(paths)
+    if args.verify:
+        return _audit_verify(log, paths)
+    for e in log.tail(args.n):
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
         # targets can hold names that came from disks and zips: print them escaped
         print(f"{t}  {escape_text(e['outcome']):13} {escape_text(e['action']):15} {escape_text(e['target'])}")
+    return 0
+
+
+def _audit_verify(log, paths: Paths) -> int:
+    """`kos audit --verify`: check the hash chain, and with the password every anchor."""
+    from .auth import AUDIT_KEY_LABEL
+    authority, _ = _authority(paths)
+    with authority.authorize("audit.verify") as grant:
+        rep = log.verify(grant.key(AUDIT_KEY_LABEL))
+    print(f"{rep.entries} line(s): {rep.chained} chained, {rep.anchored} anchored to your password, "
+          f"{rep.legacy} older unprotected")
+    if rep.trimmed:
+        print("note: older lines were trimmed by 'kos optimize'; the chain is checked from the first one left")
+    if not rep.ok:
+        print(f"TAMPERED at line {rep.bad_line}: {rep.problem}")
+        return 3
+    print("intact: no line was edited, deleted or reordered, and every anchor matches your password")
+    print("(a log cut short at the very end cannot be detected - nothing else remembers its length)")
     return 0
 
 
@@ -906,6 +927,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="report kernel security features")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
+    s.add_argument("--verify", action="store_true",
+                   help="check the log for tampering (needs your password to check the anchors)")
     s = sub.add_parser("admin", help="the elevated administrator keyboard")
     s.add_argument("admin_cmd", nargs="?", choices=["status", "boot", "lock"])
     sub.add_parser("owed", help="what earlier writes still owe (a scan, an optimize)")

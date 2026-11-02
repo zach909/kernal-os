@@ -19,7 +19,7 @@ from pathlib import Path
 
 from typing import Optional
 
-from .auth import Authority, Grant
+from .auth import AuditLog, Authority, Grant
 from .kapp import KApp, compute_seal
 from .paths import Paths, atomic_write
 from .registry import Registry
@@ -111,15 +111,14 @@ def optimize(paths: Paths, authority: Authority, grant: Optional[Grant] = None) 
     # 3. Prune registry entries for brokers that are already gone.
     report.dead_instances_pruned = Registry(paths).prune()
 
-    # 4. Trim the audit log to the most recent N lines.
-    audit_file = paths.logs / "audit.log"
-    if audit_file.exists():
-        lines = audit_file.read_text().splitlines()
-        if len(lines) > AUDIT_RETENTION_LINES:
-            keep = lines[-AUDIT_RETENTION_LINES:]
-            before = audit_file.stat().st_size
-            atomic_write(audit_file, ("\n".join(keep) + "\n").encode())
-            report.audit_lines_trimmed = len(lines) - len(keep)
-            report.bytes_reclaimed += max(0, before - audit_file.stat().st_size)
+    # 4. Trim the audit log to the most recent N lines. Done under the log's own lock,
+    #    so a line recorded meanwhile is not lost, and the hash chain stays valid.
+    audit = AuditLog(paths)
+    if audit.file.exists():
+        before = audit.file.stat().st_size
+        dropped = audit.trim(AUDIT_RETENTION_LINES)
+        if dropped:
+            report.audit_lines_trimmed = dropped
+            report.bytes_reclaimed += max(0, before - audit.file.stat().st_size)
 
     return report
