@@ -243,6 +243,96 @@ class TestSandboxedRun(Env):
         self.assertIn("vhost-vsock-device,guest-cid=5", argv)
 
 
+def _bpf_run(prog, arch: int, nr: int) -> int:
+    """A tiny classic-BPF interpreter: just the opcodes seccomp_program emits."""
+    data, acc, pc = {0: nr, 4: arch}, 0, 0
+    while True:
+        code, jt, jf, k = prog[pc]
+        if code == 0x20:                       # ld [k]
+            acc = data[k]
+        elif code == 0x15:                     # jeq k
+            pc += jt if acc == k else jf
+        elif code == 0x35:                     # jge k
+            pc += jt if acc >= k else jf
+        elif code == 0x06:                     # ret k
+            return k
+        else:
+            raise AssertionError(f"unexpected opcode {code:#x}")
+        pc += 1
+
+
+class TestSeccomp(unittest.TestCase):
+    ALLOW, KILL = 0x7FFF0000, 0x80000000
+    EPERM = 0x00050000 | 1
+
+    def test_program_allows_normal_calls_and_denies_the_list(self):
+        from kos.sandbox import AUDIT_ARCH_X86_64 as ARCH, SECCOMP_DENY_X86_64, X32_SYSCALL_BIT, seccomp_program
+        prog = seccomp_program()
+        for nr in (0, 1, 2, 3, 9, 12, 56, 57, 59, 202, 231, 257, 435):   # read write open close mmap brk
+            self.assertEqual(_bpf_run(prog, ARCH, nr), self.ALLOW, nr)    # clone fork execve futex exit_group openat clone3
+        for name, nr in SECCOMP_DENY_X86_64.items():
+            self.assertEqual(_bpf_run(prog, ARCH, nr), self.EPERM, name)
+        self.assertEqual(_bpf_run(prog, ARCH, X32_SYSCALL_BIT | 321), self.EPERM)   # x32 cannot dodge the list
+        self.assertEqual(_bpf_run(prog, 0x40000003, 0), self.KILL)                  # i386 compat: not ours
+        self.assertLess(len(prog), 64)
+
+    def test_numbers_match_the_kernel_header_when_it_is_installed(self):
+        import re
+        from kos.sandbox import SECCOMP_DENY_X86_64
+        header = Path("/usr/include/x86_64-linux-gnu/asm/unistd_64.h")
+        if not header.exists():
+            self.skipTest("kernel headers not installed")
+        table = dict(re.findall(r"#define __NR_(\w+)\s+(\d+)", header.read_text()))
+        for name, nr in SECCOMP_DENY_X86_64.items():
+            self.assertEqual(int(table[name]), nr, name)
+
+    @unittest.skipUnless(os.uname().machine == "x86_64", "the filter is x86_64 only")
+    def test_real_sandbox_denies_them_and_still_runs_normal_programs(self):
+        import subprocess
+        code = r'''
+import ctypes, errno, os, sys, threading, sqlite3, socket, zlib, json
+libc = ctypes.CDLL(None, use_errno=True)
+bad = []
+for name, nr in __DENY__.items():
+    ctypes.set_errno(0)
+    r = libc.syscall(nr, 0, 0, 0, 0, 0, 0)
+    if not (r == -1 and ctypes.get_errno() == errno.EPERM):
+        bad.append((name, r, ctypes.get_errno()))
+# ordinary work must be untouched: threads, fork, sockets, sqlite, zlib
+t = threading.Thread(target=lambda: None); t.start(); t.join()
+pid = os.fork()
+if pid == 0: os._exit(7)
+assert os.waitpid(pid, 0)[1] >> 8 == 7
+a, b = socket.socketpair(); a.sendall(b"hi"); assert b.recv(2) == b"hi"
+db = sqlite3.connect(":memory:"); db.execute("create table t(x)"); db.execute("insert into t values (1)")
+assert zlib.decompress(zlib.compress(b"x" * 1000)) == b"x" * 1000
+print("denied-wrongly:", bad, "| seccomp mode:", [l.split()[1] for l in open("/proc/self/status") if l.startswith("Seccomp:")][0])
+'''.replace("__DENY__", repr(__import__("kos.sandbox", fromlist=["x"]).SECCOMP_DENY_X86_64))
+        r = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], preexec_fn=SandboxPolicy().preexec(),
+                           capture_output=True, text=True, cwd="/")
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn("denied-wrongly: [] | seccomp mode: 2", r.stdout)
+
+    def test_memory_and_file_size_are_capped(self):
+        import subprocess
+        p = SandboxPolicy()
+        self.assertEqual(p.max_memory, 1 << 30)
+        code = r'''
+import os
+try:
+    bytearray(1200 << 20); print("memory: NOT CAPPED")
+except MemoryError:
+    print("memory: capped")
+import resource
+print("fsize:", resource.getrlimit(resource.RLIMIT_FSIZE)[0])
+'''
+        r = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], preexec_fn=p.preexec(),
+                           capture_output=True, text=True, cwd="/")
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn("memory: capped", r.stdout)
+        self.assertIn(f"fsize: {64 << 20}", r.stdout)
+
+
 class TestSealedMemfd(unittest.TestCase):
     """The memfd holding the verified app is what actually runs, so the kernel
     must refuse to change it (no swap between "checked" and "run"). This used to

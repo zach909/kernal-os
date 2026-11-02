@@ -688,6 +688,8 @@ def cmd_doctor(args, paths: Paths) -> int:
     r = report()
     ok = lambda b: "yes" if b else "NO"
     print(f"Landlock ABI          : {r['landlock_abi'] or 'NOT AVAILABLE (apps will refuse to run)'}")
+    print(f"seccomp filter (apps) : {ok(r['seccomp_filter'])}" if r["seccomp_filter"]
+          else "seccomp filter (apps) : not built for this CPU architecture (Landlock + namespaces still apply)")
     print(f"user namespaces       : {ok(r['user_namespaces'])}")
     print(f"KVM (kernel cells)    : {ok(r['kvm'])}")
     print(f"vhost-vsock (cells)   : {ok(r['vhost_vsock'])}")
