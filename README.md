@@ -32,10 +32,10 @@ power on
 
 | Idea | How it's built |
 |---|---|
-| Password on everything | `kos/auth.py`: scrypt-derived master key; every action (`app.run`, `device.mouse`, `file.view`, ...) needs the password typed for *that* action. All decisions go to an audit log (`kos audit`). |
+| Password on everything | `kos/auth.py`: scrypt-derived master key; every action (`app.run`, `device.mouse`, `file.view`, ...) needs the password typed for *that* action. All decisions go to a tamper-evident audit log: hash-chained, with every grant anchored to your password (`kos audit`, `kos audit --verify`). |
 | Apps are zip files that are never unzipped | `kos/kapp.py`, `kos/loader.py`: the zip is stored as-is, sealed with a password-derived key. At run time it's copied into a sealed in-RAM file (memfd) and run from there. A modified zip refuses to run. |
 | Mouse/keyboard are "booted" | `kos/devices.py`, `kos/session.py`: apps never touch devices. The OS reads them and sends **commands** (`key`, `pointer`, `button`) to the app; the app answers with commands (`screen`, `frame`) that the OS checks and draws. Password prompts are an OS overlay the app can't see or cover. Ctrl-C always quits. |
-| Everything goes through the security system | Apps run as `nobody` under Landlock + namespaces (`kos/sandbox.py`): no reading your files, no writing, no network unless you allow it with your password. If the kernel can't enforce this, apps don't start. |
+| Everything goes through the security system | Apps run as `nobody` under Landlock + namespaces + a seccomp denylist (`kos/sandbox.py`): no reading your files, no writing, no network unless you allow it with your password, no `bpf`/`io_uring`/`perf`/keyring syscalls, 1 GiB of memory and 64 MiB per file at most. If the kernel can't enforce Landlock, apps don't start. The seccomp filter is x86_64 only (`kos doctor` says so). |
 | Multi-kernel in parallel | `kos/cells.py`: a *cell* is a separate Linux kernel (KVM micro-VM) pinned to its own CPU cores. `run hello --cell c1` runs the app inside it over the same command protocol. |
 | Virus scanning | `kos/scan.py`: a static/heuristic scanner (EICAR + hand-written rules for reverse shells, obfuscated `eval`, credential-file reads, fork bombs, curl-pipe-shell, ...) that recurses into zips without extracting them. Every `install` and `update` is scanned *before* the password prompt; a flagged file is quarantined, never installed. `kos scan watch DIR` scans every file written under a directory - started with your password, like a cell, so it's bounded and visible, not a silent background daemon. |
 | Apps need permission to run | `kos/permit.py`: a persistent grant, separate from the password - `kos permit NAME` decides an app is allowed to run *at all*, once. It never replaces the password: `run`/`open` still ask for it on every single launch regardless. |
@@ -44,6 +44,7 @@ power on
 | The OS is made of apps | `kos/desktop.py`, `kos/system.py`, `examples/system/`: the **taskbar** and the **App Library** are ordinary sandboxed apps. They never touch the screen or other apps - they *ask* the OS with a `request` command (needs the `system` permission in the manifest + a permit; opening/closing needs your password in the OS's own prompt). The **right mouse button is the App Library**, handled by the OS from any app. |
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
 | AI OS: KOS is the engine | `kos/aios.py`: four layers only - the graphical button clicker (`gui`), terminal app commands (`app`), kernel commands (`kernel`, NeuroClaw's Linux permission tools) and the auto skill maker (`skill`). KOS carries a request to the NeuroClaw engine on this computer and asks for no password; the engine's own tool gate and approvals decide what happens. Nothing else of NeuroClaw is reachable, nothing autostarts, and the engine address must be loopback. |
+| Security check | `kos security` (`kos/secure.py`): one read-only check, no password, nothing changed, nothing running in the background. Kernel protections, private folders and secrets, audit-chain integrity, every installed app rescanned and compared with what was installed, permissions nothing uses any more or that were never pinned, owed work, crash leftovers. Exit code 3 if anything failed. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
 ## Productivity suite
@@ -89,7 +90,7 @@ it is refused until you permit again. AI apps additionally declare `network` (pa
 answers.
 
 What is real vs. what is not: SQL is real SQLite; spreadsheets have a real formula parser (no `eval`); mail has
-a real delivery pipeline; TOTP matches RFC 6238; the audit log is hash-chained; search is BM25. What is not:
+a real delivery pipeline; TOTP matches RFC 6238; the suite's Audit Log Manager and the OS audit log (`kos audit --verify`) are both hash-chained; search is BM25. What is not:
 anything needing audio/video/camera/screen/other machines (conferencing, voice, capture, scanning, speech) and
 anything that needs two *people* or two *machines* to share live data - every app is single-user and local, and apps share only through the owned folders above.
 
@@ -129,7 +130,8 @@ kos cell start NAME --kernel K --initrd I --cpus 2,3
 kos aios status             the four AI OS layers and whether NeuroClaw answers
 kos aios gui|app|kernel|skill WORDS...   one request on one layer (no password)
 kos doctor                  which kernel protections this machine has
-kos audit                   every password decision
+kos audit [--verify]         every password decision; --verify checks the log for tampering
+kos security                 check everything KOS can verify about itself (no password, read-only)
 ```
 
 Three ways to run an app: `run NAME` (a text page), `run graphical NAME`
@@ -278,9 +280,14 @@ python3 -m unittest discover -s tests -v
   the OS prompt through a real broker); and the real CLI end to end through a
   pseudo-terminal (`desktop install`, `admin boot`, `write`, EICAR blocked,
   `boot desktop` with switching, right-click, launching from the library).
+* **Also tested here (hardening round):** a seccomp filter checked three ways (BPF program interpreted, syscall
+  numbers compared with the kernel header, every denied call tried from inside the real sandbox); the audit chain
+  including a forger who re-links it and concurrent appends/trims (nothing recorded is lost); hostile file and
+  zip-entry names (no escape sequences reach the terminal); the broker sleeping with zero wakeups; `kos security`
+  against eight deliberately broken installs.
 * **Written but not yet booted:** exclusive evdev capture for the admin
   keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the
-  image builder, framebuffer/evdev on real hardware, starting KVM cells (no
+  image builder (including its new bytecode precompile step, which only had its syntax and its `compileall` command checked), framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).
 * The userland is Python (stdlib only) to move fast. Python can't fully wipe
   secrets from memory; the security core should be ported to Rust.

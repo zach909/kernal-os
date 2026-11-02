@@ -85,9 +85,6 @@ class VFS:
                 return e
         return None
 
-    def in_archive(self) -> bool:
-        return self._stack[-1].kind == "zip"
-
     def _here(self) -> Location:
         return self._stack[-1]
 

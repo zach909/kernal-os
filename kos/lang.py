@@ -244,6 +244,17 @@ _LEXICON: dict[str, dict[str, str]] = {
         "zh": "活动 活動",
         "ja": "アクティビティ",
     },
+    "security": {
+        "en": "security safety",
+        "es": "seguridad",
+        "fr": "sécurité securite",
+        "de": "sicherheit",
+        "pt": "segurança seguranca",
+        "it": "sicurezza",
+        "ru": "безопасность",
+        "zh": "安全",
+        "ja": "セキュリティ 安全",
+    },
     "doctor": {
         "en": "doctor diagnose health",
         "es": "diagnostica diagnóstico",

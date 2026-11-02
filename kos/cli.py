@@ -713,6 +713,14 @@ def cmd_audit(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_security(args, paths: Paths) -> int:
+    """`kos security`: every check KOS can run on itself without your password."""
+    from .secure import FAIL, render, run_checks
+    checks = run_checks(paths)
+    print(render(checks))
+    return 3 if any(c.level == FAIL for c in checks) else 0
+
+
 def _audit_verify(log, paths: Paths) -> int:
     """`kos audit --verify`: check the hash chain, and with the password every anchor."""
     from .auth import AUDIT_KEY_LABEL
@@ -927,6 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    sub.add_parser("security", help="check everything KOS can verify about itself (no password, read-only)")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
     s.add_argument("--verify", action="store_true",
@@ -959,7 +968,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
+            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit, "security": cmd_security,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop, "aios": cmd_aios}
 

