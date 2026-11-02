@@ -31,6 +31,15 @@ from .registry import Instance, Registry
 from .sandbox import SandboxPolicy
 
 MAX_APP_READ = 1 << 16
+FALLBACK_POLL = 1.0   # only used on kernels without pidfd_open (< 5.3)
+
+
+def _pidfd(pid: int) -> Optional[int]:
+    """A descriptor that becomes readable the moment ``pid`` exits, or None."""
+    try:
+        return os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        return None
 
 
 def daemonize(log_path: Path) -> None:
@@ -66,9 +75,30 @@ class Broker:
         self.listener.listen(1)
         self.attached: Optional[socket.socket] = None
         self._stop = False
+        # Everything the broker waits for is a file descriptor, so an idle broker
+        # sleeps in select() with no timeout and wakes zero times per second:
+        # the app exiting (pidfd) and SIGTERM (a pipe the signal handler writes to).
+        self._pidfd = _pidfd(app_proc.pid)
+        self._wake_r, self._wake_w = os.pipe()
+        os.set_blocking(self._wake_r, False)
+        os.set_blocking(self._wake_w, False)
 
     def _handle_sigterm(self, signum, frame) -> None:
         self._stop = True
+
+    def _drain_wake(self) -> None:
+        try:
+            while os.read(self._wake_r, 64):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+
+    def _wait_exit(self, seconds: float) -> None:
+        """Give the app up to ``seconds`` to leave on its own; return as soon as it has."""
+        if self._pidfd is not None:
+            select.select([self._pidfd], [], [], seconds)
+        else:
+            time.sleep(seconds)
 
     def _pump_app(self) -> bool:
         """Read whatever the app sent. Returns False if the app is gone."""
@@ -112,19 +142,33 @@ class Broker:
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, signal.SIG_IGN)  # only `kos close` stops a broker
+        # A handler alone only sets a flag - select() is restarted after it - so also
+        # have the signal poke the pipe: select() returns at once, with no race
+        # between "check the flag" and "go to sleep".
+        signal.set_wakeup_fd(self._wake_w, warn_on_full_buffer=False)
         self.inst.app_pid = self.app_proc.pid
         self.inst.status = "running"
         self.registry.write(self.inst)
         app_alive = True
+        timeout = None if self._pidfd is not None else FALLBACK_POLL
         try:
             while not self._stop:
                 if self.app_proc.poll() is not None:
                     break
-                fds = [self.listener, self.app_channel] + ([self.attached] if self.attached else [])
+                fds = [self.listener, self.app_channel, self._wake_r]
+                if self._pidfd is not None:
+                    fds.append(self._pidfd)
+                if self.attached:
+                    fds.append(self.attached)
                 try:
-                    r, _, _ = select.select(fds, [], [], 1.0)
+                    r, _, _ = select.select(fds, [], [], timeout)
                 except InterruptedError:
                     continue
+                if self._wake_r in r:
+                    self._drain_wake()
+                    continue            # the loop condition looks at _stop
+                if self._pidfd is not None and self._pidfd in r:
+                    break               # the app exited
                 if self.listener in r:
                     self._accept()
                 if self.app_channel in r:
@@ -142,7 +186,7 @@ class Broker:
                 self.app_channel.sendall(b'{"cmd":"quit"}\n')
             except OSError:
                 pass
-            time.sleep(0.3)
+            self._wait_exit(0.3)
         if self.app_proc.poll() is None:
             try:
                 os.killpg(self.app_proc.pid, signal.SIGTERM)
@@ -158,6 +202,16 @@ class Broker:
             if s is not None:
                 try:
                     s.close()
+                except OSError:
+                    pass
+        try:
+            signal.set_wakeup_fd(-1)
+        except (ValueError, OSError):
+            pass
+        for fd in (self._pidfd, self._wake_r, self._wake_w):
+            if fd is not None:
+                try:
+                    os.close(fd)
                 except OSError:
                     pass
         try:

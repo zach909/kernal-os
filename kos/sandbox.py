@@ -8,10 +8,12 @@ Layers, applied in the child between fork and exec:
 3. New user + network + IPC + UTS namespaces. The network namespace is empty,
    so the app has no network at all unless it declared the ``network``
    permission *and* the owner typed the password to allow it.
-4. Resource limits (no core dumps, bounded fds/memory).
+4. Resource limits (no core dumps, bounded fds, memory and file size).
 5. Landlock: the app may read the language runtime and nothing else. It cannot
    read your files, cannot write anywhere, cannot signal processes outside its
    sandbox, and cannot reach abstract unix sockets outside it.
+6. seccomp (x86_64): a short denylist of syscalls that reach kernel code an app
+   has no use for (bpf, perf, io_uring, the keyring, ptrace-style peeking).
 
 The app's only way to affect the world is the command channel to the session.
 """
@@ -58,6 +60,33 @@ SCOPE_SIGNAL = 1 << 1         # ABI 6
 _FILE_ONLY_RIGHTS = FS_EXECUTE | FS_WRITE_FILE | FS_READ_FILE | FS_TRUNCATE | FS_IOCTL_DEV
 MIN_LANDLOCK_ABI = 1
 
+# --- seccomp -----------------------------------------------------------------
+# A short denylist, not an allowlist: it turns syscalls an app has no business
+# making into a plain EPERM, so the app sees an ordinary error and keeps running.
+# Only syscalls whose first gate is NOT already a capability check are listed
+# (the app has no capabilities, so mount/reboot/kexec/... already fail by themselves).
+# What is left are things that put kernel code in reach of an unprivileged caller
+# (bpf, perf, io_uring, the keyring, userfaultfd) and cross-process peeking
+# (ptrace, process_vm_*, kcmp; already refused today because every app has its own
+# user namespace - this keeps it true if that ever changes), plus unshare/setns,
+# which would otherwise only be refused because the app's uid is unmapped.
+# Numbers: x86_64, from asm/unistd_64.h. Other architectures get no filter (their
+# numbers differ and could not be tested here); `kos doctor` says so.
+PR_SET_SECCOMP = 22
+SECCOMP_MODE_FILTER = 2
+SECCOMP_RET_ALLOW = 0x7FFF0000
+SECCOMP_RET_ERRNO = 0x00050000
+SECCOMP_RET_KILL_PROCESS = 0x80000000
+AUDIT_ARCH_X86_64 = 0xC000003E
+X32_SYSCALL_BIT = 0x40000000
+SECCOMP_DENY_X86_64 = {
+    "ptrace": 101, "process_vm_readv": 310, "process_vm_writev": 311, "kcmp": 312,
+    "bpf": 321, "perf_event_open": 298, "userfaultfd": 323,
+    "keyctl": 250, "add_key": 248, "request_key": 249,
+    "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+    "unshare": 272, "setns": 308,
+}
+
 
 class SandboxError(RuntimeError):
     pass
@@ -72,6 +101,47 @@ class _RulesetAttr(ctypes.Structure):
 class _PathBeneathAttr(ctypes.Structure):
     _pack_ = 1
     _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8),
+                ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(_SockFilter))]
+
+
+def seccomp_supported() -> bool:
+    """Whether KOS has a seccomp filter for this machine's architecture."""
+    return os.uname().machine == "x86_64"
+
+
+def seccomp_program(deny: dict[str, int] = SECCOMP_DENY_X86_64) -> list[tuple[int, int, int, int]]:
+    """The classic-BPF program as ``(code, jt, jf, k)`` rows:
+
+        wrong architecture (i386 compat, ...)   -> kill the process
+        x32 syscall numbers (nr >= 0x40000000)  -> EPERM   (else they dodge the list)
+        nr in the denylist                      -> EPERM
+        anything else                           -> allow
+    """
+    LD_W_ABS, JEQ_K, JGE_K, RET_K = 0x20, 0x15, 0x35, 0x06
+    nrs = sorted(set(deny.values()))
+    n = len(nrs)
+    allow_at, deny_at = 5 + n, 5 + n + 1
+    prog = [
+        (LD_W_ABS, 0, 0, 4),                                   # 0: arch
+        (JEQ_K, 1, 0, AUDIT_ARCH_X86_64),                      # 1: ours? skip the kill
+        (RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),               # 2
+        (LD_W_ABS, 0, 0, 0),                                   # 3: syscall number
+        (JGE_K, deny_at - 5, 0, X32_SYSCALL_BIT),              # 4: x32 range
+    ]
+    for i, nr in enumerate(nrs):                               # 5 .. 5+n-1
+        prog.append((JEQ_K, deny_at - (5 + i + 1), 0, nr))
+    prog.append((RET_K, 0, 0, SECCOMP_RET_ALLOW))              # allow_at
+    prog.append((RET_K, 0, 0, SECCOMP_RET_ERRNO | 1))          # deny_at: EPERM
+    assert len(prog) == deny_at + 1 and all(0 <= r[1] <= 255 for r in prog)
+    return prog
 
 
 def _syscall(nr: int, *args) -> int:
@@ -122,7 +192,12 @@ class SandboxPolicy:
     rw_dirs: list[str] = field(default_factory=list)
     ro_files: list[str] = field(default_factory=lambda: ["/dev/urandom"])
     max_open_files: int = 256
-    max_memory: int = 4 << 30
+    # Address-space cap. A deliberately heavy app (every suite module, SQLite, threads,
+    # a 50 MiB buffer) peaks near 200 MB, so 1 GiB is ~5x headroom; it was 4 GiB.
+    max_memory: int = 1 << 30
+    # Largest single file an app may write (its cache directory is the only place it can).
+    max_file_size: int = 64 << 20
+    seccomp: bool = True
     # Development escape hatch; never set on a real install.
     weak: bool = False
 
@@ -159,8 +234,11 @@ class SandboxPolicy:
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             resource.setrlimit(resource.RLIMIT_NOFILE, (policy.max_open_files,) * 2)
             resource.setrlimit(resource.RLIMIT_AS, (policy.max_memory,) * 2)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (policy.max_file_size,) * 2)
             if abi:
                 policy._landlock(abi)
+            if policy.seccomp and seccomp_supported():
+                policy._seccomp()       # last: it forbids syscalls the steps above needed
 
         return apply
 
@@ -199,6 +277,14 @@ class SandboxPolicy:
         finally:
             os.close(ruleset)
 
+    def _seccomp(self) -> None:
+        rows = seccomp_program()
+        filters = (_SockFilter * len(rows))(*(_SockFilter(*r) for r in rows))
+        prog = _SockFprog(len(rows), ctypes.cast(filters, ctypes.POINTER(_SockFilter)))
+        if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0 \
+                and not self.weak:
+            raise SandboxError(f"seccomp filter failed: {os.strerror(ctypes.get_errno())}")
+
     @staticmethod
     def _add_rule(ruleset: int, path: str, rights: int) -> None:
         try:
@@ -220,6 +306,7 @@ def report() -> dict:
     """Which protections this kernel supports (for ``kos doctor``)."""
     return {
         "landlock_abi": landlock_abi(),
+        "seccomp_filter": seccomp_supported(),
         "user_namespaces": Path("/proc/self/ns/user").exists(),
         "kvm": os.path.exists("/dev/kvm"),
         "vhost_vsock": os.path.exists("/dev/vhost-vsock"),
