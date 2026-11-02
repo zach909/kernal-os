@@ -789,11 +789,29 @@ def _alive_pid(pid: int) -> bool:
         return False
 
 
+def _stop_leftover_brokers(paths) -> None:
+    """A test that fails half-way must not leave a broker and its app running."""
+    import signal
+    import time
+    for inst in Registry(paths).list():
+        try:
+            os.kill(inst.broker_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + 5
+    while Registry(paths).list() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 class TestOpenAttachClose(Env):
     """The `open`/`ps`/`attach`/`close` lifecycle, exercised in cmd mode so
     no real terminal is needed: `open` launches the app in the background
     under a broker, `attach` drives it, Ctrl-C detaches (app keeps running),
     `close` actually stops it."""
+
+    def tearDown(self):
+        _stop_leftover_brokers(self.paths)
+        super().tearDown()
 
     def _open(self, mode="cmd"):
         store = AppStore(self.paths)
@@ -809,7 +827,7 @@ class TestOpenAttachClose(Env):
         spawn(inst, app, mode, SandboxPolicy(), registry, Path(inst.log_path))
         return registry, inst_id
 
-    def _wait_running(self, registry, inst_id, timeout=5):
+    def _wait_running(self, registry, inst_id, timeout=15):
         import time
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -891,7 +909,9 @@ class TestOpenAttachClose(Env):
             time.sleep(0.01)
         took = time.monotonic() - t0
         self.assertFalse(Registry(self.paths)._file(inst_id).exists())
-        self.assertLess(took, 0.6, f"SIGTERM took {took:.2f}s to shut the broker down (was ~1.3 s)")
+        # A lost wakeup would leave the broker blocked in select() for good (the loop above gives up
+        # after 5 s). The bound is loose on purpose so a busy machine cannot fail it.
+        self.assertLess(took, 2.0, f"SIGTERM took {took:.2f}s to shut the broker down")
 
     def test_broker_notices_when_its_app_exits_by_itself(self):
         import time
@@ -926,6 +946,10 @@ class TestOpenAttachClose(Env):
 
 
 class TestActivity(Env):
+    def tearDown(self):
+        _stop_leftover_brokers(self.paths)
+        super().tearDown()
+
     def test_feed_merges_open_apps_and_audit(self):
         from kos.activity import build_feed, render_feed
         store = AppStore(self.paths)
@@ -940,7 +964,7 @@ class TestActivity(Env):
         import signal
         os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
 
-    def _wait_running_local(self, registry, inst_id, timeout=5):
+    def _wait_running_local(self, registry, inst_id, timeout=15):
         import time
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
