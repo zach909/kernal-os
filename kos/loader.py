@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .address import check_launch
 from .kapp import KApp
 from .sandbox import SandboxPolicy
 
@@ -73,8 +74,10 @@ class LaunchPlan:
         self.owned_fds.clear()
 
 
-def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None) -> LaunchPlan:
+def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None,
+         address: str = "") -> LaunchPlan:
     m = app.manifest
+    check_launch(address)        # defence in depth: callers already checked it
     kapp_fd = sealed_memfd(m.name, app.data)
     owned = [kapp_fd]
     env = {
@@ -87,6 +90,8 @@ def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None
     }
     if cache_dir is not None:
         env["KOS_CACHE_DIR"] = str(cache_dir)
+    if address:
+        env["KOS_ADDRESS"] = address       # path+query of the kos:// address; data for the app
     if m.runtime == "python":
         exe = os.path.realpath(sys.executable)
         argv = [exe, "-I", "-S", "-B", "-c", _BOOTSTRAP,

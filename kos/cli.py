@@ -13,6 +13,9 @@
     run cmd NAME                    run it with no drawing: raw command stream
     run [graphical|cmd] NAME --cell C   run it inside kernel cell C
     kos open [graphical|cmd] NAME   open an app in the background, return immediately
+    kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
+    kos extend NAME                 switch an extension or mod on for the app it extends (password)
+    kos extend --revoke NAME / --list
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
@@ -55,10 +58,9 @@ from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
-from .sandbox import SandboxError, SandboxPolicy, report
+from .sandbox import SandboxError, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
-from .system import (SystemBridge, authorize_app_action, close_instance,
-                     open_background)
+from .system import SystemBridge, close_instance, open_background
 from .vfs import VFSError
 
 
@@ -167,11 +169,15 @@ def cmd_remove(args, paths: Paths) -> int:
 
 
 def cmd_list(args, paths: Paths) -> int:
+    from .system import list_apps
     apps = AppStore(paths).installed()
     if not apps:
         print("no apps installed")
+    kinds = {r["name"]: r for r in list_apps(paths)}
     for a in apps:
-        print(f"{a.name:20} {a.version:10} sha256:{a.sha256[:16]}")
+        row = kinds.get(a.name, {})
+        tag = f"  [{row['kind']} of {row['extends']}]" if row.get("kind", "app") != "app" else ""
+        print(f"{a.name:20} {a.version:10} sha256:{a.sha256[:16]}{tag}")
     return 0
 
 
@@ -183,25 +189,40 @@ def _parse_run_target(words: list[str]) -> tuple[str, str]:
     raise KAppError("usage: run [graphical|cmd] APP")
 
 
-def _authorize_app_action(name: str, app, mode: str, authority: Authority, prompter) -> SandboxPolicy:
-    """Shared by `run` and `open`: mode check + optional network grant."""
-    return authorize_app_action(name, app, mode, authority, prompter)
+def _address_and_mode(explicit: str | None, text: str):
+    """An app name or a kos:// address, and the mode: a word you typed (graphical, cmd) wins,
+    the address's ?mode= comes next, tui last. Saying two different modes is an error."""
+    from .address import AddressError, parse
+    addr = parse(text)
+    if explicit and addr.mode and explicit != addr.mode:
+        raise AddressError(f"you said {explicit} but the address says mode={addr.mode}")
+    return addr, explicit or addr.mode or "tui"
+
+
+def _lazy_authority(paths: Paths):
+    """(get, made): ``get()`` builds the authority - which opens the terminal - the first time it
+    is called. The layers only call it once they reach the kernel layer, so an app that is not
+    permitted is refused without ever touching a terminal. ``made['a']`` is (authority, prompter)."""
+    made: dict = {}
+
+    def get():
+        if "a" not in made:
+            made["a"] = _authority(paths)
+        return made["a"][0]
+    return get, made
 
 
 def cmd_run(args, paths: Paths) -> int:
-    from . import cache
-    from .permit import PermitStore
+    from . import cache, layers
     from .protocol import Channel
-    mode, name = _parse_run_target(args.target)
-    PermitStore(paths).require(name)  # refused before we even ask for the password
-    authority, prompter = _authority(paths)
-    store = AppStore(paths)
-    action = "app.graphical" if mode == "graphical" else "app.run"
-    with authority.authorize(action, name) as grant:
-        app = store.load_verified(name, grant)
-    PermitStore(paths).check_declared(name, app.manifest.permissions)
-    policy = _authorize_app_action(name, app, mode, authority, prompter) if not args.cell else \
-        SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+    explicit, target = _parse_run_target(args.target)
+    addr, mode = _address_and_mode(None if explicit == "tui" else explicit, target)
+    name = addr.app
+    # gui -> app -> kernel (layers.py). An app with no permit stops at "app": no terminal, no password.
+    get, made = _lazy_authority(paths)
+    passage = layers.traverse(paths, get, layers.Request("run", name, mode, sandbox_prompt=not args.cell))
+    app, policy = passage.app, passage.policy
+    authority, prompter = made["a"]
     paths.ensure()
     from .appdirs import AppDirs
     log_path = AppDirs(paths, name).ensure().run / f"{name}.log"
@@ -216,14 +237,15 @@ def cmd_run(args, paths: Paths) -> int:
         cache_dir = cache.alloc(paths, name)
         policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
         sock, child = socket.socketpair()
-        proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir), policy, log_path)
+        proc = loader.launch(loader.plan(app, child.fileno(), mode, cache_dir, addr.launch),
+                             policy, log_path)
         child.close()
     prompter.close()
     try:
         bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge, vault=vault)
+                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -233,15 +255,21 @@ def cmd_run(args, paths: Paths) -> int:
 
 def cmd_open(args, paths: Paths) -> int:
     """Launch an app in the background. Returns your shell immediately;
-    `kos ps` lists it, `kos attach ID` connects your terminal to it."""
-    from .permit import PermitStore
-    mode, name = args.mode or "tui", args.name
-    PermitStore(paths).require(name)  # refused before we even ask for the password
-    authority, prompter = _authority(paths)
-    inst = open_background(paths, authority, name, mode, release=prompter.close)
-    print(f"opened {name} [{mode}] as {inst.id}")
+    `kos ps` lists it, `kos attach ID` connects your terminal to it. NAME may be an address
+    (``kos://web/page``): the app is opened and told the path."""
+    addr, mode = _address_and_mode(args.mode, args.name)
+    get, made = _lazy_authority(paths)
+    inst = open_background(paths, get, addr.app, mode, address=addr.launch,
+                           release=lambda: made["a"][1].close())
+    print(f"opened {addr.app} [{mode}] as {inst.id}" + (f" at {addr.launch}" if addr.launch else ""))
     print(f"  kos attach {inst.id}   (or: kos boot desktop)")
     return 0
+
+
+def cmd_go(args, paths: Paths) -> int:
+    """`kos go kos://web/page` - the address bar. The same as `kos open`, any address."""
+    import argparse as _a
+    return cmd_open(_a.Namespace(mode=None, name=args.address), paths)
 
 def cmd_ps(args, paths: Paths) -> int:
     from .registry import Registry
@@ -271,7 +299,8 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
         pass
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
-                        vault=_vault_for(paths, inst.name, perms), **session_kwargs)
+                        vault=_vault_for(paths, inst.name, perms),
+                        extensions=_extensions_for(paths, inst.name), **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:
@@ -279,12 +308,11 @@ def cmd_attach(args, paths: Paths) -> int:
     new password is needed just to reconnect - it was already authorized
     when it was opened - but every device still has to be booted again for
     this terminal, with the password, same as any other session."""
-    from .registry import Registry
+    from . import layers
 
-    authority, prompter = _authority(paths)
-    inst = Registry(paths).get(args.id)
-    if inst.status != "running":
-        raise KAppError(f"{args.id} is not running (status: {inst.status})")
+    get, made = _lazy_authority(paths)
+    inst = layers.traverse(paths, get, layers.Request("focus", args.id)).instance
+    authority, prompter = made["a"] if "a" in made else _authority(paths)
     prompter.close()
     code = _attach_session(paths, authority, inst)
     print(f"detached from {inst.id}" if code == 0 else f"{inst.id} exited ({code})")
@@ -327,10 +355,9 @@ def cmd_boot(args, paths: Paths) -> int:
     library = _ensure_open(paths, "app-library", mode)
 
     def attach(instance_id: str, ctx: dict) -> dict:
+        from . import layers
         authority, prompter = _authority(paths)
-        inst = Registry(paths).get(instance_id)
-        if inst.status != "running":
-            raise KAppError(f"{instance_id} is not running")
+        inst = layers.traverse(paths, authority, layers.Request("focus", instance_id)).instance
         prompter.close()
         outcome: dict = {}
         _attach_session(paths, authority, inst, outcome=outcome,
@@ -492,6 +519,12 @@ def _build_surface(mode, name, term):
     return GraphicalSurface(TerminalBackend(1, cols, rows)), TerminalDevices(term, cell_to_pixels=True)
 
 
+def _extensions_for(paths: Paths, name: str) -> dict:
+    """What extensions (or mods) the owner switched on for this app: told to it after hello."""
+    from .extensions import Extensions
+    return Extensions(paths).payload(name)
+
+
 def _vault_for(paths: Paths, name: str, permissions):
     from .spaces import AppStorage
     st = AppStorage(paths, name, permissions)
@@ -511,6 +544,35 @@ def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) ->
         finally:
             devices.close()
             surface.close()
+
+
+def cmd_extend(args, paths: Paths) -> int:
+    """`kos extend NAME`: switch an extension (for an ordinary app) or a mod (for a system app) on.
+    The add-on is itself an app - it must be installed and permitted - and goes through the layers
+    like everything else; the password pins the exact build you approved."""
+    from . import layers
+    from .extensions import Extensions
+    ext = Extensions(paths)
+    if args.list:
+        rows = ext.enabled()
+        if not rows:
+            print("no extensions or mods are switched on")
+        for e in rows:
+            print(f"{e['app']:20} {e['resource']:24} pinned {e.get('pin', '-')[:12]}")
+        return 0
+    if not args.name:
+        raise KAppError("usage: kos extend NAME | kos extend --revoke NAME | kos extend --list")
+    get, made = _lazy_authority(paths)
+    if args.revoke:
+        layers.traverse(paths, get, layers.Request("unextend", args.name))
+        print(f"switched off {args.name}" if ext.disable(args.name) else f"{args.name} was not switched on")
+        return 0
+    passage = layers.traverse(paths, get, layers.Request("extend", args.name))
+    resource = ext.enable(passage.app)
+    host = resource.split(":", 1)[1]
+    what = "modifies" if passage.app.manifest.kind == "mod" else "extends"
+    print(f"{args.name} now {what} {host} ({resource}); it takes effect the next time {host} starts")
+    return 0
 
 
 def cmd_permit(args, paths: Paths) -> int:
@@ -850,6 +912,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("open", help="open an app in the background: open [graphical|cmd] NAME")
     s.add_argument("mode", nargs="?", choices=["graphical", "cmd"], default=None)
     s.add_argument("name")
+    s = sub.add_parser("go", help="open an address, like a browser's address bar: go kos://NAME[/path][?query]")
+    s.add_argument("address")
+    s = sub.add_parser("extend", help="switch an extension or a mod on (or --revoke / --list)")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--revoke", action="store_true", help="switch it off")
+    s.add_argument("--list", action="store_true", help="list what is switched on")
     sub.add_parser("ps", help="list apps opened with 'kos open'")
     s = sub.add_parser("attach", help="attach your terminal to an open app")
     s.add_argument("id")
@@ -927,7 +995,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "install": cmd_install, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
-            "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
+            "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize,

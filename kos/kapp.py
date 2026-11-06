@@ -46,7 +46,17 @@ RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
 PERMISSIONS = {"network", "system", "storage"}
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
-_MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description"}
+_MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
+                  "kind", "extends"}
+
+# Everything is an app, and an app has exactly one kind:
+#   app        an ordinary app
+#   extension  an app that adds to another ordinary app, like a browser extension
+#   mod        an app that modifies a system app (the taskbar, the App Library)
+# An extension or a mod is still a .kapp: installed, scanned, sealed, permitted and opened like any other.
+KINDS = ("app", "extension", "mod")
+SYSTEM_APP_NAMES = ("taskbar", "app-library")
+EXTENSION_FILE = "extension.json"
 
 
 class KAppError(Exception):
@@ -62,6 +72,8 @@ class Manifest:
     modes: tuple[str, ...] = ("tui",)
     permissions: tuple[str, ...] = ()
     description: str = ""
+    kind: str = "app"
+    extends: str = ""
 
     @classmethod
     def parse(cls, raw: bytes) -> "Manifest":
@@ -98,8 +110,26 @@ class Manifest:
         if d["runtime"] == "python" and not re.match(
                 r"^[A-Za-z_][\w.]*(:[A-Za-z_]\w*)?$", d["entry"]):
             raise KAppError("python entry must look like 'module' or 'module:function'")
+        kind, extends = d.get("kind", "app"), d.get("extends", "")
+        if kind not in KINDS:
+            raise KAppError(f"kind must be one of {list(KINDS)}")
+        if kind == "app":
+            if "extends" in d:
+                raise KAppError("only an extension or a mod says what it extends")
+        else:
+            if not isinstance(extends, str) or not NAME_RE.match(extends) or extends == name:
+                raise KAppError(f"a {kind} must say which other app it extends: \"extends\": \"NAME\"")
+            if kind == "extension" and extends in SYSTEM_APP_NAMES:
+                raise KAppError(f"an extension adds to an ordinary app; {extends} is a system app "
+                                f"- to change it write a mod")
+            if kind == "mod" and extends not in SYSTEM_APP_NAMES:
+                raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
+                                f"{extends} is an ordinary app - to add to it write an extension")
+            if "system" in perms:
+                # The power to open and close apps must never ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' permission")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
-                   modes=modes, permissions=perms, description=desc)
+                   modes=modes, permissions=perms, description=desc, kind=kind, extends=extends)
 
 
 def _check_member_name(n: str) -> None:
@@ -123,6 +153,7 @@ class KApp:
         self._validate()
         self.manifest = Manifest.parse(self.read(MANIFEST, limit=64 << 10))
         self._check_entry()
+        self.contributions = self._check_kind()
 
     @classmethod
     def from_file(cls, path: Path) -> "KApp":
@@ -164,6 +195,20 @@ class KApp:
                 raise KAppError(f"entry module {m.entry!r} not found in archive")
         elif m.entry not in self._names:
             raise KAppError(f"entry binary {m.entry!r} not found in archive")
+
+    def _check_kind(self) -> dict:
+        """An app is exactly what its manifest says. An extension or a mod must ship its
+        contributions as *data* (``extension.json``, validated here, never run); an ordinary
+        app must not carry one."""
+        has = EXTENSION_FILE in self._names
+        if self.manifest.kind == "app":
+            if has:
+                raise KAppError(f"{EXTENSION_FILE} belongs to an extension or a mod, not an ordinary app")
+            return {}
+        if not has:
+            raise KAppError(f"a {self.manifest.kind} must contain {EXTENSION_FILE}")
+        from .extensions import parse_contributions      # lazy: extensions builds on this module
+        return parse_contributions(self.read(EXTENSION_FILE, limit=64 << 10), self.manifest.kind)
 
     def names(self) -> list[str]:
         return sorted(self._names)

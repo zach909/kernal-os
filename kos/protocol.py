@@ -16,8 +16,13 @@ OS -> app
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
     {"cmd": "scroll", "dy": -1|1, "x": X, "y": Y}
     {"cmd": "device", "device": "mouse"|"keyboard", "state": "attached"}
-    {"cmd": "apps", "installed": [{name, version, description, modes, permitted}],
+    {"cmd": "apps", "installed": [{name, version, description, modes, permitted, kind, extends}],
                     "open": [{id, name, mode, status}]}                  (answer to request apps)
+    {"cmd": "extensions", "items": [{name, version, kind, entries: [{label, address}], colors: {..}}],
+                          "skipped": [{name, why}]}
+                       sent once after hello, only if an extension (for an ordinary app) or a mod (for a
+                       system app) was switched on for *this* app with `kos extend`. Data, never code:
+                       what to do with it is up to the app. See extensions.py.
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
@@ -32,6 +37,8 @@ app -> OS
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
     {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "open", "address": "kos://NAME[/path][?query]", "mode": ...}
+                                         the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
     {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
@@ -51,6 +58,8 @@ import json
 import re
 import socket
 from typing import Any
+
+from .address import AddressError, parse as parse_address
 
 MAX_LINE = 1 << 20
 MAX_LINES = 500
@@ -107,12 +116,22 @@ def _request(msg: dict) -> dict:
     if action == "apps":
         return {"cmd": "request", "action": "apps"}
     if action == "open":
-        app, mode = msg.get("app"), msg.get("mode", "tui")
+        mode, launch = msg.get("mode", "tui"), ""
+        if "address" in msg:
+            if "app" in msg:
+                raise ProtocolError("request.open takes an app or an address, not both")
+            try:
+                addr = parse_address(msg["address"])
+            except AddressError as e:
+                raise ProtocolError(f"request.address: {e}") from None
+            app, launch, mode = addr.app, addr.launch, addr.mode or mode
+        else:
+            app = msg.get("app")
         if not isinstance(app, str) or not _APP_NAME_RE.match(app):
             raise ProtocolError("request.app must be an app name")
         if mode not in REQUEST_MODES:
             raise ProtocolError("request.mode must be tui, graphical or cmd")
-        return {"cmd": "request", "action": "open", "app": app, "mode": mode}
+        return {"cmd": "request", "action": "open", "app": app, "mode": mode, "address": launch}
     if action in ("focus", "close"):
         ident = msg.get("id")
         if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):

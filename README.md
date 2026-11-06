@@ -44,6 +44,9 @@ power on
 | The OS is made of apps | `kos/desktop.py`, `kos/system.py`, `examples/system/`: the **taskbar** and the **App Library** are ordinary sandboxed apps. They never touch the screen or other apps - they *ask* the OS with a `request` command (needs the `system` permission in the manifest + a permit; opening/closing needs your password in the OS's own prompt). The **right mouse button is the App Library**, handled by the OS from any app. |
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
 | AI OS: KOS is the engine | `kos/aios.py`: four layers only - the graphical button clicker (`gui`), terminal app commands (`app`), kernel commands (`kernel`, NeuroClaw's Linux permission tools) and the auto skill maker (`skill`). KOS carries a request to the NeuroClaw engine on this computer and asks for no password; the engine's own tool gate and approvals decide what happens. Nothing else of NeuroClaw is reachable, nothing autostarts, and the engine address must be loopback. |
+| Open apps like websites | `kos/address.py`: `kos go kos://web/example.com/news` opens the app `web` and tells it the path, the way a browser opens a site. `run` and `open` take addresses too; an app can ask for one with a `request`. Addresses are checked strictly (no other schemes, `..`, `%`, `#`, whitespace or control characters) and the path is *data for the app*, never a file name or a command. |
+| Extensions and mods, still apps | `kos/extensions.py`: two kinds of app, both ordinary sealed, scanned, permitted `.kapp`s. An **extension** adds to an ordinary app, like a browser extension (bookmarks for `web`). A **mod** modifies a system app (pins and a new accent for the taskbar, a shelf for the App Library). They are *data*, not code injected into another app: the host's zip and seal are never touched, and the OS hands the host the validated entries after `hello`. Nothing happens until you switch one on with `kos extend NAME` (password; a mod is a separate `app.mod` action); the switch pins the exact build you approved, so an updated or tampered add-on stops contributing until you approve it again. |
+| Every app action passes gui, app, kernel | `kos/layers.py`: opening, running, closing, switching to and extending an app all go through one door, `layers.traverse`, which sends the request through the **graphical button clicker** (is there a button for it?), then **app commands** (is it permitted?), then **kernel commands** (the password, the seal, the sandbox), in that order. A layer that says no stops the rest, so an unpermitted app is refused before any password is asked. Every layer's `pass` or `refused` is in `kos audit`. A test fails if any other code asks for the password to use an app. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
 ## Productivity suite
@@ -105,6 +108,8 @@ kos open [graphical|cmd] NAME   open in the background, return immediately
 kos ps                     apps opened with 'kos open'
 kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
 kos close ID                actually stop one
+kos go kos://NAME[/path]    open an address, like a browser's address bar (open and run take them too)
+kos extend NAME             switch an extension or mod on for the app it extends (password; --revoke, --list)
 kos desktop install         pack, scan, install + permit the taskbar and App Library
 kos boot desktop            the desktop: taskbar + App Library apps (--graphical for pixels)
 kos ls PATH / kos cat PATH  browse/view real dirs and zips, never extracted
@@ -164,6 +169,43 @@ nothing an app writes outlives it. `kos optimize` reclaims disk space:
 recompressing installed apps (re-sealed at the new bytes), dropping old
 quarantine files and dead background-app records, and trimming the audit
 log.
+
+## Addresses, extensions and mods
+
+```
+kos go kos://web/example.com/news?page=2   open the browser straight at that page (asks the password)
+kos open graphical kos://hello             or kos://hello?mode=graphical
+kos> kos://web/example.com                 in the line shell, a lone address opens it, like a URL bar
+```
+
+An extension or a mod is an app whose manifest says what it extends, and which ships `extension.json`
+(data, validated at install, never run):
+
+```
+{"kind": "extension", "extends": "web", ...}          manifest.json: adds to an ordinary app
+{"kind": "mod",       "extends": "taskbar", ...}      manifest.json: modifies a system app (taskbar, app-library)
+
+extension.json:  {"entries": [{"label": "Wikipedia", "address": "kos://web/en.wikipedia.org"}],
+                  "colors":  {"accent": "#c2410c"}}   (colors: mods only)
+```
+
+```
+kos desktop install            once: the taskbar and App Library are the apps a mod modifies
+kos pack examples/mods/taskbar-pins -o taskbar-pins.kapp && kos install taskbar-pins.kapp
+kos permit taskbar-pins        it is an app, so it needs a permit like any app
+kos extend taskbar-pins        password; the taskbar now shows its pins the next time it starts (a-i opens one)
+kos extend --list              what is switched on, and the build each one is pinned to
+kos extend --revoke taskbar-pins
+```
+
+Examples: `examples/extensions/web-bookmarks` (bookmarks on the browser's start page),
+`examples/mods/taskbar-pins` (pinned apps + accent on the taskbar) and `examples/mods/library-shelf`
+(a shelf of shortcuts + accent in the App Library). Rules the OS enforces: an extension cannot target a
+system app and a mod cannot target an ordinary one; neither can ask for the `system` permission (the power
+to open and close apps never rides in on an add-on); an app's `extension.json` must match its kind.
+A pinned entry is only a *request* to open an address - the OS still runs it through gui, app and kernel
+and asks for your password. Only the host app that was extended is told about it, and only apps written
+to show entries do: the taskbar, the App Library and `web` do.
 
 ## Every line is a command
 
