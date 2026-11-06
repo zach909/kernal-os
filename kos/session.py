@@ -114,8 +114,9 @@ class Session:
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
-                 outcome: Optional[dict] = None, vault=None):
+                 outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None):
         self.name, self.mode = name, mode
+        self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
         self.channel = channel
         self.proc = proc
         self.surface = surface
@@ -329,6 +330,11 @@ class Session:
     def run(self, first_frame_timeout: float = 1.5) -> int:
         w, h = self.surface.hello_size()
         self._send({"cmd": "hello", "mode": self.mode, "width": w, "height": h})
+        if self.extensions and (self.extensions.get("items") or self.extensions.get("skipped")):
+            # Data the owner switched on for this app. Only ever sent to the host it names;
+            # an app with nothing switched on is told nothing.
+            self._send({"cmd": "extensions", "items": self.extensions.get("items", []),
+                        "skipped": self.extensions.get("skipped", [])})
         self._preboot_devices()
         started = time.monotonic()
         try:

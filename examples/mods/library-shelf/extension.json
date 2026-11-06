@@ -1,0 +1,11 @@
+{
+  "entries": [
+    {
+      "label": "News",
+      "address": "kos://web/news.ycombinator.com"
+    }
+  ],
+  "colors": {
+    "accent": "#0f766e"
+  }
+}

@@ -82,6 +82,24 @@ land instead of getting lost in chat.
   support. First real target: boot the produced image in QEMU with OVMF
   and confirm the two password gates and `run hello` actually work.
 
+## Backlog - from the addresses / extensions / layers round
+
+- **Route the rest through the layers.** `layers.traverse` covers using an app (open, run, close, switch,
+  extend). Install, update, remove, permit, grant, device boots and `scan watch` still have their own gates; each
+  would need a gui question ("is there a button?" - the file picker / the installer row) and an app question.
+- **Live extension reload.** Contributions are read when a host starts or is attached. A `kos extend` while the
+  host is attached could be pushed as a fresh `extensions` command, still only to that host.
+- **More contribution types.** Only `entries` and `colors.accent` exist. Candidates that stay data: keymaps,
+  a menu of requests the host may offer, a `background` color once a host uses it.
+- **Per-entry approval for mods.** `app.mod` approves the whole add-on; showing the owner the entries and colors in
+  the password prompt ("pin Hello, Browser; accent #c2410c") would make the decision more informed.
+- **A `go` verb for the line shell.** `kos go` exists, and in the line shell a lone `kos://...` line or
+  `open kos://...` opens the address, but `go` itself is not in the multilingual lexicon yet.
+- **Sealed delivery.** Seal the pin record with a key derived at `kos extend` time so delivery can verify more
+  than a sha256 without holding the password.
+- **`kos aios` and the layers.** If AI OS requests should be forced through gui, app and kernel in KOS (not only
+  in the NeuroClaw engine), `kos aios` is the thing to wire in; today it is deliberately a pass-through.
+
 ## Backlog - from the line-shell / desktop / admin round
 
 - **Admin keyboard as its own privileged process.** Today the lease is a
@@ -104,6 +122,14 @@ land instead of getting lost in chat.
   is possible if that is too noisy.
 
 ## Shipped
+
+- **Addresses, extensions, mods, and the three layers.** `kos go kos://web/example.com` opens an app the way
+  a browser opens a site (`open` and `run` take addresses too; the app is told the path). Two kinds of app, both
+  ordinary `.kapp`s: an **extension** adds to an ordinary app, a **mod** modifies a system app, as validated data
+  the owner switches on with `kos extend` (password, pinned to the exact build). Every way of using an app - open,
+  run, close, switch, extend - passes through one door, `layers.traverse`: the graphical button clicker, then app
+  commands, then kernel commands, each audited, a refusal stopping the rest (so no password for an unpermitted
+  app). See ARCHITECTURE.md for the table and the gaps.
 
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
   command in the user's own language, and code is a command too (run sandboxed,

@@ -498,11 +498,18 @@ def _arguments(tokens: list[Tok]) -> list[str]:
     return out
 
 
+# A line that is nothing but one kos:// address: like typing a URL into an address bar, it opens that app.
+# No whitespace is allowed, so "kos://web; rm -rf /" is not this - it takes the normal path below.
+_ADDRESS_LINE = re.compile(r"^kos://\S+$", re.I)
+
+
 def interpret(line: str) -> Line:
     """Turn one line of input into exactly one KOS command (or explain why not)."""
     text = line.strip()
     if not text:
         return Line("empty")
+    if _ADDRESS_LINE.match(text):
+        return Line("command", argv=("open", text), verb="open", language="en", word="(address)")
     lang = detect_code(text)
     if lang:
         return Line("code", argv=("exec", f"--lang={lang}", f"--code={text}"),

@@ -28,7 +28,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import cache
+from . import cache, layers
+from .address import check_launch
 from .appdirs import AppDirs
 from .auth import AuthError, Authority, AuthorizationDenied
 from .broker import spawn
@@ -58,23 +59,30 @@ def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
                          weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
 
 
+def _row(paths: Paths, a, permits: PermitStore) -> dict:
+    """One App Library row. The description comes from the stored zip's manifest and is
+    display-only (nothing runs from this read; the seal is verified at launch)."""
+    desc, modes, kind, extends = "", ["tui"], "app", ""
+    try:
+        m = KApp.from_file(paths.apps / f"{a.name}.kapp").manifest
+        desc, modes, kind, extends = m.description, list(m.modes), m.kind, m.extends
+    except (KAppError, OSError):
+        pass
+    return {"name": a.name, "version": a.version,
+            "description": clean_text(desc, 200), "modes": modes,
+            "permitted": permits.is_permitted(a.name), "kind": kind, "extends": extends}
+
+
 def list_apps(paths: Paths) -> list[dict]:
-    """Installed apps for the App Library. The description comes from the
-    stored zip's manifest and is display-only (nothing runs from this read;
-    the seal is verified at launch)."""
+    """Installed apps for the App Library."""
     permits = PermitStore(paths)
-    out = []
-    for a in AppStore(paths).installed()[:MAX_LISTED]:
-        desc, modes = "", ["tui"]
-        try:
-            m = KApp.from_file(paths.apps / f"{a.name}.kapp").manifest
-            desc, modes = m.description, list(m.modes)
-        except (KAppError, OSError):
-            pass
-        out.append({"name": a.name, "version": a.version,
-                    "description": clean_text(desc, 200), "modes": modes,
-                    "permitted": permits.is_permitted(a.name)})
-    return out
+    return [_row(paths, a, permits) for a in AppStore(paths).installed()[:MAX_LISTED]]
+
+
+def describe_app(paths: Paths, name: str) -> Optional[dict]:
+    """The App Library row for ``name``, or None: no row means no button (see layers.py)."""
+    a = next((a for a in AppStore(paths).installed() if a.name == name), None)
+    return None if a is None else _row(paths, a, PermitStore(paths))
 
 
 def list_open(paths: Paths) -> list[dict]:
@@ -96,18 +104,15 @@ def wait_running(registry: Registry, instance_id: str, timeout: float = 5.0) -> 
 
 
 def open_background(paths: Paths, authority: Authority, name: str, mode: str = "tui", *,
-                    spawner: Callable = spawn, release: Optional[Callable[[], None]] = None,
-                    wait: float = 5.0) -> Instance:
-    """Start an app under a broker and return its instance. The one code path
-    for ``kos open`` and for an app's ``open`` request: permit check, then the
-    password, then the seal check, then the sandboxed launch."""
-    PermitStore(paths).require(name)      # refused before we even ask for the password
-    store = AppStore(paths)
-    action = "app.graphical" if mode == "graphical" else "app.open"
-    with authority.authorize(action, name) as grant:
-        app = store.load_verified(name, grant)
-    PermitStore(paths).check_declared(name, app.manifest.permissions)
-    policy = authorize_app_action(name, app, mode, authority, authority.prompter)
+                    address: str = "", spawner: Callable = spawn,
+                    release: Optional[Callable[[], None]] = None, wait: float = 5.0) -> Instance:
+    """Start an app under a broker and return its instance. The one code path for ``kos open``,
+    ``kos go``, the desktop and an app's ``open`` request. It goes through the layers (gui, app,
+    kernel - see layers.py): a button for it, then its permit, then the password, the seal check
+    and the sandboxed launch. ``address`` is the path+query the app is told at start."""
+    address = check_launch(address)       # a bad address is refused before any password is asked
+    passage = layers.traverse(paths, authority, layers.Request("open", name, mode))
+    app, policy = passage.app, passage.policy
     if release:
         release()                          # e.g. close the TTY before forking the broker
     paths.ensure()
@@ -120,7 +125,7 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
                     sock_path=str(run_dir / f"{inst_id}.sock"),
                     log_path=str(run_dir / f"{inst_id}.log"), started=time.time(),
-                    system="system" in app.manifest.permissions)
+                    system="system" in app.manifest.permissions, address=address)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
@@ -128,19 +133,18 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
 
 
 def close_instance(paths: Paths, authority: Authority, instance_id: str) -> Instance:
+    inst = layers.traverse(paths, authority, layers.Request("close", instance_id)).instance
     registry = Registry(paths)
-    inst = registry.get(instance_id)
-    with authority.authorize("app.close", inst.id):
-        if inst.status == "running":
-            try:
-                os.kill(inst.broker_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            for _ in range(20):  # give the broker a moment to shut the app down cleanly
-                if not registry._file(inst.id).exists():
-                    break
-                time.sleep(0.1)
-        registry.remove(inst.id)
+    if inst.status == "running":
+        try:
+            os.kill(inst.broker_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        for _ in range(20):  # give the broker a moment to shut the app down cleanly
+            if not registry._file(inst.id).exists():
+                break
+            time.sleep(0.1)
+    registry.remove(inst.id)
     return inst
 
 
@@ -167,7 +171,7 @@ class SystemBridge:
                 return None
             if action == "open":
                 inst = open_background(self.paths, authority, req["app"], req["mode"],
-                                       spawner=self._spawner)
+                                       address=req.get("address", ""), spawner=self._spawner)
                 result(True, f"opened {inst.name}", id=inst.id)
                 return None
             if action == "close":
@@ -175,13 +179,12 @@ class SystemBridge:
                 result(True, f"closed {inst.id}", id=inst.id)
                 return None
             if action == "focus":
-                inst = Registry(self.paths).get(req["id"])
-                if inst.status != "running":
-                    result(False, f"{inst.id} is not running")
-                    return None
+                inst = layers.traverse(self.paths, authority,
+                                       layers.Request("focus", req["id"])).instance
                 result(True, f"switching to {inst.id}", id=inst.id)
                 return ("instance", inst.id)
         except (AuthorizationDenied, AuthError, PermitError, KAppError, SandboxError,
                 RegistryError, TamperedError, OSError) as e:
-            result(False, str(e))
+            layer = getattr(e, "layer", "")      # which of gui / app / kernel said no
+            result(False, f"{layer} layer: {e}" if layer else str(e))
         return None

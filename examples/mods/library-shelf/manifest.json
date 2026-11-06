@@ -1,0 +1,12 @@
+{
+  "name": "library-shelf",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "kind": "mod",
+  "extends": "app-library",
+  "description": "Mod for the App Library: a shelf of shortcuts and a new accent"
+}
