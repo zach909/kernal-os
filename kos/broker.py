@@ -142,7 +142,10 @@ class Broker:
                 self.app_channel.sendall(b'{"cmd":"quit"}\n')
             except OSError:
                 pass
-            time.sleep(0.3)
+            # up to 0.3s for a clean exit, but stop waiting the moment it happens
+            end = time.monotonic() + 0.3
+            while self.app_proc.poll() is None and time.monotonic() < end:
+                time.sleep(0.01)
         if self.app_proc.poll() is None:
             try:
                 os.killpg(self.app_proc.pid, signal.SIGTERM)
@@ -187,7 +190,8 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
     try:
         inst.broker_pid = os.getpid()
         daemonize(log_path)
-        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir), policy, log_path)
+        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir, inst.address),
+                             policy, log_path)
         b.close()
         Broker(inst, registry, a, proc, cache_dir).run()
     except BaseException as e:  # pragma: no cover - last-resort broker crash path

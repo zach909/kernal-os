@@ -103,5 +103,8 @@ mkfs.vfat -n KOS-ESP "${loop}p1" >/dev/null
 mkdir -p "$work/esp"
 mount "${loop}p1" "$work/esp"
 install -D "$work/kos.efi" "$work/esp/EFI/BOOT/BOOTX64.EFI"
+# UEFI boots removable media (USB sticks) from exactly this path; fail the build if it is missing.
+[ -s "$work/esp/EFI/BOOT/BOOTX64.EFI" ] || { echo "ESP is missing EFI/BOOT/BOOTX64.EFI" >&2; exit 1; }
 umount "$work/esp"
 echo "done: $out (root LUKS UUID $uuid)"
+echo "put it on a USB stick:  sudo bin/kos usb write $out /dev/sdX"

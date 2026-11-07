@@ -44,13 +44,18 @@ class Permissions:
         self.dir.mkdir(parents=True, exist_ok=True)
         atomic_write(self.file, json.dumps(entries, indent=1).encode())
 
-    def grant(self, app: str, resource: str, level: str = "use", declared: Optional[list] = None) -> None:
+    def grant(self, app: str, resource: str, level: str = "use", declared: Optional[list] = None,
+              pin: Optional[str] = None) -> None:
+        """``pin`` ties the grant to one exact build of the app (its sha256): a grant that is
+        pinned is only honoured by whoever checks the pin, so a replaced app does not inherit it."""
         if level not in LEVELS:
             raise PermissionError_(f"level must be one of {sorted(LEVELS, key=LEVELS.get)}")
         entries = [e for e in self._load() if not (e["app"] == app and e["resource"] == resource)]
         entry = {"app": app, "resource": resource, "level": level, "at": time.time()}
         if declared is not None:
             entry["declared"] = sorted(declared)
+        if pin is not None:
+            entry["pin"] = pin
         entries.append(entry)
         self._save(entries)
 
