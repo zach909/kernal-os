@@ -69,6 +69,7 @@ class App:
         self.extensions: list = []
         self._queue: deque = deque()     # events that arrived while waiting for a vault reply
         self._seq = 0
+        self.ai_error = ""              # why the last ask was refused
         self.vault_error = ""           # why the last vault call was refused, for the app to show
 
     def send(self, obj: dict) -> None:
@@ -187,6 +188,27 @@ class App:
     # Backups (needs the 'system' permission). The OS asks for the password in
     # its own prompt for every one of these; the app only ever sees the answer:
     # {"cmd": "backup", "stats": {...}, "items": [...]} or a "result" event.
+    def ask(self, text: str, context: str = "", source: str = "") -> list:
+        """Ask the AI (needs the 'ai' permission). The OS asks the owner for the password and says
+        what leaves the computer; this blocks until it answers. Returns lines of text, or [] and
+        ``self.ai_error`` says why. ``context`` is untrusted text you hand over (a page, a file)."""
+        self.send({"cmd": "request", "action": "ask", "text": text, "context": context, "source": source})
+        self.ai_error = ""
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                self.ai_error = "channel closed"
+                return []
+            if ev.get("cmd") == "answer":
+                if not ev.get("ok"):
+                    self.ai_error = ev.get("detail", "refused")
+                return list(ev.get("lines", [])) if ev.get("ok") else []
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                self.ai_error = "quit"
+                return []
+            self._queue.append(ev)
+
     def request_backup(self) -> None:
         self.send({"cmd": "request", "action": "backup"})
 

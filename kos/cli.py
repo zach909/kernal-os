@@ -55,6 +55,7 @@ from pathlib import Path
 
 from . import loader
 from .admin import AdminError, WriteBlocked
+from .ai import AIError
 from .backup import BackupError, VaultTamperedError
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
@@ -248,7 +249,7 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        bridge = _bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
@@ -257,6 +258,12 @@ def cmd_run(args, paths: Paths) -> int:
             cache.wipe(cache_dir)
     print(f"{name} exited ({code})")
     return code
+
+
+def _bridge_for(paths: Paths, name: str, permissions):
+    """The bridge an app gets: only if its manifest has 'system' or 'ai', and only for those powers."""
+    perms = {p for p in permissions if p in ("system", "ai")}
+    return SystemBridge(paths, app=name, permissions=perms) if perms else None
 
 
 def cmd_open(args, paths: Paths) -> int:
@@ -297,12 +304,13 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
     perms = ()
     try:
         perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
     except (KAppError, OSError):
         pass
+    # 'system' was recorded by the OS at open time; the manifest (sealed, checked at launch) adds 'ai'
+    bridge = _bridge_for(paths, inst.name, set(perms) | ({"system"} if inst.system else set()))
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
@@ -682,6 +690,31 @@ def cmd_aios(args, paths: Paths) -> int:
     print(out.get("text", ""))
     status = out.get("status")
     return 0 if status == "ran" else 4 if status == "held" else 1
+
+
+def cmd_ai(args, paths: Paths) -> int:
+    """`kos ai set|show|clear`: the one model endpoint the OS may send text to. Every form needs the
+    password. Asking the AI is not a command: it is the `ai` app, or any app with the `ai` permission."""
+    from . import ai
+    authority, _ = _authority(paths)
+    if args.what == "set":
+        key = os.environ.get("KOS_AI_KEY", "")         # never on the command line: argv is public
+        if not key and not args.url.startswith("http://") and sys.stdin.isatty():
+            import getpass
+            key = getpass.getpass("API key (hidden): ")
+        ai.check_endpoint(args.url)                       # refuse a bad address before any password
+        with authority.authorize("ai.config", "set"):
+            ep = ai.save(paths, args.url, args.provider, args.model, key.strip())
+        print(f"AI set: {ep.provider} {ep.model} at {ep.host} ({'this computer' if ep.local else 'https'})")
+        return 0
+    if args.what == "clear":
+        with authority.authorize("ai.config", "clear"):
+            print("AI removed" if ai.clear(paths) else "no AI was set up")
+        return 0
+    with authority.authorize("ai.config", "show"):
+        ep = ai.load(paths)
+    print(f"{ep.provider} {ep.model} at {ep.url} (key {'set' if ep.key else 'none'})")
+    return 0
 
 
 def cmd_scan(args, paths: Paths) -> int:
@@ -1198,6 +1231,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("aios", help="AI OS: button clicker, app commands, kernel commands, skill maker")
     s.add_argument("layer", choices=["status", "gui", "app", "kernel", "skill"])
     s.add_argument("words", nargs="*")
+    s = sub.add_parser("ai", help="set up the AI connection: set, show, clear (password)")
+    s.add_argument("what", choices=["set", "show", "clear"])
+    s.add_argument("--url", default="", help="https://... or http://127.0.0.1:PORT/... (a model on this computer)")
+    s.add_argument("--provider", choices=["openai", "anthropic"], default="openai")
+    s.add_argument("--model", default="")
     s = sub.add_parser("line", help="the line shell: every line you type is a command")
     s.add_argument("--explain", action="store_true", help="show how each line was understood")
     return p
@@ -1213,7 +1251,8 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install
             "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
             "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
             "backup": cmd_backup, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line}
+            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
+            "ai": cmd_ai}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1228,7 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, BackupError,
-            OSError) as e:
+            AIError, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

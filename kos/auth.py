@@ -79,6 +79,9 @@ ACTIONS: dict[str, str] = {
     "app.extend": "switch on an extension for an app",
     "app.mod": "let a mod modify a system app",
     "app.unextend": "switch off an extension or mod",
+    "ai.ask": "send text to the AI",
+    "ai.config": "set up or look at the AI connection",
+    "state.view": "look at what is installed, open or logged",
 }
 
 

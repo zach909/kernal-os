@@ -44,7 +44,7 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network", "system", "storage"}
+PERMISSIONS = {"network", "system", "storage", "ai"}
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
                   "kind", "extends"}
@@ -125,9 +125,10 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
-            if "system" in perms:
-                # The power to open and close apps must never ride in on an add-on.
-                raise KAppError(f"a {kind} cannot ask for the 'system' permission")
+            for power in ("system", "ai"):
+                # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
+                if power in perms:
+                    raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
                    modes=modes, permissions=perms, description=desc, kind=kind, extends=extends)
 
