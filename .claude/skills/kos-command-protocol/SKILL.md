@@ -17,11 +17,13 @@ Everything is a command. Newline-delimited JSON over a socket
 step with the code.
 
 ```
-OS -> app   hello, key, pointer, button, scroll, device, apps, result, quit
+OS -> app   hello, key, pointer, button, scroll, device, apps, result, answer, quit
 app -> OS   screen, frame, log, request, exit
 ```
 
-`request` is how an app does anything beyond drawing: `apps`, `open`, `focus`,
+`request` is how an app does anything beyond drawing: `ask` (the AI; needs the `ai`
+permission, not `system`; the OS answers with an `answer` message of plain-text lines),
+`apps`, `open`, `focus`,
 `close`. The OS honours it only if **all** of these are true:
 
 1. the app's manifest has the `system` permission (set from the *verified*
