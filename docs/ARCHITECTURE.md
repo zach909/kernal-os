@@ -297,6 +297,9 @@ The cell holds no password material. Future: Linux's proposed out-of-tree
 "multikernel" work (independent kernels on partitioned CPUs/memory without a
 hypervisor) as a bare-metal backend.
 
+## Local mesh (design only)
+See `docs/MESH.md`. Not implemented; it records how a device mesh could satisfy the rules and where it conflicts with the firmware gate and the no-background-services rule.
+
 ## Known gaps
 * Python userland: secrets may be copied by the interpreter → Rust port.
 * A process running as the owner outside KOS could read `auth.json` and guess
