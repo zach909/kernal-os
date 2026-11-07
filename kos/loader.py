@@ -41,6 +41,12 @@ sys.exit(getattr(importlib.import_module(mod), fn or "main")())
 """
 
 
+# Some Python builds omit these from fcntl; the values are fixed Linux ABI (linux/fcntl.h).
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = (getattr(fcntl, n, v) for n, v in
+    (("F_SEAL_SEAL", 1), ("F_SEAL_SHRINK", 2), ("F_SEAL_GROW", 4), ("F_SEAL_WRITE", 8)))
+
+
 def sealed_memfd(label: str, data: bytes) -> int:
     fd = os.memfd_create(f"kos:{label}", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     try:
@@ -48,8 +54,7 @@ def sealed_memfd(label: str, data: bytes) -> int:
         while view:
             n = os.write(fd, view)
             view = view[n:]
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS,
-                    fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL)
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)

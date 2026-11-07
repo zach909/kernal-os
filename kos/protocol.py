@@ -54,6 +54,7 @@ types the password in the OS's own prompt.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import socket
@@ -84,15 +85,23 @@ def clean_text(s: Any, limit: int) -> str:
 
 
 def _int(v: Any, lo: int = -MAX_COORD, hi: int = MAX_COORD) -> int:
-    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+    if type(v) is not int or not lo <= v <= hi:
         raise ProtocolError(f"expected an integer in [{lo}, {hi}]")
     return v
 
 
-def _color(v: Any) -> str:
-    if not isinstance(v, str) or not _COLOR_RE.match(v):
+@functools.lru_cache(maxsize=4096)
+def _color_str(v: str) -> str:
+    if not _COLOR_RE.match(v):
         raise ProtocolError("expected a color like '#1e90ff'")
     return v.lower()
+
+
+def _color(v: Any) -> str:
+    # Frames repeat a handful of colours thousands of times; validate each once.
+    if not isinstance(v, str):
+        raise ProtocolError("expected a color like '#1e90ff'")
+    return _color_str(v)
 
 
 def _op(op: Any) -> list:
@@ -102,7 +111,12 @@ def _op(op: Any) -> list:
     if kind == "clear" and len(op) == 2:
         return ["clear", _color(op[1])]
     if kind == "rect" and len(op) == 6:
-        return ["rect", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), _color(op[5])]
+        _, x, y, w, h, c = op
+        if (type(x) is int and type(y) is int and type(w) is int and type(h) is int
+                and -MAX_COORD <= x <= MAX_COORD and -MAX_COORD <= y <= MAX_COORD
+                and 0 <= w <= MAX_COORD and 0 <= h <= MAX_COORD):
+            return ["rect", x, y, w, h, _color(c)]
+        return ["rect", _int(x), _int(y), _int(w, 0), _int(h, 0), _color(c)]
     if kind == "line" and len(op) == 6:
         return ["line", *(_int(v) for v in op[1:5]), _color(op[5])]
     if kind == "text" and len(op) in (5, 6):
