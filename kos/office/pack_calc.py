@@ -198,7 +198,10 @@ def parse(src, mode="float", names=(), base=10):
     if not toks:
         raise CalcError("empty expression")
     p = _P(toks, mode, set(names))
-    ast = p.binary(0)
+    try:
+        ast = p.binary(0)
+    except RecursionError:
+        raise CalcError("expression nested too deeply")
     if p.i != len(toks):
         raise CalcError(f"unexpected {toks[p.i][1]}")
     return ast
@@ -591,14 +594,17 @@ def roots_in(f, lo, hi, n=400):
 
 
 def jumps(f, lo, hi, span, n=400):
-    """x positions where adjacent samples differ by more than the view height (poles, jumps)."""
-    out, prev = [], None
+    """x positions where adjacent samples differ by more than the view height, or an undefined point lies between defined ones."""
+    out, prev, gap = [], None, False
     for i in range(n + 1):
         x = lo + (hi - lo) * i / n
         y = f(x)
-        if prev is not None and y is not None and abs(y - prev[1]) > span:
+        if y is None:
+            gap = prev is not None
+            continue
+        if prev is not None and (gap or abs(y - prev[1]) > span):
             out.append((prev[0] + x) / 2)
-        prev = (x, y) if y is not None else None
+        prev, gap = (x, y), False
     return out[:10]
 
 
@@ -1446,7 +1452,8 @@ class Form(Screen):
 
     def key(s, k):
         s.msg = ""
-        if k in ("up",): s.sel = (s.sel - 1) % len(s.fields)
+        if k == "escape": return ("pop", None)
+        if k == "up": s.sel = (s.sel - 1) % len(s.fields)
         elif k in ("down", "tab"): s.sel = (s.sel + 1) % len(s.fields)
         elif k == "enter":
             vals = {f[0]: s.vals[i].value.strip() for i, f in enumerate(s.fields)}
