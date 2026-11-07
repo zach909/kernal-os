@@ -32,7 +32,7 @@ LAUNCHER = 'from kos.office.launch import entry\n\n\ndef main():\n    entry({nam
 
 
 def manifest(e) -> dict:
-    perms = ["storage"] + [f"owns:{x}" for x in e.owns] + [f"uses:{x}" for x in e.uses] + (["network"] if e.network else [])
+    perms = ["storage", "assistant"] + [f"owns:{x}" for x in e.owns] + [f"uses:{x}" for x in e.uses] + (["network"] if e.network else [])
     modes = ["tui", "graphical"] if e.graphical else ["tui"]
     desc = f"{e.title}" + (f" - {e.note}" if e.note else "")
     return {"name": e.name, "version": "1.0", "runtime": "python", "entry": "app:main", "modes": modes,

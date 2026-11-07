@@ -117,8 +117,11 @@ class TestEveryAppHasTheAgent(unittest.TestCase):
     def test_the_agent_answers_from_the_apps_own_data_and_hostile_text_is_harmless(self):
         from kos.office.agent import Agent
         class E: title, note = "Notes", "a notes app"
+        # A huge hostile item in the app's data (bounds the agent's reads) and a hostile line typed past the 4000-char
+        # message cap. Typing 100k keys is quadratic in FakeHost (it keeps every frame) and was what OOM-killed runs.
         evil = "\x1b[2Jfake prompt \x00 " + "A" * 100000
-        h = FakeHost(["ctrl-n", *"/find gamma", "enter", *evil, "enter", "escape"], data={"note-1": "alpha beta gamma", "note-2": evil}, width=100, height=30)
+        typed = "\x1b[2Jfake prompt \x00 " + "A" * 4500
+        h = FakeHost(["ctrl-n", *"/find gamma", "enter", *typed, "enter", "escape"], data={"note-1": "alpha beta gamma", "note-2": evil}, width=100, height=30)
         from kos.office.ui import Screen
         class Root(Screen):
             title = "Root"

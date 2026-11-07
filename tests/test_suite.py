@@ -711,7 +711,7 @@ class TestCatalog(unittest.TestCase):
         from suite import gen
         with tempfile.TemporaryDirectory() as td:
             made = gen.build(Path(td))
-            self.assertEqual(len(made), sum(1 for e in CATALOG if e.scope != "none"))
+            self.assertEqual(len(made), sum(1 for e in gen.every() if e.scope != "none"))   # core catalogue + packs
             for n in made:
                 m = KApp.from_file(Path(td) / f"{n}.kapp").manifest
                 self.assertIn("storage", m.permissions); self.assertEqual(m.entry, "app:main")
