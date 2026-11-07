@@ -59,9 +59,9 @@ class TestPacksAreLight(unittest.TestCase):
     def test_a_pack_imports_only_the_standard_library_and_its_own_small_neighbours(self):
         heavy = {"kos.office.catalog", "kos.office.workbench", "kos.office.extras", "kos.office.tools", "kos.office.llm"}
         for p in PACKS:
-            code = ("import sys, json; sys.path.insert(0, %r); import kos.office.%s as m; "
-                    "std = set(sys.stdlib_module_names) | {'kos', '__main__'}; "
-                    "print(json.dumps([sorted(set(sys.modules) & set(%r)), sorted(n for n in {x.split('.')[0] for x in sys.modules} if n not in std and not n.startswith('_'))]))") % (str(ROOT), p, sorted(heavy))
+            code = ("import sys, json; sys.path.insert(0, %r); before = set(sys.modules); import kos.office.%s as m; "
+                    "new = set(sys.modules) - before; std = set(sys.stdlib_module_names) | {'kos'}; "
+                    "print(json.dumps([sorted(new & set(%r)), sorted(n for n in {x.split('.')[0] for x in new} if n not in std)]))") % (str(ROOT), p, sorted(heavy))
             out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
             self.assertEqual(out.returncode, 0, (p, out.stderr))
             heavy_loaded, foreign = json.loads(out.stdout.strip().splitlines()[-1])
