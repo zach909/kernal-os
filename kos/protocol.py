@@ -16,9 +16,16 @@ OS -> app
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
     {"cmd": "scroll", "dy": -1|1, "x": X, "y": Y}
     {"cmd": "device", "device": "mouse"|"keyboard", "state": "attached"}
-    {"cmd": "apps", "installed": [{name, version, description, modes, permitted}],
+    {"cmd": "apps", "installed": [{name, version, description, modes, permitted, kind, extends}],
                     "open": [{id, name, mode, status}]}                  (answer to request apps)
+    {"cmd": "extensions", "items": [{name, version, kind, entries: [{label, address}], colors: {..}}],
+                          "skipped": [{name, why}]}
+                       sent once after hello, only if an extension (for an ordinary app) or a mod (for a
+                       system app) was switched on for *this* app with `kos extend`. Data, never code:
+                       what to do with it is up to the app. See extensions.py.
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
+    {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
+                                                       (answer to a vault command)
     {"cmd": "quit"}
 
 app -> OS
@@ -30,8 +37,13 @@ app -> OS
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
     {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "open", "address": "kos://NAME[/path][?query]", "mode": ...}
+                                         the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
+    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
+                                         durable storage: the app's private data ('storage' permission) or a
+                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
     {"cmd": "exit", "code": int}
 
 ``request`` is how an app does anything beyond drawing: it *asks*. The OS only
@@ -42,10 +54,13 @@ types the password in the OS's own prompt.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import socket
 from typing import Any
+
+from .address import AddressError, parse as parse_address
 
 MAX_LINE = 1 << 20
 MAX_LINES = 500
@@ -69,16 +84,36 @@ def clean_text(s: Any, limit: int) -> str:
     return _CONTROL_RE.sub("", s)[:limit]
 
 
+def escape_text(s: str, limit: int = 4096) -> str:
+    """Make untrusted text safe to print on the owner's terminal.
+
+    Unlike :func:`clean_text` nothing is dropped: each control or bidi character
+    becomes a visible ``\\xNN`` / ``\\uNNNN``. A hostile file or zip-entry name
+    therefore cannot move the cursor, clear the screen or fake a password prompt
+    - and cannot pass for a different name either."""
+    return _CONTROL_RE.sub(
+        lambda m: "\\x%02x" % ord(m.group()) if ord(m.group()) < 0x100 else "\\u%04x" % ord(m.group()),
+        str(s))[:limit]
+
+
 def _int(v: Any, lo: int = -MAX_COORD, hi: int = MAX_COORD) -> int:
-    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+    if type(v) is not int or not lo <= v <= hi:
         raise ProtocolError(f"expected an integer in [{lo}, {hi}]")
     return v
 
 
-def _color(v: Any) -> str:
-    if not isinstance(v, str) or not _COLOR_RE.match(v):
+@functools.lru_cache(maxsize=4096)
+def _color_str(v: str) -> str:
+    if not _COLOR_RE.match(v):
         raise ProtocolError("expected a color like '#1e90ff'")
     return v.lower()
+
+
+def _color(v: Any) -> str:
+    # Frames repeat a handful of colours thousands of times; validate each once.
+    if not isinstance(v, str):
+        raise ProtocolError("expected a color like '#1e90ff'")
+    return _color_str(v)
 
 
 def _op(op: Any) -> list:
@@ -88,7 +123,12 @@ def _op(op: Any) -> list:
     if kind == "clear" and len(op) == 2:
         return ["clear", _color(op[1])]
     if kind == "rect" and len(op) == 6:
-        return ["rect", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), _color(op[5])]
+        _, x, y, w, h, c = op
+        if (type(x) is int and type(y) is int and type(w) is int and type(h) is int
+                and -MAX_COORD <= x <= MAX_COORD and -MAX_COORD <= y <= MAX_COORD
+                and 0 <= w <= MAX_COORD and 0 <= h <= MAX_COORD):
+            return ["rect", x, y, w, h, _color(c)]
+        return ["rect", _int(x), _int(y), _int(w, 0), _int(h, 0), _color(c)]
     if kind == "line" and len(op) == 6:
         return ["line", *(_int(v) for v in op[1:5]), _color(op[5])]
     if kind == "text" and len(op) in (5, 6):
@@ -102,12 +142,22 @@ def _request(msg: dict) -> dict:
     if action == "apps":
         return {"cmd": "request", "action": "apps"}
     if action == "open":
-        app, mode = msg.get("app"), msg.get("mode", "tui")
+        mode, launch = msg.get("mode", "tui"), ""
+        if "address" in msg:
+            if "app" in msg:
+                raise ProtocolError("request.open takes an app or an address, not both")
+            try:
+                addr = parse_address(msg["address"])
+            except AddressError as e:
+                raise ProtocolError(f"request.address: {e}") from None
+            app, launch, mode = addr.app, addr.launch, addr.mode or mode
+        else:
+            app = msg.get("app")
         if not isinstance(app, str) or not _APP_NAME_RE.match(app):
             raise ProtocolError("request.app must be an app name")
         if mode not in REQUEST_MODES:
             raise ProtocolError("request.mode must be tui, graphical or cmd")
-        return {"cmd": "request", "action": "open", "app": app, "mode": mode}
+        return {"cmd": "request", "action": "open", "app": app, "mode": mode, "address": launch}
     if action in ("focus", "close"):
         ident = msg.get("id")
         if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
@@ -126,6 +176,35 @@ def _request(msg: dict) -> dict:
             raise ProtocolError("request.id must be a backup item id")
         return {"cmd": "request", "action": "backup_remove", "id": ident}
     raise ProtocolError(f"unknown request {action!r}")
+
+
+VAULT_OPS = ("put", "get", "list", "delete", "spaces")
+_SPACE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_VAULT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MAX_VAULT_VALUE = 400_000
+
+
+def _vault(msg: dict) -> dict:
+    op, ident = msg.get("op"), msg.get("id")
+    if op not in VAULT_OPS:
+        raise ProtocolError(f"vault.op must be one of {VAULT_OPS}")
+    ident = _int(ident, 0, 2**31)
+    out = {"cmd": "vault", "op": op, "id": ident}
+    if msg.get("space") is not None:
+        if not isinstance(msg["space"], str) or not _SPACE_RE.match(msg["space"]) or op == "spaces":
+            raise ProtocolError("vault.space must be a plain space name (and not used with 'spaces')")
+        out["space"] = msg["space"]
+    if op not in ("list", "spaces"):
+        key = msg.get("key")
+        if not isinstance(key, str) or not _VAULT_KEY_RE.match(key):
+            raise ProtocolError("vault.key must be a plain lowercase name")
+        out["key"] = key
+    if op == "put":
+        value = msg.get("value")
+        if not isinstance(value, str) or len(value) > MAX_VAULT_VALUE:
+            raise ProtocolError("vault.value must be text")
+        out["value"] = value        # data, never displayed by the OS: not stripped
+    return out
 
 
 def validate_app_message(msg: Any, mode: str) -> dict:
@@ -151,6 +230,8 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return {"cmd": "log", "msg": clean_text(msg.get("msg", ""), 2000)}
     if cmd == "request":
         return _request(msg)
+    if cmd == "vault":
+        return _vault(msg)
     if cmd == "exit":
         return {"cmd": "exit", "code": _int(msg.get("code", 0), 0, 255)}
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")

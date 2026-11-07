@@ -8,8 +8,8 @@ them; ``kos attach ID`` connects your terminal, mouse and keyboard to one of
 them (detach with Ctrl-C, the app keeps running); ``kos close ID`` actually
 stops it.
 
-One JSON file per instance under ``<state>/instances/<id>.json`` is both the
-record and the lock: the broker holding that instance is the only process
+One JSON file per instance under ``<state>/appdata/<app>/run/<id>.json`` is both
+the record and the lock (its socket and log sit beside it): the broker holding that instance is the only process
 that ever attaches a live app to it.
 """
 
@@ -21,6 +21,7 @@ import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .kapp import NAME_RE
 from .paths import Paths, atomic_write
 
 
@@ -40,6 +41,7 @@ class Instance:
     app_pid: int = 0
     status: str = "starting"  # starting -> running -> exited
     system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
+    address: str = ""         # the path+query of the kos:// address it was opened with (checked by the OS)
 
 
 def _alive(pid: int) -> bool:
@@ -56,20 +58,22 @@ def _alive(pid: int) -> bool:
 
 class Registry:
     def __init__(self, paths: Paths):
-        self.dir = paths.state / "instances"
+        self.base = paths.state / "appdata"
 
     def new_id(self, name: str) -> str:
         return f"{name}-{secrets.token_hex(3)}"
 
     def _file(self, instance_id: str) -> Path:
-        if "/" in instance_id or instance_id in ("", ".", ".."):
+        name = instance_id.rsplit("-", 1)[0]
+        if "/" in instance_id or instance_id in ("", ".", "..") or not NAME_RE.match(name):
             raise RegistryError(f"invalid instance id {instance_id!r}")
-        return self.dir / f"{instance_id}.json"
+        return self.base / name / "run" / f"{instance_id}.json"
 
     def write(self, inst: Instance) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.dir, 0o700)
-        atomic_write(self._file(inst.id), json.dumps(asdict(inst), indent=2).encode())
+        f = self._file(inst.id)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(f.parent, 0o700)
+        atomic_write(f, json.dumps(asdict(inst), indent=2).encode())
 
     def get(self, instance_id: str) -> Instance:
         try:
@@ -85,10 +89,10 @@ class Registry:
             pass
 
     def list(self) -> list[Instance]:
-        if not self.dir.exists():
+        if not self.base.exists():
             return []
         out = []
-        for f in sorted(self.dir.glob("*.json")):
+        for f in sorted(self.base.glob("*/run/*.json")):
             try:
                 inst = Instance(**json.loads(f.read_text()))
             except (ValueError, TypeError, KeyError):

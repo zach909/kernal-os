@@ -1,9 +1,76 @@
-# kernal-os (KOS)
+# kernal-os (KOS) - a password-first, security-focused Linux operating system
 
-A security-first operating system built on the Linux kernel. One rule runs
-through everything: **nothing happens without your password.** There are no
-background services, no cached logins, no autostart, and no way to feed a
-password in from a script.
+**KOS** (also searched as *kernal os* / *kernel os*) is an open-source,
+security-first operating system built on the Linux kernel, written in Python.
+It has no background services, no cached logins and no autostart: every
+action needs your password. Apps are sealed zip files run in a Landlock +
+namespace sandbox, and it adds a built-in malware scanner, parallel
+micro-VM kernels, and a command line that understands nine human languages.
+
+**Keywords:** secure Linux OS, hardened Linux distribution, password-protected
+operating system, Landlock sandbox, LUKS2 encrypted boot, KVM micro-VM,
+sandboxed apps, malware scanner, multilingual command shell, Python OS.
+
+## Rules
+
+These four rules govern every change to KOS. A change that breaks one is wrong.
+
+1. **Everything needs verification.**
+   - In the OS: every action goes through `Authority.authorize(action, target)`
+     and needs the password typed for *that* action. A new command or feature
+     must add its action to `ACTIONS` in `kos/auth.py` and call `authorize`
+     before it does anything. A second kind of verification (a `requires`
+     dependency, a security scan, a signed seal) adds to the password; it never
+     replaces it.
+   - In the work: nothing is called done until it has been run and checked.
+     Tests pass, or the failure is reported as it is.
+2. **Everything is an app.** Features ship as sandboxed `.kapp`s that talk to
+   the OS only through the command protocol (`request` for system functions,
+   with the `system` permission and a permit). The OS core stays small: auth,
+   sandbox, devices, protocol. The taskbar and App Library are the model.
+3. **Every connection is blocked by default.** Any connection between anything
+   (app to internet, app to app, app to cell, the OS to the internet, inbound
+   listeners, any protocol, any port) is denied until a firewall rule allows it.
+   - Websites are blocked too. A site installed as an app follows the same
+     rules as any other app.
+   - The firewall is an app. It holds no power of its own: it asks the OS, and
+     every change needs the password. Enforcement stays in the OS, so the
+     firewall app being broken or hostile leaves the default at deny.
+   - A rule names one app, one host, one port and one protocol. No wildcards
+     unless typed out.
+   - Using a privilege asks at the moment of use, after the password that ran
+     the app, in the OS's own prompt. Grants last until the app exits unless
+     you explicitly make one permanent (which costs a password).
+   - Every connection is encrypted and verifiable. Plain-text connections
+     (`http://`, FTP, anything unencrypted) are refused, never silently
+     upgraded. The peer's certificate and host name must verify, with no
+     "continue anyway" and no switch to turn it off. A redirect may not move
+     from encrypted to plain.
+   - The browser tells you on every page that websites can see your IP address.
+   - Every allowed and every blocked attempt goes in the audit log.
+
+4. **The whole pipeline is encrypted.** What you see, what you click, the
+   commands between the app and the OS, and the OS's calls down to the kernel
+   and hardware: screen <- `frame`/`screen` <- app <- `key`/`pointer`/`button`
+   <- OS <- kernel <- hardware. Apps never touch the kernel or hardware; only
+   the OS does. Every channel between separate parties is encrypted and
+   authenticated.
+
+Agent skills for AI agents working on this repo live in `.claude/skills/`:
+`kos-rules` (these rules as a checklist) and one per layer of the pipeline -
+`kos-graphics`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
+`kos-hardware`.
+
+### Where the code does not meet the rules yet
+
+Honest list, so nobody assumes these are covered:
+
+| Rule | Gap |
+|---|---|
+| Verification | Run with no password: `list`, `ps`, `activity`, `audit`, `owed`, `cell list`, `scan file`, `ls`, `pack`, `doctor`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
+| Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
+| Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
+| Everything is an app | `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
 
 ## How it works
 
@@ -26,10 +93,13 @@ power on
 
 | Idea | How it's built |
 |---|---|
+| Debian conversion | `kos/debconv.py`, `kos/debshim.py`, `kos convert`: a `.deb` becomes a `.kapp`. The package is read in memory only (never unpacked to disk), bounded and path-checked, and the result is scanned; a flagged or unconvertible package is refused **before** any password prompt. The password (`app.convert`) is needed to write the file, and `kos install` then scans again, asks again and seals. **Maintainer scripts are never run and never kept.** Only **statically linked** programs convert (dynamic ones are refused with the package's `Depends` shown); symlinks and devices are dropped; setuid bits are stripped; the app gets **no permissions**. A small shim runs the program from a sealed in-RAM file with no stdin, a 10 s limit and a 64 KiB output cap, and shows its output as a text page. |
+| Skill maker | `kos/skillmaker.py`, `kos skills`: one skill for the commands (read from the real parser) and one per installed app. One password (`skill.make`) verifies every app's seal first; a tampered app is skipped. Each file is scanned, and a flagged app skill is left out. An app's free-text description never reaches the instructions - it sits in one inert, labelled data block. Printing writes nothing; `--out DIR` writes each file through the guarded `file.write` path. |
 | Password on everything | `kos/auth.py`: scrypt-derived master key; every action (`app.run`, `device.mouse`, `file.view`, ...) needs the password typed for *that* action. All decisions go to an audit log (`kos audit`). |
+| Password on everything | `kos/auth.py`: scrypt-derived master key; every action (`app.run`, `device.mouse`, `file.view`, ...) needs the password typed for *that* action. All decisions go to a tamper-evident audit log: hash-chained, with every grant anchored to your password (`kos audit`, `kos audit --verify`). |
 | Apps are zip files that are never unzipped | `kos/kapp.py`, `kos/loader.py`: the zip is stored as-is, sealed with a password-derived key. At run time it's copied into a sealed in-RAM file (memfd) and run from there. A modified zip refuses to run. |
 | Mouse/keyboard are "booted" | `kos/devices.py`, `kos/session.py`: apps never touch devices. The OS reads them and sends **commands** (`key`, `pointer`, `button`) to the app; the app answers with commands (`screen`, `frame`) that the OS checks and draws. Password prompts are an OS overlay the app can't see or cover. Ctrl-C always quits. |
-| Everything goes through the security system | Apps run as `nobody` under Landlock + namespaces (`kos/sandbox.py`): no reading your files, no writing, no network unless you allow it with your password. If the kernel can't enforce this, apps don't start. |
+| Everything goes through the security system | Apps run as `nobody` under Landlock + namespaces + a seccomp denylist (`kos/sandbox.py`): no reading your files, no writing, no network unless you allow it with your password, no `bpf`/`io_uring`/`perf`/keyring syscalls, 1 GiB of memory and 64 MiB per file at most. If the kernel can't enforce Landlock, apps don't start. The seccomp filter is x86_64 only (`kos doctor` says so). |
 | Multi-kernel in parallel | `kos/cells.py`: a *cell* is a separate Linux kernel (KVM micro-VM) pinned to its own CPU cores. `run hello --cell c1` runs the app inside it over the same command protocol. |
 | Virus scanning | `kos/scan.py`: a static/heuristic scanner (EICAR + hand-written rules for reverse shells, obfuscated `eval`, credential-file reads, fork bombs, curl-pipe-shell, ...) that recurses into zips without extracting them. Every `install` and `update` is scanned *before* the password prompt; a flagged file is quarantined, never installed. `kos scan watch DIR` scans every file written under a directory - started with your password, like a cell, so it's bounded and visible, not a silent background daemon. |
 | Apps need permission to run | `kos/permit.py`: a persistent grant, separate from the password - `kos permit NAME` decides an app is allowed to run *at all*, once. It never replaces the password: `run`/`open` still ask for it on every single launch regardless. |
@@ -38,7 +108,78 @@ power on
 | The OS is made of apps | `kos/desktop.py`, `kos/system.py`, `examples/system/`: the **taskbar** and the **App Library** are ordinary sandboxed apps. They never touch the screen or other apps - they *ask* the OS with a `request` command (needs the `system` permission in the manifest + a permit; opening/closing needs your password in the OS's own prompt). The **right mouse button is the App Library**, handled by the OS from any app. |
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
 | Backups (the backup app) | `kos/backup.py`, `examples/backup`: **content-addressed, deduplicated** backups. A file body is stored once under its SHA-256 no matter how many names or times it is added; every file is **scanned before it is stored** (flagged files never enter the vault); `add`/`list`/`remove`/`restore` each need the password; the index is HMAC-sealed with a password-derived key and every body is re-hashed when read, so tampering is refused. **Restore is a write**, so it goes through the guarded write (admin keyboard, scan, optimize) and never overwrites. The `backup` app is a sandboxed front-end that can't read files itself - it *asks* the OS (`system` permission) and the password is typed in the OS's own prompt. |
+| AI OS: KOS is the engine | `kos/aios.py`: four layers only - the graphical button clicker (`gui`), terminal app commands (`app`), kernel commands (`kernel`, NeuroClaw's Linux permission tools) and the auto skill maker (`skill`). KOS carries a request to the NeuroClaw engine on this computer and asks for no password; the engine's own tool gate and approvals decide what happens. Nothing else of NeuroClaw is reachable, nothing autostarts, and the engine address must be loopback. |
+| Security check | `kos security` (`kos/secure.py`): one read-only check, no password, nothing changed, nothing running in the background. Kernel protections, private folders and secrets, audit-chain integrity, every installed app rescanned and compared with what was installed, permissions nothing uses any more or that were never pinned, owed work, crash leftovers. Exit code 3 if anything failed. |
+| Firmware control (no ME, PSP or BMC in charge) | `kos/firmware.py`, `boot/initramfs/firmware.sh`: before the disk is unlocked, and again in `kos-init`, KOS looks for management processors that run below the OS - **Intel ME/AMT, AMD PSP, server BMCs (IPMI)**, and every other chip with its own firmware (Thunderbolt/USB4, USB-C port controller, embedded controller, network, GPU, NVMe, wireless), plus a missing IOMMU. If one is running it alerts, cuts the OS's side of it (unbinds the driver, forbids rebinding) and **refuses to boot**. Only an Intel ME whose own status register says *disabled* is believed off. `kos.firmware=warn` on the signed kernel command line boots anyway. **This cannot switch them off** - see the limits in `docs/ARCHITECTURE.md`; almost no real hardware will boot under the default policy (VMs will). There is no resident checker: it runs once at boot and at each unlock. An owner-written allow list (`boot/firmware.allow`, `/etc/kos/firmware.allow`) accepts chips whose firmware you replaced yourself; KOS never flashes anything. `kos firmware` also lists which protections (IOMMU, memory encryption, LUKS2, Thunderbolt security) narrow what the remaining chips can see. |
+| Open apps like websites | `kos/address.py`: `kos go kos://web/example.com/news` opens the app `web` and tells it the path, the way a browser opens a site. `run` and `open` take addresses too; an app can ask for one with a `request`. Addresses are checked strictly (no other schemes, `..`, `%`, `#`, whitespace or control characters) and the path is *data for the app*, never a file name or a command. |
+| Extensions and mods, still apps | `kos/extensions.py`: two kinds of app, both ordinary sealed, scanned, permitted `.kapp`s. An **extension** adds to an ordinary app, like a browser extension (bookmarks for `web`). A **mod** modifies a system app (pins and a new accent for the taskbar, a shelf for the App Library). They are *data*, not code injected into another app: the host's zip and seal are never touched, and the OS hands the host the validated entries after `hello`. Nothing happens until you switch one on with `kos extend NAME` (password; a mod is a separate `app.mod` action); the switch pins the exact build you approved, so an updated or tampered add-on stops contributing until you approve it again. |
+| Every app action passes gui, app, kernel | `kos/layers.py`: opening, running, closing, switching to and extending an app all go through one door, `layers.traverse`, which sends the request through the **graphical button clicker** (is there a button for it?), then **app commands** (is it permitted?), then **kernel commands** (the password, the seal, the sandbox), in that order. A layer that says no stops the rest, so an unpermitted app is refused before any password is asked. Every layer's `pass` or `refused` is in `kos audit`. A test fails if any other code asks for the password to use an app. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
+
+## Install as a Debian package
+
+The whole repository builds into one `.deb`, from the last commit (so a version
+always means the same bytes; building twice gives identical files):
+
+```
+python3 packaging/build_deb.py          # -> dist/kernal-os_VERSION_all.deb
+sudo dpkg -i dist/kernal-os_*.deb       # installs files only
+kos setup                               # choose your password
+```
+
+It installs the tree under `/usr/lib/kernal-os/` with `kos` and `kos-run` in
+`/usr/bin`. It has **no maintainer scripts**, starts no service, touches
+nothing in `/etc` and creates no state, which is KOS's own rule applied to its
+package. Needs `python3 (>= 3.11)`; the full test suite was run from an
+extracted copy on 3.11, 3.12 and 3.13. Not done yet: a license (the repo has
+none, so the package ships no copyright file), a changelog, and an apt
+repository.
+## Productivity suite
+
+149 products were asked for (document/spreadsheet/slides editors, mail, calendar, databases, project and
+security tools, AI assistants, ...). **144 are built as apps; 5 are not, with the reason in the catalogue.**
+Honest breakdown: 51 full, 93 partial (a real, useful part - the catalogue says exactly what is missing),
+5 not built. See [docs/CATALOG.md](docs/CATALOG.md) for every product, its app name and its scope.
+
+```
+bin/suite list                list every product, scope and app name
+bin/suite build DIR           pack one .kapp per app into DIR
+kos install DIR/document-editor.kapp && kos permit document-editor && run document-editor
+```
+
+How it fits the security model: apps are ordinary sandboxed `.kapp`s (manifest + 3-line launcher); all code
+lives in `kos/office`, on every app's import path like `kos.sdk`. Each app gets one folder:
+
+```
+<state>/appdata/<app>/cache/   scratch for each run, wiped the instant the app ends
+<state>/appdata/<app>/data/    private user data (the vault); never wiped, survives updates
+<state>/appdata/<app>/run/     live state of its running instances (record, socket, log)
+<state>/permissions/grants.json  ONE universal permission store, for every app
+<state>/spaces/<name>/         shared folders, created by the app that owns them
+```
+
+Apps *ask* the OS (a `vault` command) to put/get/list/delete named text items - never paths. No password
+prompt for that (the run permit + the password at launch still apply), size/count caps apply.
+
+**Shared folders.** An app whose manifest says `owns:contacts` creates the `contacts` folder, and its
+permission, the first time it uses it. Any other app that says `uses:contacts` can look for it, but is only
+let in after you grant it (`kos grant email-client space:contacts --level read`, with the password): the
+manifest has to ask *and* the permission store has to say yes, and nobody can take over a name someone else
+owns. Anyone holding a grant of at least the level asked for may use it - that is the whole rule. Wired so
+far: Contact Manager owns `contacts` (Email Client and Appointment Scheduler look people up in it),
+Calendar Manager owns `calendar` (the scheduler books onto it), Task Manager owns `tasks` (the collaboration
+and workspace apps show the same tasks). `kos spaces` shows who owns what and who has access; `kos dirs APP`
+shows an app's folders.
+
+`kos permit` now records which manifest permissions you approved; if an update asks for more (say `network`)
+it is refused until you permit again. AI apps additionally declare `network` (password at launch) and work
+**without** a model using local deterministic tools; connect a model in the app's settings for open-ended
+answers.
+
+What is real vs. what is not: SQL is real SQLite; spreadsheets have a real formula parser (no `eval`); mail has
+a real delivery pipeline; TOTP matches RFC 6238; the suite's Audit Log Manager and the OS audit log (`kos audit --verify`) are both hash-chained; search is BM25. What is not:
+anything needing audio/video/camera/screen/other machines (conferencing, voice, capture, scanning, speech) and
+anything that needs two *people* or two *machines* to share live data - every app is single-user and local, and apps share only through the owned folders above.
 
 ## Commands
 
@@ -52,6 +193,8 @@ kos open [graphical|cmd] NAME   open in the background, return immediately
 kos ps                     apps opened with 'kos open'
 kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
 kos close ID                actually stop one
+kos go kos://NAME[/path]    open an address, like a browser's address bar (open and run take them too)
+kos extend NAME             switch an extension or mod on for the app it extends (password; --revoke, --list)
 kos desktop install         pack, scan, install + permit the taskbar and App Library
 kos boot desktop            the desktop: taskbar + App Library apps (--graphical for pixels)
 kos ls PATH / kos cat PATH  browse/view real dirs and zips, never extracted
@@ -59,11 +202,17 @@ kos explore [PATH]          interactively cd/ls/cat, straight into zip files
 kos activity                one feed: what's open + recent password decisions
 kos view FILE               view a file (password first)
 kos permit NAME             give an app permission to run (password still needed every run)
+kos grant APP space:NAME    let an app into a shared folder (--level read|write; --revoke; --list)
+kos spaces                  shared folders: owner, item count, who has access
+kos dirs APP                an app's cache / data / run folders
 kos scan file PATH          scan a file/zip right now (no password needed)
 kos scan watch DIR...       scan every file written here until Ctrl-C (password to start)
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
 kos optimize                 recompress apps, prune dead state, reclaim disk space
 kos admin [status|boot|lock] the elevated administrator keyboard (boots at login)
+kos convert PKG.deb -o OUT.kapp [--exe PATH]
+                             convert a Debian package into an app (static programs only)
+kos skills [--out DIR]       make agent skills from the installed apps and commands
 kos write PATH --text T      write a file (needs the admin keyboard); owes a scan + optimize afterwards
 kos backup add PATH...       back up files/folders (scanned, stored once per content)
 kos backup [list]            what is backed up + what deduplication saved
@@ -74,7 +223,14 @@ kos exec --code LINE         run one line of code as a sandboxed command
 kos do WORDS...              one line of human language, run as one command
 kos line [--explain]         the line shell: every line you type is a command
 kos cell start NAME --kernel K --initrd I --cpus 2,3
+kos aios status             the four AI OS layers and whether NeuroClaw answers
+kos aios gui|app|kernel|skill WORDS...   one request on one layer (no password)
+kos usb list|check|write|test   boot from a USB stick: write an image to one safely (see below)
 kos doctor                  which kernel protections this machine has
+kos audit [--verify]         every password decision; --verify checks the log for tampering
+kos security                 check everything KOS can verify about itself (no password, read-only)
+kos firmware                management processors (Intel ME, AMD PSP, BMC) and whether the OS would boot
+kos firmware plan           read-only advice: which blocking chips have open firmware, which must be disabled or allow-listed
 kos audit                   every password decision
 ```
 
@@ -113,6 +269,43 @@ nothing an app writes outlives it. `kos optimize` reclaims disk space:
 recompressing installed apps (re-sealed at the new bytes), dropping old
 quarantine files and dead background-app records, and trimming the audit
 log.
+
+## Addresses, extensions and mods
+
+```
+kos go kos://web/example.com/news?page=2   open the browser straight at that page (asks the password)
+kos open graphical kos://hello             or kos://hello?mode=graphical
+kos> kos://web/example.com                 in the line shell, a lone address opens it, like a URL bar
+```
+
+An extension or a mod is an app whose manifest says what it extends, and which ships `extension.json`
+(data, validated at install, never run):
+
+```
+{"kind": "extension", "extends": "web", ...}          manifest.json: adds to an ordinary app
+{"kind": "mod",       "extends": "taskbar", ...}      manifest.json: modifies a system app (taskbar, app-library)
+
+extension.json:  {"entries": [{"label": "Wikipedia", "address": "kos://web/en.wikipedia.org"}],
+                  "colors":  {"accent": "#c2410c"}}   (colors: mods only)
+```
+
+```
+kos desktop install            once: the taskbar and App Library are the apps a mod modifies
+kos pack examples/mods/taskbar-pins -o taskbar-pins.kapp && kos install taskbar-pins.kapp
+kos permit taskbar-pins        it is an app, so it needs a permit like any app
+kos extend taskbar-pins        password; the taskbar now shows its pins the next time it starts (a-i opens one)
+kos extend --list              what is switched on, and the build each one is pinned to
+kos extend --revoke taskbar-pins
+```
+
+Examples: `examples/extensions/web-bookmarks` (bookmarks on the browser's start page),
+`examples/mods/taskbar-pins` (pinned apps + accent on the taskbar) and `examples/mods/library-shelf`
+(a shelf of shortcuts + accent in the App Library). Rules the OS enforces: an extension cannot target a
+system app and a mod cannot target an ordinary one; neither can ask for the `system` permission (the power
+to open and close apps never rides in on an add-on); an app's `extension.json` must match its kind.
+A pinned entry is only a *request* to open an address - the OS still runs it through gui, app and kernel
+and asks for your password. Only the host app that was extended is told about it, and only apps written
+to show entries do: the taskbar, the App Library and `web` do.
 
 ## Every line is a command
 
@@ -204,6 +397,26 @@ python3 -m unittest discover -s tests -v
 `kernel/kos.config` (hardening config fragment), `boot/mkinitramfs.sh`,
 `image/mkimage.sh` (UEFI + LUKS2 disk image), `image/run-qemu.sh`.
 
+### Booting from USB
+
+```
+sudo image/mkimage.sh --kernel bzImage --rootfs rootfs.tar --out kos.img
+bin/kos usb check kos.img              # GPT + EFI/BOOT/BOOTX64.EFI present?
+bin/kos usb test kos.img               # boot it in QEMU attached as a USB stick
+bin/kos usb list                       # which USB disks it would write
+sudo bin/kos usb write kos.img /dev/sdX   # then pick the stick in the firmware boot menu
+```
+
+`write` refuses anything that is not a whole, unmounted, writable USB disk big
+enough for the image (`--allow-non-usb` relaxes only the USB rule, never the
+mounted one), makes you type the device name, writes, reads the stick back and
+compares every byte, then moves the backup GPT to the end of the stick. UEFI
+boots removable media from `EFI/BOOT/BOOTX64.EFI`, which `mkimage.sh` writes
+(and now fails the build if missing). `kernel/kos.config` builds in
+xHCI/EHCI/usb-storage/UAS/SCSI-disk since the pre-boot initramfs cannot load
+modules, and the pre-boot waits up to 60s for the stick before giving up.
+Secure Boot: enroll the key you signed with, or the stick will be refused.
+
 ## Status (honest)
 
 * **Tested here:** password/grants/audit, app sealing and tamper detection,
@@ -238,9 +451,15 @@ python3 -m unittest discover -s tests -v
   `fcntl.F_ADD_SEALS`, so no sandboxed app (existing ones too: 14 pre-existing
   test failures) can start; the app's key handling and requests are unit-tested
   instead.
+* **Also tested here (hardening round):** a seccomp filter checked three ways (BPF program interpreted, syscall
+  numbers compared with the kernel header, every denied call tried from inside the real sandbox); the audit chain
+  including a forger who re-links it and concurrent appends/trims (nothing recorded is lost); hostile file and
+  zip-entry names (no escape sequences reach the terminal); the broker sleeping with zero wakeups; `kos security`
+  against eight deliberately broken installs.
 * **Written but not yet booted:** exclusive evdev capture for the admin
+* **Written but not yet booted on real hardware or QEMU:** `kos usb` end to end on a real stick (its logic, refusals, byte-for-byte verify and the QEMU argv are unit-tested), the USB kernel options, exclusive evdev capture for the admin
   keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the
-  image builder, framebuffer/evdev on real hardware, starting KVM cells (no
+  image builder (including its new bytecode precompile step, which only had its syntax and its `compileall` command checked), framebuffer/evdev on real hardware, starting KVM cells (no
   KVM in the dev container).
 * The userland is Python (stdlib only) to move fast. Python can't fully wipe
   secrets from memory; the security core should be ported to Rust.
