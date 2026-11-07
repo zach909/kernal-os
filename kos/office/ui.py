@@ -26,6 +26,7 @@ class Host:
     def put(self, key: str, value: str, space: Optional[str] = None) -> bool: raise NotImplementedError
     def keys(self, space: Optional[str] = None) -> list: raise NotImplementedError
     def delete(self, key: str, space: Optional[str] = None) -> bool: raise NotImplementedError
+    def space_names(self) -> list: return []     # names of the shared folders this app can open right now
     def exit(self, code: int = 0) -> None: raise NotImplementedError
     def present(self, canvas) -> None: raise NotImplementedError
 
@@ -51,6 +52,7 @@ class AppHost(Host):
     def put(self, key, value, space=None): return self.app.vault_put(key, value, space)
     def keys(self, space=None): return self.app.vault_keys(space)
     def delete(self, key, space=None): return self.app.vault_delete(key, space)
+    def space_names(self): return [s["space"] for s in self.app.vault_spaces() if isinstance(s.get("space"), str)]
     def exit(self, code=0): self.app.exit(code)
 
 
@@ -129,6 +131,10 @@ class FakeHost(Host):
         if space and self.storage:
             v = self._vault(space, "delete"); return bool(v and v.delete(key))
         return (self.spaces.setdefault(space, {}) if space else self.data).pop(key, None) is not None
+    def space_names(self):
+        if self.storage:
+            return [s["space"] for s in self.storage.visible_spaces()]
+        return sorted(self.spaces)
     def exit(self, code=0): self.exited = code
 
     @property

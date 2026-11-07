@@ -21,6 +21,13 @@ def entry(name: str, pack: str = "") -> None:
         root = build(host, e)
 
     def agent():
+        # Ctrl-N opens the one box: commands, files and the assistant (kos/office/finder.py)
         from .agent import Agent
-        return Agent(host, e.title, e.note)
+        from .findscreen import Finder
+
+        def assistant(text):
+            a = Agent(host, e.title, e.note)
+            if text: a.submit(text)
+            return a
+        return Finder(host, e.title, assistant)
     run(host, root, agent=agent)

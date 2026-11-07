@@ -1074,7 +1074,7 @@ def cmd_help(args, paths: Paths) -> int:
     print("kos COMMAND ...   (kos help COMMAND explains one; in the line shell, type 'help')\n")
     for name in sorted(helps):
         print(f"  {name:<{width}}{helps[name]}")
-    print("\nHelp inside KOS: the 'KOS Help' and 'Get to Know KOS' apps; press Ctrl-N in any app for its agent (/help).")
+    print("\nHelp inside KOS: the 'KOS Help' and 'Get to Know KOS' apps; press Ctrl-N in any app to search commands and files or talk to its assistant (/help).")
     return 0
 
 

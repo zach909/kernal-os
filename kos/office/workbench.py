@@ -179,19 +179,23 @@ class Chat(Screen):
         if hits: return "From what you told me:\n" + "\n".join("- " + self.mem[k] for k, _s, _n in hits)
         return "No model is configured, so I can only use my local tools (try /help) or search what you /remember. Press Ctrl-L to connect a model."
 
+    def submit(self, text: str) -> None:
+        """Say ``text`` to the assistant and record its reply (also how the Ctrl-N search box hands over a question)."""
+        self.say("you", text)
+        cfg = self.st.load("llm", {})
+        if llm.configured(cfg) and not text.startswith("/"):
+            msgs = [{"role": "user" if w == "you" else "assistant", "content": t} for w, t in self.hist[-20:] if w in ("you", "ai")]
+            ctx = self.system + ("\nNotes the user asked you to remember:\n" + "\n".join(self.mem.values()) if self.mem else "")
+            try: reply = llm.ask(cfg, ctx, msgs)
+            except llm.LLMError as e: reply = f"(model error: {e}) " + self.local(text)
+        else:
+            reply = self.local(text)
+        if reply: self.say("ai", reply)
+
     def key(self, k):
         if k == "enter" and self.inp.value.strip():
             text = self.inp.value.strip(); self.inp = TextInput(); self.top = -1
-            self.say("you", text)
-            cfg = self.st.load("llm", {})
-            if llm.configured(cfg) and not text.startswith("/"):
-                msgs = [{"role": "user" if w == "you" else "assistant", "content": t} for w, t in self.hist[-20:] if w in ("you", "ai")]
-                ctx = self.system + ("\nNotes the user asked you to remember:\n" + "\n".join(self.mem.values()) if self.mem else "")
-                try: reply = llm.ask(cfg, ctx, msgs)
-                except llm.LLMError as e: reply = f"(model error: {e}) " + self.local(text)
-            else:
-                reply = self.local(text)
-            if reply: self.say("ai", reply)
+            self.submit(text)
         elif k == "ctrl-l": return ("push", ModelSettings(self.host))
         elif k == "pageup": self.top = max(0, (len(self.hist) * 3 if self.top < 0 else self.top) - 8)
         elif k == "pagedown": self.top = -1
