@@ -82,6 +82,8 @@ def validate(f: Field, raw: str) -> tuple[bool, str]:
             n = float(v.replace(",", "").lstrip("$€£"))
         except ValueError:
             return False, "must be a number"
+        if n != n or n in (float("inf"), float("-inf")):     # nan / inf / 1e999 are not amounts
+            return False, "must be a number"
         if k == "percent" and not 0 <= n <= 100:
             return False, "must be 0-100"
         return True, (str(int(n)) if n == int(n) else f"{n:.2f}".rstrip("0").rstrip("."))

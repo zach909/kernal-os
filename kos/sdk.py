@@ -196,6 +196,29 @@ class App:
     def request_backup_remove(self, item_id: str) -> None:
         self.send({"cmd": "request", "action": "backup_remove", "id": item_id})
 
+    # The assistant (needs the 'assistant' permission - NOT 'system', and no network). A blocking
+    # round trip: the OS asks the owner's password (once per app instance), makes the connection
+    # itself and answers {"cmd": "assistant", "ok": bool, "text" | "error"}. Returns (ok, text or a
+    # short reason: not-configured / refused / unreachable / bad-reply).
+    def assistant(self, system: str, messages: list) -> tuple:
+        try:
+            self.send({"cmd": "request", "action": "assistant", "system": system, "messages": messages})
+        except OSError:
+            return (False, "unreachable")
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return (False, "unreachable")
+            if ev.get("cmd") == "assistant":
+                if ev.get("ok") is True and isinstance(ev.get("text"), str):
+                    return (True, ev["text"])
+                err = ev.get("error")
+                return (False, err if isinstance(err, str) else "refused")
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return (False, "unreachable")
+            self._queue.append(ev)
+
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch
         didn't provide one. It is wiped the moment this app's process ends -

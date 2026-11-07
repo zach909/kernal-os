@@ -19,7 +19,7 @@ def requested():
     cur = None
     for ln in _read("REQUESTED_CAPABILITIES.txt"):
         if ln.startswith("## "):
-            cur = ln[3:].split(" / ")[0]
+            cur = ln[3:].rsplit(" / ", 1)[0]
             out.setdefault(cur, [])
         elif ln.strip():
             out[cur].append(ln)

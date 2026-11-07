@@ -27,6 +27,9 @@ class Host:
     def keys(self, space: Optional[str] = None) -> list: raise NotImplementedError
     def delete(self, key: str, space: Optional[str] = None) -> bool: raise NotImplementedError
     def exit(self, code: int = 0) -> None: raise NotImplementedError
+    def assistant(self, system: str, messages: list) -> tuple:
+        """Ask the OS's assistant (no network for the app). -> (ok, text or short reason)."""
+        return (False, "not-configured")
     def present(self, canvas) -> None: raise NotImplementedError
 
 
@@ -52,6 +55,7 @@ class AppHost(Host):
     def keys(self, space=None): return self.app.vault_keys(space)
     def delete(self, key, space=None): return self.app.vault_delete(key, space)
     def exit(self, code=0): self.app.exit(code)
+    def assistant(self, system, messages): return self.app.assistant(system, messages)
 
 
 class FakeHost(Host):
@@ -59,6 +63,8 @@ class FakeHost(Host):
 
     def __init__(self, keys: list | str = (), width: int = 80, height: int = 22, data=None, mode: str = "tui", storage=None):
         self.width, self.height, self.mode = width, height, mode
+        self.assistant_fn = None            # tests inject (system, messages) -> (ok, text); default: not configured
+        self.assistant_calls: list = []
         self.storage = storage              # a real kos.spaces.AppStorage: shared spaces are then truly enforced
         self.spaces: dict = {}              # without storage, spaces are plain in-memory dicts
         self.data: dict = dict(data or {})
@@ -130,6 +136,9 @@ class FakeHost(Host):
             v = self._vault(space, "delete"); return bool(v and v.delete(key))
         return (self.spaces.setdefault(space, {}) if space else self.data).pop(key, None) is not None
     def exit(self, code=0): self.exited = code
+    def assistant(self, system, messages):
+        self.assistant_calls.append((system, [dict(m) for m in messages]))
+        return self.assistant_fn(system, messages) if self.assistant_fn else (False, "not-configured")
 
     @property
     def text(self) -> str:
