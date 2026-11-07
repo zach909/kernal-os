@@ -74,7 +74,6 @@ def sealed_memfd(label: str, data: bytes) -> int:
         # Fail closed: never hand out a memfd the kernel did not actually seal.
         if fcntl.fcntl(fd, F_GET_SEALS) & ALL_SEALS != ALL_SEALS:
             raise OSError("memfd sealing did not take effect")
-        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL)
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)
