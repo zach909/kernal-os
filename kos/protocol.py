@@ -24,6 +24,8 @@ OS -> app
                        system app) was switched on for *this* app with `kos extend`. Data, never code:
                        what to do with it is up to the app. See extensions.py.
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
+    {"cmd": "assistant", "ok": true, "text": str} | {"cmd": "assistant", "ok": false,
+                          "error": "not-configured"|"refused"|"unreachable"|"bad-reply"}   (answer to request assistant)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
     {"cmd": "quit"}
@@ -41,6 +43,12 @@ app -> OS
                                          the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
+    {"cmd": "request", "action": "assistant", "system": str<=2000,
+                       "messages": [{"role": "user"|"assistant", "content": str<=4000}, ...]}
+                                         ask the owner's chosen model (needs the narrow 'assistant' permission,
+                                         NOT 'system'; the OS asks the password once per app instance and makes
+                                         the connection itself - the app gets no network). At most 20 messages,
+                                         24000 characters. Anything else is refused.
     {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
                                          durable storage: the app's private data ('storage' permission) or a
                                          shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
@@ -137,6 +145,36 @@ def _op(op: Any) -> list:
     raise ProtocolError(f"bad draw op {kind!r}")
 
 
+MAX_ASSIST_SYSTEM, MAX_ASSIST_CONTENT, MAX_ASSIST_MESSAGES, MAX_ASSIST_TOTAL = 2000, 4000, 20, 24000
+_ASSIST_CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def _assist_text(s: Any, limit: int, what: str) -> str:
+    """Strict: too long is refused, not cut. Newlines stay (it is a chat); other control chars go."""
+    if not isinstance(s, str) or len(s) > limit:
+        raise ProtocolError(f"request.{what} must be text of at most {limit} characters")
+    return _ASSIST_CONTROL_RE.sub("", s.replace("\t", " "))
+
+
+def _assistant(msg: dict) -> dict:
+    if set(msg) - {"cmd", "action", "system", "messages"}:
+        raise ProtocolError("request.assistant takes only system and messages")
+    system = _assist_text(msg.get("system", ""), MAX_ASSIST_SYSTEM, "system")
+    messages = msg.get("messages")
+    if not isinstance(messages, list) or not 1 <= len(messages) <= MAX_ASSIST_MESSAGES:
+        raise ProtocolError(f"request.messages must be a list of 1 to {MAX_ASSIST_MESSAGES} messages")
+    out, total = [], 0
+    for m in messages:
+        if not isinstance(m, dict) or set(m) != {"role", "content"} or m["role"] not in ("user", "assistant"):
+            raise ProtocolError("each message must be {role: user|assistant, content: text}")
+        content = _assist_text(m["content"], MAX_ASSIST_CONTENT, "messages content")
+        total += len(content)
+        out.append({"role": m["role"], "content": content})
+    if total > MAX_ASSIST_TOTAL:
+        raise ProtocolError(f"request.messages are too long in total (limit {MAX_ASSIST_TOTAL} characters)")
+    return {"cmd": "request", "action": "assistant", "system": system, "messages": out}
+
+
 def _request(msg: dict) -> dict:
     action = msg.get("action")
     if action == "apps":
@@ -163,6 +201,8 @@ def _request(msg: dict) -> dict:
         if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
             raise ProtocolError("request.id must be an open instance id")
         return {"cmd": "request", "action": action, "id": ident}
+    if action == "assistant":
+        return _assistant(msg)
     if action == "backup":
         return {"cmd": "request", "action": "backup"}
     if action == "backup_add":

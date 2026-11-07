@@ -79,6 +79,8 @@ ACTIONS: dict[str, str] = {
     "app.extend": "switch on an extension for an app",
     "app.mod": "let a mod modify a system app",
     "app.unextend": "switch off an extension or mod",
+    "assistant.config": "change the assistant",
+    "assistant.ask": "let an app use the assistant",
 }
 
 

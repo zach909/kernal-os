@@ -1,0 +1,821 @@
+## Complete Software Capability Inventory / 1. Office and Productivity
+Word processing
+Document creation and editing
+Spreadsheet creation and management
+Mathematical calculations
+Data tables
+Presentation creation
+Slide editing
+PDF creation and editing
+Form creation
+Survey creation
+Digital notebooks
+Note-taking
+Document collaboration
+Document version history
+Desktop publishing
+Diagram creation
+Whiteboard collaboration
+## Complete Software Capability Inventory / 2. Communication
+Email management
+Email composition
+Email filtering
+Contact management
+Instant messaging
+Group messaging
+Voice calling
+Video calling
+Video conferencing
+Screen sharing
+Meeting scheduling
+Meeting transcription
+Meeting recording
+Team communication
+Discussion forums
+Appointment scheduling
+## Complete Software Capability Inventory / 3. Artificial Intelligence
+General-purpose AI assistance
+Conversational AI
+AI-powered search
+AI writing assistance
+AI document analysis
+AI research assistance
+AI image generation
+AI video generation
+AI audio generation
+Speech recognition
+Speech synthesis
+Language translation
+Image recognition
+Video recognition
+Natural language processing
+Machine learning
+Neural network development
+Large language models
+Small language models
+AI model training
+AI model fine-tuning
+AI model deployment
+AI agent development
+Multi-agent coordination
+Agent orchestration
+Retrieval-augmented generation
+AI workflow automation
+On-device AI processing
+Private cloud AI processing
+## Complete Software Capability Inventory / 4. Cloud Infrastructure
+Cloud computing
+Virtual machine hosting
+Application hosting
+Website hosting
+Serverless computing
+Container hosting
+Container orchestration
+Cloud file storage
+Object storage
+Database hosting
+Relational databases
+NoSQL databases
+Distributed databases
+Data warehousing
+Cloud networking
+Content delivery
+API hosting
+Message queues
+Event processing
+Cloud backups
+Disaster recovery
+Infrastructure monitoring
+Application monitoring
+Resource management
+## Complete Software Capability Inventory / 5. Software Development
+Integrated development environments
+Source-code editors
+Programming languages
+Software development kits
+Application frameworks
+User interface frameworks
+Mobile application development
+Desktop application development
+Web application development
+Backend development
+Frontend development
+Database development
+API development
+Version control
+Code repositories
+Code review
+Automated testing
+Continuous integration
+Continuous deployment
+Build systems
+Package management
+Dependency management
+Debugging
+Performance profiling
+Application distribution
+Beta testing
+Software documentation
+## Complete Software Capability Inventory / 6. Business Applications
+Customer relationship management
+Enterprise resource planning
+Human resource management
+Employee management
+Business process management
+Project management
+Task management
+Workflow management
+Inventory management
+Financial management
+Accounting
+Invoicing
+Procurement
+Sales management
+Customer support
+Customer service
+Business intelligence
+Enterprise reporting
+Business application development
+Organizational collaboration
+## Complete Software Capability Inventory / 7. Data and Analytics
+Data collection
+Data storage
+Data processing
+Data transformation
+Data cleaning
+Data integration
+Data visualization
+Interactive dashboards
+Statistical analysis
+Predictive analytics
+Business analytics
+Real-time analytics
+Log analysis
+Data querying
+Data mining
+Data pipelines
+Data synchronization
+Data governance
+Data cataloging
+Data exploration
+## Complete Software Capability Inventory / 8. Automation
+Workflow automation
+Task automation
+Script execution
+Scheduled tasks
+Event-driven automation
+Application integration
+Process orchestration
+Robotic process automation
+Form automation
+Document automation
+Email automation
+Notification automation
+AI-powered automation
+Visual automation builders
+Low-code development
+No-code development
+Command-line automation
+## Complete Software Capability Inventory / 9. Security and Identity
+User authentication
+Multi-factor authentication
+Single sign-on
+Identity management
+Access management
+Role-based permissions
+Device management
+Endpoint protection
+Malware detection
+Threat detection
+Threat intelligence
+Network security
+Application security
+Data encryption
+Credential management
+Password management
+Security auditing
+Compliance management
+Data loss prevention
+Security monitoring
+Backup protection
+Privacy management
+## Complete Software Capability Inventory / 10. Creative Applications
+Image editing
+Graphic design
+Vector illustration
+Digital drawing
+Photo management
+Photo enhancement
+Video editing
+Motion graphics
+Visual effects
+Video compression
+Audio recording
+Audio editing
+Music production
+Digital audio workstations
+Sound synthesis
+3D modeling
+3D asset conversion
+Animation
+Augmented reality content creation
+Spatial content creation
+## Complete Software Capability Inventory / 11. Internet and Information Services
+Web browsing
+Search engines
+Information discovery
+News aggregation
+Mapping
+Navigation
+Geographic information systems
+Satellite imagery
+Translation
+Digital libraries
+Academic research
+Online shopping
+Travel search
+Financial information
+Website analytics
+Advertising management
+Digital publishing
+Content management
+Video streaming
+Music streaming
+Podcast distribution
+## Complete Software Capability Inventory / 12. Operating System and System Utilities
+Operating system management
+File management
+Storage management
+Process management
+Memory management
+System monitoring
+System configuration
+Software installation
+Software updates
+Driver management
+Command-line interfaces
+Terminal emulation
+Backup and restoration
+System recovery
+Application permissions
+Accessibility services
+Screen recording
+Screenshot capture
+Device synchronization
+Resource monitoring
+## Complete Software Capability Inventory / 13. Personal Organization
+Digital calendars
+Reminders
+Personal task lists
+Scheduling
+Journaling
+Personal notes
+Contact directories
+Personal file storage
+Password vaults
+Personal information management
+Habit tracking
+Time management
+Appointment management
+## Complete Software Capability Inventory / 14. Mobile and Cross-Platform Development
+Mobile operating systems
+Desktop operating systems
+Web-based applications
+Cross-platform application frameworks
+Mobile application packaging
+Application signing
+Application distribution
+Application store management
+Push notifications
+Background services
+Mobile permissions
+Device synchronization
+Offline application support
+Cross-device continuity
+## Complete Software Capability Inventory / 15. Digital Services and Platforms
+Cloud account management
+Subscription management
+Digital payments
+Digital wallets
+Online identity
+Content distribution
+Application marketplaces
+Digital licensing
+Customer account management
+Cloud synchronization
+Remote access
+Device enrollment
+Enterprise administration
+## Complete Software Capability Inventory / 16. Collaboration and Knowledge Management
+Shared workspaces
+Knowledge bases
+Internal documentation
+Collaborative editing
+Shared file management
+Document approval
+Discussion management
+Knowledge discovery
+Organizational search
+Content indexing
+Information retrieval
+Team workspaces
+Collaborative planning
+Version tracking
+## Complete Software Capability Inventory / 17. Advanced Computing
+Machine learning infrastructure
+GPU computing
+Distributed computing
+Parallel processing
+Edge computing
+Federated learning
+Model compression
+Model quantization
+Hardware acceleration
+Scientific computing
+Simulation
+Spatial computing
+Computer vision
+Natural language understanding
+Predictive modeling
+## Complete Software Capability Inventory / 18. Education and Learning
+Online learning
+Course management
+Educational content creation
+Digital classrooms
+Student assessment
+Interactive learning
+Programming education
+Research management
+Collaborative study
+Digital textbooks
+Learning analytics
+Training management
+## Complete Software Capability Inventory / 19. Monitoring and Administration
+Centralized administration
+User provisioning
+Permission administration
+System health monitoring
+Performance monitoring
+Resource utilization monitoring
+Application diagnostics
+Error reporting
+Audit logging
+Configuration management
+Policy enforcement
+Remote administration
+Fleet management
+Update management
+## Complete Software Capability Inventory / 20. Integration and Extensibility
+Plugin systems
+Extension systems
+Public APIs
+Internal APIs
+Webhooks
+Third-party integrations
+Software connectors
+Data import
+Data export
+File format conversion
+Interoperability
+Service orchestration
+Modular application architecture
+Extensible application frameworks
+## Device software - factory-installed application functions / Device and System Management
+Configure device settings
+Manage applications and permissions
+Manage storage and memory
+Monitor battery usage
+Manage wireless and network connections
+Manage user accounts
+Manage device security and privacy
+Install system updates
+Back up and restore device data
+Browse and organize files
+Manage notifications
+Customize the home screen and lock screen
+Search across the device
+Manage accessibility features
+Manage connected devices
+## Device software - factory-installed application functions / Communication
+Make and receive phone calls
+Send and receive text messages
+Manage contacts
+Manage voicemail
+Send and receive email
+Make video and audio calls
+Share contact information
+Filter unwanted communications
+## Device software - factory-installed application functions / Internet and Information
+Browse websites
+Search the internet
+Perform visual searches
+Translate languages
+Scan QR codes
+Provide an intelligent voice assistant
+Provide voice dictation
+## Device software - factory-installed application functions / Photography and Media
+Capture photographs
+Record videos
+Browse and organize photographs
+Edit images and videos
+Create image collections
+Play music and audio
+Watch movies and television
+Stream video content
+Listen to podcasts
+Record audio
+Preview documents and images
+## Device software - factory-installed application functions / Productivity
+Create and edit documents
+Create and manage spreadsheets
+Create presentations
+Create notes
+Manage calendars
+Manage reminders and tasks
+Set alarms and timers
+Record voice memos
+Manage passwords and authentication credentials
+Store and organize files
+Perform mathematical calculations
+Scan documents
+Measure physical objects
+Create automated workflows
+Draw and create digital designs
+Maintain a personal journal
+Read digital books
+## Device software - factory-installed application functions / Maps and Location
+Display interactive maps
+Provide driving directions
+Provide walking and cycling directions
+Provide public transportation directions
+Display traffic conditions
+Find nearby businesses and services
+Share device location
+Locate lost devices
+Track frequently visited places
+## Device software - factory-installed application functions / Health and Wellness
+Store health information
+Track physical activity
+Monitor sleep information
+Track fitness goals
+Manage medication information
+Record health measurements
+Provide emergency medical information
+Connect compatible health devices
+## Device software - factory-installed application functions / Financial and Digital Services
+Store digital payment credentials
+Make contactless payments
+Store tickets and boarding passes
+Store supported digital identification
+Track financial markets
+Purchase digital content
+Manage subscriptions
+## Device software - factory-installed application functions / Smart Home and Connectivity
+Control compatible smart home devices
+Manage home automation
+Connect wireless accessories
+Manage connected wearable devices
+Share files between nearby devices
+Control compatible media devices
+Manage digital keys
+Manage home security accessories
+## Device software - factory-installed application functions / Entertainment and Learning
+Discover and play games
+Read news articles
+Access educational content
+Read digital books
+Discover creative activities
+Access digital entertainment
+Learn about device features
+## General desktop applications / Productivity
+Word processing
+Spreadsheet editor
+Presentation creator
+Plain text editor
+Rich text editor
+Document viewer
+PDF viewer
+Document scanner
+Notes and notepad
+Sticky notes
+Task manager
+To-do lists
+Calendar
+Contacts
+Email client
+Personal information manager
+Calculator
+Dictionary
+Reference library
+Desktop publishing
+## General desktop applications / Internet and Communication
+Internet browser
+Email and messaging
+Video calling
+Voice calling
+Contact synchronization
+Device synchronization
+Wireless file transfer
+Network sharing
+Remote desktop access
+Screen sharing
+Online account management
+Application marketplace
+## General desktop applications / Media and Entertainment
+Photo viewer
+Photo library manager
+Image editor
+Video player
+Video editor
+Audio player
+Audio recorder
+Voice recorder
+Music library manager
+Podcast player
+Television and video streaming
+Movie player
+Webcam application
+Photo booth
+Music creation studio
+Media file converter
+Disc player
+## General desktop applications / Creative Applications
+Digital drawing
+Image creation
+Video production
+Audio production
+Music composition
+Graphic design
+Color management
+Font management
+Presentation design
+Freeform drawing canvas
+Mathematical graphing
+## General desktop applications / System Management
+System settings
+File manager
+Application manager
+Device manager
+Storage management
+Disk management
+Disk partitioning
+Backup and recovery
+System migration
+System information
+Activity monitor
+Process monitor
+Resource monitor
+Network monitor
+Software updates
+Printer management
+Bluetooth management
+Wireless network management
+Power management
+User account management
+Security center
+Firewall management
+Password manager
+Credential manager
+## General desktop applications / Development and Automation
+Command-line terminal
+Script editor
+Task automation
+Workflow automation
+Application installer
+Package management
+System configuration tools
+Developer utilities
+Mathematical equation editor
+Programming calculator
+## General desktop applications / Screen and Accessibility
+Screenshot capture
+Screen recording
+Screen magnification
+Screen reader
+Voice control
+Speech recognition
+Text-to-speech
+Accessibility settings
+Color identification
+Display calibration
+Screen time management
+Focus management
+## General desktop applications / Organization and Personal Management
+Reminders
+Alarm clock
+Stopwatch
+Countdown timer
+World clock
+Weather
+Maps
+Navigation
+Location services
+News reader
+Financial market tracker
+Journal
+Home device management
+Game library
+Chess
+Casual games
+## General desktop applications / Support and Maintenance
+Help center
+Troubleshooting
+Feedback submission
+Remote assistance
+System diagnostics
+Error reporting
+System logs
+Console
+Device configuration
+File recovery
+Data transfer
+Migration assistant
+Print queue management
+## General desktop applications / Additional System Utilities
+Font installer
+Audio device configuration
+MIDI configuration
+Color profile management
+Digital color measurement
+Directory services management
+Bluetooth file exchange
+Wireless device configuration
+Optical disc utilities
+Voice accessibility configuration
+Window management
+Desktop workspace management
+Application shortcuts
+File indexing
+Search utility
+## Headset / spatial device software / Items 1-100
+Home Environment
+Virtual Desktop
+Application Library
+App Store
+Web Browser
+Settings
+File Manager
+Photo Gallery
+Video Player
+Music Player
+Media Library
+Camera
+Screen Recording
+Screenshot Tool
+Voice Assistant
+Voice Recorder
+Notifications
+Quick Settings
+User Profile
+Account Management
+Device Management
+Network Settings
+Wi-Fi Management
+Bluetooth Management
+Controller Configuration
+Hand Tracking
+Eye Tracking
+Face Tracking
+Spatial Tracking
+Guardian / Boundary Setup
+Room Calibration
+Floor Calibration
+Play Area Setup
+Movement Calibration
+Accessibility Settings
+Display Settings
+Audio Settings
+Microphone Settings
+Language Settings
+Privacy Settings
+Security Settings
+Permission Manager
+Storage Manager
+Battery Manager
+Device Update Manager
+Application Update Manager
+System Diagnostics
+Device Help
+Tutorials
+User Guide
+Remote Assistance
+Casting / Screen Sharing
+Wireless Streaming
+Virtual Keyboard
+Text Input
+Communication
+Video Calling
+Messaging
+Contacts
+Calendar
+Clock
+Timer
+Stopwatch
+Weather
+Calculator
+Notes
+Tasks
+Social Spaces
+Multiplayer Hub
+Avatar Customization
+Virtual Meeting Rooms
+Education Environment
+3D Model Viewer
+Spatial Workspace
+Immersive Environments
+Meditation Environment
+Fitness Environment
+Exercise Tracking
+Travel Experiences
+Interactive Experiences
+360-Degree Video Viewer
+3D Video Viewer
+Mixed Reality Viewer
+Passthrough View
+Environment Customization
+Background Customization
+Sound Environment
+Device Pairing
+Controller Pairing
+Companion Device Connection
+Cloud Synchronization
+Backup and Restore
+Data Management
+Parental Controls
+Digital Wellbeing
+Usage Statistics
+Troubleshooting
+System Recovery
+Power Management
+System Information
+## Neural interface applications / CORE APPLICATIONS
+Neural Signal Monitor
+Neural Signal Processor
+Intent Recognition
+Thought-to-Text
+Speech Interface
+Neural Keyboard
+Neural Mouse
+Neural Navigation
+Motor Control
+Prosthetic Control
+Sensory Feedback
+Neurofeedback
+Memory Assistance
+Attention Monitor
+Sleep Monitor
+Environmental Control
+Mobility Control
+Rehabilitation Training
+Neural Learning
+Adaptive Calibration
+Neural Communication
+Visual Interface
+Audio Interface
+Haptic Interface
+Neural Gaming
+Creative Interface
+Cognitive Training
+Neural Analytics
+Signal Diagnostics
+Neural Security
+Device Integration
+Neural Data Manager
+Real-Time Translation
+Feedback Controller
+Neural Research Laboratory
+## Neural interface applications / SYSTEM APPLICATIONS
+Neural Operating Environment
+Application Launcher
+Settings and Configuration
+Permissions Manager
+Profile Manager
+Identity Management
+Data Visualization
+Event History
+Device Management
+Software Development Kit
+Automation Engine
+Accessibility Center
+Privacy Manager
+Diagnostics Center
+Update Manager
+## Neural interface applications / TECHNICAL SERVICES
+Signal Acquisition
+Signal Filtering
+Feature Extraction
+Neural Decoding
+Intent Classification
+Real-Time Processing
+Feedback Generation
+Device Communication
+Neural Calibration
+Data Encryption
+Data Storage
+Data Synchronization
+Model Training
+Model Evaluation
+Pattern Recognition
+Signal Reconstruction
+Error Detection
+Hardware Monitoring

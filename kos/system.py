@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import backup, cache
+from . import assistant, backup, cache
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
@@ -153,18 +153,78 @@ class SystemBridge:
     """Answers one app's ``request`` commands. ``handle`` returns a switch
     target - ``("instance", id)`` - when the request moves the desktop."""
 
-    def __init__(self, paths: Paths, spawner: Callable = spawn):
+    def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
+                 system: bool = True, assistant: bool = False, opener=None):
         self.paths = paths
         self._spawner = spawner
+        self.app = app or "app"
+        self.system = system             # manifest 'system' permission (set by the OS)
+        self.assistant = assistant       # manifest 'assistant' permission: ONLY the assistant request
+        self._opener = opener            # tests only; the real one is assistant.make_opener()
+        # The assistant grant lasts for this app instance (this session) only. It is bound to the
+        # endpoint it was given for: switching the backend asks again. A refusal is remembered too,
+        # so an app cannot nag the owner with password prompts.
+        self._granted: Optional[tuple] = None
+        self._refused: Optional[tuple] = None
+
+    def _assistant(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
+        def fail(code: str) -> None:
+            reply({"cmd": "assistant", "ok": False, "error": code})
+
+        def audit(kind: str, outcome: str) -> bool:
+            try:
+                authority.audit.record("assistant.ask", f"{self.app} {kind}", outcome)
+                return True
+            except OSError:
+                return False                 # cannot log it, so it does not happen
+
+        if not self.assistant:
+            audit("-", "refused")
+            return fail("refused")
+        cfg = assistant.load(self.paths)
+        kind = cfg["active"]
+        if kind == "off":
+            audit(kind, "refused")
+            return fail("not-configured")
+        try:
+            assistant.build_request(cfg, "", [{"role": "user", "content": "x"}])   # policy + completeness, no network
+        except assistant.AssistantError as e:
+            audit(kind, "refused")
+            return fail(e.code)
+        fp = assistant.fingerprint(cfg)
+        if self._refused == fp:
+            audit(kind, "refused")
+            return fail("refused")
+        if self._granted != fp:
+            try:
+                authority.authorize("assistant.ask", f"{self.app} ({kind})").close()   # audits itself
+            except (AuthorizationDenied, AuthError):
+                self._refused = fp
+                return fail("refused")
+            self._granted = fp
+        if not audit(kind, "allowed"):
+            return fail("refused")
+        try:
+            text = assistant.ask(cfg, req["system"], req["messages"], opener=self._opener)
+        except assistant.AssistantError as e:
+            audit(kind, "failed:" + e.code)
+            return fail(e.code)
+        reply({"cmd": "assistant", "ok": True, "text": text})
 
     def handle(self, req: dict, reply: Callable[[dict], None],
                authority: Authority) -> Optional[tuple[str, str]]:
         action = req["action"]
+        if action == "assistant":
+            self._assistant(req, reply, authority)
+            return None
 
         def result(ok: bool, detail: str, **extra) -> None:
             reply({"cmd": "result", "action": action, "ok": ok,
                    "detail": clean_text(detail, 300), **extra})
 
+        if not self.system:
+            result(False, "this app does not have the 'system' permission")
+            return None
         try:
             if action == "apps":
                 reply({"cmd": "apps", "installed": list_apps(self.paths),

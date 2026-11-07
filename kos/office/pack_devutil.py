@@ -81,7 +81,7 @@ def _suite(title: str, key: str, tools: list, intro: list, role: str = ""):
                 extra = {"ctrl-r": run}
                 if role == "owner":
                     def keep(ed):
-                        ok = shared_add(SpaceHost(host, "logs"), "logs", {"name": f"{label[:20]} {time.strftime('%Y-%m-%d %H:%M')}", "text": ed.area.text[:CAP]})
+                        ok = shared_add(host, "logs", {"name": f"{label[:20]} {time.strftime('%Y-%m-%d %H:%M')}", "text": ed.area.text[:CAP]})
                         ed.flash = "saved to the logs folder" if ok else "could not save (folder full or refused)"
                     extra["ctrl-g"] = keep
                 return ("push", Editor(label, text, on_save=save, extra_keys=extra,
@@ -89,7 +89,7 @@ def _suite(title: str, key: str, tools: list, intro: list, role: str = ""):
             return go
 
         def pick_log():
-            items = [r for r in shared_items(SpaceHost(host, "logs"), "logs") if isinstance(r.get("text"), str)][:200]
+            items = [r for r in shared_items(host, "logs") if isinstance(r.get("text"), str)][:200]
             if not items:
                 return ("push", Message("Saved logs", NO_LOGS))
 
@@ -301,7 +301,7 @@ def t_time(text):
 def _json(text):
     try:
         return json.loads(text)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
         raise ValueError(f"invalid JSON: {e}")
 
 
@@ -458,6 +458,7 @@ LEVELS = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"]
 _LVRX = re.compile(r"\b(TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|CRIT(?:ICAL)?|FATAL|ALERT|EMERG|PANIC)\b", re.I)
 _BADRX = re.compile(r"\b(fail(?:ed|ure)?|denied|exception|traceback|refused)\b", re.I)
 _ACC = re.compile(r'^(\S+) \S+ \S+ \[(\d{1,2})/(\w{3})/(\d{4}):(\d\d):(\d\d):(\d\d) ([+-]\d{4})\] "([^"]*)" (\d{3}) (\d+|-)(?: "([^"]*)" "([^"]*)")?')
+_LEAD = re.compile(r"^[\[(]?(?:TRACE|DEBUG|INFO|NOTICE|WARN(?:ING)?|ERROR|ERR|CRIT(?:ICAL)?|FATAL)[\])]?:?\s+", re.I)
 _ISOL = re.compile(r"^(\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?)\s*(.*)$")
 _SYS = re.compile(r"^([A-Z][a-z]{2})\s+(\d{1,2}) (\d\d):(\d\d):(\d\d) (\S+) ([^:\[\s]+)(?:\[\d+\])?: ?(.*)$")
 
@@ -517,7 +518,8 @@ def parse_line(line: str, n: int = 0, year: int = 1970) -> dict | None:
         return r
     m = _ISOL.match(s)
     if m:
-        r.update(fmt="iso", ts=_iso(m.group(1)), msg=m.group(2) or s, level=_level(m.group(2)))
+        rest = m.group(2)
+        r.update(fmt="iso", ts=_iso(m.group(1)), msg=_LEAD.sub("", rest) or rest or s, level=_level(rest))
         return r
     m = _SYS.match(s)
     if m and m.group(1).lower() in _MON:

@@ -1121,7 +1121,7 @@ def _env(text):
             q = re.match(r"'([^']*)'\s*(?:#.*)?$", v)
             if not q: errs.append((n, "unterminated quote or text after the closing quote")); continue
             v = q[1]
-        else: v = re.split(r"\s+#", v, 1)[0].strip()
+        else: v = re.split(r"\s+#", v, maxsplit=1)[0].strip()
         if k in out: errs.append((n, f"duplicate key {k}")); continue
         out[k] = v
     return out, errs
@@ -1132,6 +1132,7 @@ def _ini(text):
     cp.optionxform = str
     try: cp.read_string(text)
     except configparser.ParsingError as e:
+        if getattr(e, "lineno", None): return None, [(e.lineno, str(e).splitlines()[0][:80])]
         errs = [(a, f"cannot parse: {b.strip()[:60]!r}") for a, b in (getattr(e, "errors", None) or []) if isinstance(a, int)]
         return None, errs or [(None, str(e).splitlines()[0])]
     except configparser.Error as e: return None, [(getattr(e, "lineno", None), str(e).splitlines()[0])]

@@ -144,7 +144,7 @@ class Parse(unittest.TestCase):
 class Screens(unittest.TestCase):
     def test_lab_demo_flow(self):
         h = drive("Signal Lab", ["down", "enter", "escape", "6", "escape", "7", "escape", "8", "enter", "escape", "escape"]
-                  + ["down"] * 15 + ["5", "0", "enter", "escape", "ctrl-q"])
+                  + ["down"] * 14 + ["enter", "5", "0", "enter", "escape", "ctrl-q"])
         # after the notch the working copy has the 50 Hz component removed
         self.assertTrue(any("Applied" in f[0] for f in h.frames))
         self.assertIn("lab", h.keys())

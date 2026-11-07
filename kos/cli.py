@@ -218,6 +218,16 @@ def _lazy_authority(paths: Paths):
     return get, made
 
 
+def _bridge_for(paths: Paths, name: str, perms, system: bool | None = None):
+    """The OS's side of an app's ``request`` commands, or None. ``system`` and ``assistant`` are
+    separate: an app with only ``assistant`` can ask for the assistant and nothing else."""
+    system = "system" in perms if system is None else system
+    assistant = "assistant" in perms
+    if not (system or assistant):
+        return None
+    return SystemBridge(paths, app=name, system=system, assistant=assistant)
+
+
 def cmd_run(args, paths: Paths) -> int:
     from . import cache, layers
     from .protocol import Channel
@@ -248,7 +258,7 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        bridge = _bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
@@ -297,12 +307,12 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
     perms = ()
     try:
         perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
     except (KAppError, OSError):
         pass
+    bridge = _bridge_for(paths, inst.name, perms, system=inst.system)   # system: set by the OS at open time
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
@@ -682,6 +692,57 @@ def cmd_aios(args, paths: Paths) -> int:
     print(out.get("text", ""))
     status = out.get("status")
     return 0 if status == "ran" else 4 if status == "held" else 1
+
+
+def cmd_assistant(args, paths: Paths) -> int:
+    """The swappable assistant every suite app can use (Ctrl-N). `kos assistant status` shows what it
+    is (no password, never the key); `use`, `set` and `test` need your password. The OS makes the
+    connection - apps get no network for it. The API key is typed at a hidden prompt, never in argv."""
+    from . import assistant as A
+    op = args.op
+    if op == "status":
+        s = A.status(paths)
+        print(f"assistant : {s['active']}" + ("  (apps use their built-in offline tools)" if s["active"] == "off" else ""))
+        if s["active"] != "off":
+            print(f"endpoint  : {s['endpoint_host']}")
+            print(f"model     : {s['model']}")
+        if s["provider"]:
+            print(f"provider  : {s['provider']}")
+        print(f"api key   : {'set' if s['key_set'] else 'not set'}")
+        return 0
+    try:
+        if op == "set":       # refuse a bad endpoint before asking for anything
+            if args.kind == "local":
+                A.check_endpoint("local", args.endpoint)
+            else:
+                A.check_endpoint("api", args.endpoint or A.DEFAULT_ENDPOINTS[args.provider])
+        authority, prompter = _authority(paths)
+        if op == "use":
+            with authority.authorize("assistant.config", f"use {args.kind}"):
+                A.use(paths, args.kind)
+            print(f"assistant is now: {args.kind}")
+        elif op == "set":
+            with authority.authorize("assistant.config", f"set {args.kind}"):
+                if args.kind == "local":
+                    A.set_local(paths, args.endpoint, args.model)
+                else:
+                    raw = prompter.password("API key (typed hidden, stored unencrypted in this computer's KOS state): ")
+                    A.set_api(paths, args.provider, args.endpoint or "", args.model, (raw or b"").decode("utf-8", "replace").strip())
+            print(f"saved the {args.kind} settings (switch to it with: kos assistant use {args.kind})")
+        else:                 # test
+            with authority.authorize("assistant.config", "test"):
+                cfg = A.load(paths)
+                try:
+                    reply = A.ask(cfg, "You are a connection test. Reply with one short word.",
+                                  [{"role": "user", "content": "Say ok."}])
+                except A.AssistantError as e:
+                    print(f"error: {e.code}")
+                    return 1
+            print("ok: " + reply[:80].replace("\n", " "))
+    except (A.PolicyError, A.ConfigError) as e:
+        eprint(f"refused: {e}")
+        return 2
+    return 0
 
 
 def cmd_scan(args, paths: Paths) -> int:
@@ -1214,6 +1275,21 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--no-verify", action="store_true", help="skip the read-back comparison")
     u = us.add_parser("test", help="boot the image in QEMU attached as a USB stick")
     u.add_argument("image")
+    s = sub.add_parser("assistant", help="choose the model behind every app's assistant: off, local or api")
+    asub = s.add_subparsers(dest="op", required=True)
+    asub.add_parser("status", help="what the assistant is (no password, never shows the key)")
+    a = asub.add_parser("use", help="switch the assistant (password)")
+    a.add_argument("kind", choices=["off", "local", "api"])
+    a = asub.add_parser("set", help="set a backend up (password; the API key is typed hidden)")
+    ssub = a.add_subparsers(dest="kind", required=True)
+    a = ssub.add_parser("local", help="a model on this computer (OpenAI-compatible, loopback only)")
+    a.add_argument("--endpoint", required=True, help="http://127.0.0.1:PORT/v1/chat/completions")
+    a.add_argument("--model", required=True)
+    a = ssub.add_parser("api", help="someone else's model over https")
+    a.add_argument("--provider", required=True, choices=["anthropic", "openai"])
+    a.add_argument("--endpoint", default="", help="https URL (default: the provider's)")
+    a.add_argument("--model", required=True)
+    asub.add_parser("test", help="send one harmless message through the same policy (password)")
     s = sub.add_parser("aios", help="AI OS: button clicker, app commands, kernel commands, skill maker")
     s.add_argument("layer", choices=["status", "gui", "app", "kernel", "skill"])
     s.add_argument("words", nargs="*")
@@ -1233,7 +1309,7 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
+    "assistant": cmd_assistant, "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
 
 
 def main(argv: list[str] | None = None) -> int:
