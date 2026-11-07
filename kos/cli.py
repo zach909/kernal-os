@@ -706,17 +706,18 @@ def cmd_ai(args, paths: Paths) -> int:
     """`kos ai set|show|clear`: the one model endpoint the OS may send text to. Every form needs the
     password. Asking the AI is not a command: it is the `ai` app, or any app with the `ai` permission."""
     from . import ai
-    authority, _ = _authority(paths)
     if args.what == "set":
+        ai.check_endpoint(args.url)                       # refuse a bad address before any prompt
         key = os.environ.get("KOS_AI_KEY", "")         # never on the command line: argv is public
         if not key and not args.url.startswith("http://") and sys.stdin.isatty():
             import getpass
             key = getpass.getpass("API key (hidden): ")
-        ai.check_endpoint(args.url)                       # refuse a bad address before any password
+        authority, _ = _authority(paths)
         with authority.authorize("ai.config", "set"):
             ep = ai.save(paths, args.url, args.provider, args.model, key.strip())
         print(f"AI set: {ep.provider} {ep.model} at {ep.host} ({'this computer' if ep.local else 'https'})")
         return 0
+    authority, _ = _authority(paths)
     if args.what == "clear":
         with authority.authorize("ai.config", "clear"):
             print("AI removed" if ai.clear(paths) else "no AI was set up")
