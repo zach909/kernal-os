@@ -16,6 +16,9 @@
     kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
     kos extend NAME                 switch an extension or mod on for the app it extends (password)
     kos extend --revoke NAME / --list
+    kos overlay order MOD...        set the load order of mod file layers, last wins (password)
+    kos overlay show [FOLDER]       the merged files and who provides each (password)
+    kos overlay conflicts           every file more than one mod provides, who wins (password)
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
@@ -582,6 +585,48 @@ def cmd_extend(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_overlay(args, paths: Paths) -> int:
+    """Mod file layers. The base is empty here: KOS has no core file set yet (see the README gaps),
+    so this merges mods only. Nothing is written but the load order, and that needs the password."""
+    from .overlay import BASE, Layer, OverlayConfig, OverlayError
+    from .protocol import escape_text
+    cfg = OverlayConfig(paths)
+    authority, _ = _authority(paths)
+    try:
+        if args.ovact == "order":
+            rules = {}
+            for r in args.rule or []:
+                prefix, _, names = r.partition("=")
+                rules[prefix] = [n for n in names.split(",") if n]
+            doc = cfg.save(authority, args.mods, rules)
+            print("load order (last wins): " + (" < ".join(e["name"] for e in doc["order"]) or "(none)"))
+            return 0
+        with authority.authorize("overlay.view"):
+            ov, skipped = cfg.build(Layer(BASE, {}))
+        for s in skipped:
+            eprint(f"  skipped {escape_text(s['name'], 40)}: {escape_text(s['why'], 100)}")
+        if args.ovact == "show":
+            folder = (args.folder or "").rstrip("/")
+            prefix = folder + "/" if folder else ""
+            names = ov.files() if args.deep else ov.listdir(folder)
+            for name in names:
+                if name.endswith("/"):
+                    print(f"  {escape_text(name, 240)}")
+                    continue
+                r = ov.resolve(name if args.deep else prefix + name)
+                print(f"  {escape_text(name, 240):40} {r.provider}"
+                      + (f"  (hides {', '.join(r.shadowed)})" if r.shadowed else ""))
+            return 0
+        found = ov.conflicts()
+        for c in found:
+            print(f"  {escape_text(c.path, 240)}: {c.winner or 'deleted'} wins over {', '.join(c.losers)}"
+                  + ("  (same bytes)" if c.identical else ""))
+        print(f"{len(found)} conflict(s)")
+        return 0
+    except OverlayError as e:
+        raise KAppError(str(e)) from None
+
+
 def cmd_permit(args, paths: Paths) -> int:
     """A permit is separate from the password: it's your standing decision
     that an app may run at all. It never skips the password - `run`/`open`
@@ -1110,6 +1155,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--revoke", action="store_true", help="switch it off")
     s.add_argument("--list", action="store_true", help="list what is switched on")
+    s = sub.add_parser("overlay", help="mod file layers: order | show | conflicts")
+    os_ = s.add_subparsers(dest="ovact", required=True)
+    o = os_.add_parser("order", help="set the load order (last wins); password")
+    o.add_argument("mods", nargs="*")
+    o.add_argument("--rule", action="append", metavar="PREFIX/=mod,mod",
+                   help="under PREFIX these mods win, last listed first priority")
+    o = os_.add_parser("show", help="the merged files and who provides each")
+    o.add_argument("folder", nargs="?")
+    o.add_argument("--deep", action="store_true", help="list every file, not one folder")
+    os_.add_parser("conflicts", help="files more than one mod provides")
     sub.add_parser("ps", help="list apps opened with 'kos open'")
     s = sub.add_parser("attach", help="attach your terminal to an open app")
     s.add_argument("id")
@@ -1227,7 +1282,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
+    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
     "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
     "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,

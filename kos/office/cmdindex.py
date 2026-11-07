@@ -35,6 +35,7 @@ COMMANDS = (
     ('ls', 'list a directory or a zip, without extracting', 'kos ls [-h] path'),
     ('open', 'open an app in the background: open [graphical|cmd] NAME', 'kos open [-h] [{graphical,cmd}] name'),
     ('optimize', 'reclaim disk space: recompress apps, prune dead state', 'kos optimize [-h]'),
+    ('overlay', 'mod file layers: order | show | conflicts', 'kos overlay [-h] {order,show,conflicts} ...'),
     ('owed', 'what earlier writes still owe (a scan, an optimize)', 'kos owed [-h]'),
     ('pack', 'build a .kapp from a directory', 'kos pack [-h] -o OUTPUT dir'),
     ('passwd', 'change your password', 'kos passwd [-h]'),

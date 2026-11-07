@@ -79,6 +79,8 @@ ACTIONS: dict[str, str] = {
     "app.extend": "switch on an extension for an app",
     "app.mod": "let a mod modify a system app",
     "app.unextend": "switch off an extension or mod",
+    "overlay.order": "set the load order of mod file layers",
+    "overlay.view": "look at the merged mod file layers",
 }
 
 
