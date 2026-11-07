@@ -7,6 +7,12 @@ line goes up (back). Esc exits.
 
 It only gets network access if you allowed it with your password at launch.
 
+Addresses: `kos go kos://web/example.com/news?page=2` opens this browser straight at
+example.com/news?page=2 - an app opened the way a browser opens a website.
+
+Extensions: an extension the owner switched on for this app (`kos extend NAME`) can add bookmarks,
+shown on the start page. They are data: entries whose address is `kos://web/SITE`.
+
 Every page it fetches goes through the same static scanner everything else
 in KOS goes through, before you ever see a byte of it: pages with a flagged
 pattern are still shown (the scanner is heuristic, not a reason to hide
@@ -20,6 +26,7 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+from kos.address import AddressError, parse as parse_address
 from kos.sdk import App
 from kos.scan import scan_bytes
 
@@ -28,6 +35,25 @@ MAX_PAGE = 2 << 20
 # Shown on every screen, including the empty start screen. A website you open
 # learns where the request came from; the browser says so instead of hiding it.
 IP_NOTICE = "Websites you visit can see your IP address."
+
+
+def start_target(address):
+    """The site a kos://web/SITE address asks for (``/example.com/news?p=2`` -> ``example.com/news?p=2``)."""
+    return address[1:] if address.startswith("/") and len(address) > 1 else ""
+
+
+def bookmarks(extensions):
+    """[(label, site)] from the switched-on extensions' entries that point at this browser."""
+    out = []
+    for item in extensions:
+        for e in item.get("entries", []):
+            try:
+                a = parse_address(e["address"])
+            except (AddressError, KeyError):
+                continue
+            if a.app == "web" and start_target(a.launch):
+                out.append((e["label"], start_target(a.launch)))
+    return out[:12]
 
 
 class Page(HTMLParser):
@@ -147,6 +173,12 @@ def main():
     for ev in app.events():
         cmd = ev["cmd"]
         rows = max(5, app.height - 4)
+        marks = bookmarks(app.extensions)
+        if cmd == "hello" and start_target(app.address):
+            try:
+                history.append(fetch(start_target(app.address)))
+            except Exception as e:
+                msg = f"error: {e}"
         if cmd == "key":
             k = ev["key"]
             if k == "escape":
@@ -159,6 +191,11 @@ def main():
                     target, typed = typed.strip(), ""
                     try:
                         history.append(fetch(target)); sel, viewing, msg = 0, False, ""
+                    except Exception as e:
+                        msg = f"error: {e}"
+                elif page is None and marks:
+                    try:
+                        history.append(fetch(marks[min(sel, len(marks) - 1)][1])); sel, msg = 0, ""
                     except Exception as e:
                         msg = f"error: {e}"
                 elif page and page.links and not viewing:
@@ -175,8 +212,8 @@ def main():
                     history.pop(); sel = 0
             elif k == "up":
                 sel = max(0, sel - 1)
-            elif k == "down" and page:
-                sel = min(len(page.links) - 1, sel + 1)
+            elif k == "down" and (page or marks):
+                sel = min((len(page.links) if page else len(marks)) - 1, sel + 1)
             elif len(k) == 1:
                 typed += k
         elif cmd == "button" and ev["pressed"] and page and not viewing:
@@ -186,6 +223,22 @@ def main():
                 sel = i
         page = history[-1] if history else None
         lines = build_lines(page, viewing, sel, rows, typed, msg)
+        if page is None:
+            lines = ["", "  Type a URL (e.g. example.com) and press Enter."]
+            if marks:
+                lines += ["", "  Bookmarks (from your extensions) - up/down, Enter:"]
+                for i, (label, site) in enumerate(marks):
+                    lines.append(("  > " if i == sel else "    ") + f"{label[:24]:<24} {site[:40]}")
+        elif viewing:
+            lines = [f"  {page.base}", ""] + ["  " + t for t in page.text][:rows]
+        else:
+            top = max(0, sel - rows + 1)
+            lines = [f"  {page.base}/", ""]
+            for i, (label, _) in enumerate(page.links[top:top + rows], top):
+                lines.append(("> " if i == sel else "  ") + f"[{label[:70]}]/")
+            if not page.links:
+                lines.append("  (empty folder: no links; type 'run' to view the page)")
+        lines += ["", f"  > {typed}_", f"  {msg}"]
         title = (page.title.strip() if page else "") or "web"
         scan_note = ""
         if page is not None and getattr(page, "scan", None) is not None:

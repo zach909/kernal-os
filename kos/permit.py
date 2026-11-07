@@ -1,24 +1,26 @@
-"""Run permission: a separate, persistent grant from the per-run password.
+"""Run permission: a standing grant, separate from the per-run password.
 
-The password proves it's really you, every single time. A permit is a
-different thing - your standing decision that a given app is *allowed to
-run at all*, recorded once so `run`/`open` can refuse an app you never
-permitted before they even get to the password prompt. Installing an app
-does not permit it; you decide separately, the same way a phone asks you to
-allow an app before its first launch.
+The password proves it's really you, every single time. A permit is your
+standing decision that a given app is *allowed to run at all*, recorded once
+so `run`/`open` can refuse an app you never permitted before they even get to
+the password prompt. Installing an app does not permit it; you decide
+separately, the same way a phone asks you to allow an app before its first
+launch.
 
-Stored as one small file per app; granting and revoking both still go
-through the password, same as everything else that changes state.
+It lives in the universal permission store (``permissions.py``) as resource
+``run``, together with the manifest permissions you approved: if an update asks
+for more than you approved, ``check_declared`` refuses until you permit again.
+Granting and revoking both still go through the password.
 """
 
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass
+from typing import Iterable, Optional
 
 from .kapp import NAME_RE, KAppError
-from .paths import Paths, atomic_write
+from .paths import Paths
+from .permissions import Permissions
 
 
 class PermitError(Exception):
@@ -33,39 +35,52 @@ class Permit:
 
 class PermitStore:
     def __init__(self, paths: Paths):
-        self.dir = paths.state / "permits"
+        self.paths = paths
+        self.perms = Permissions(paths)
 
-    def _file(self, name: str):
+    def _check(self, name: str) -> None:
         if not NAME_RE.match(name):
             raise KAppError(f"invalid app name {name!r}")
-        return self.dir / f"{name}.json"
 
-    def grant(self, name: str) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        atomic_write(self._file(name), json.dumps({"name": name, "granted_at": time.time()}).encode())
-
-    def revoke(self, name: str) -> None:
+    def _migrate_legacy(self, name: str) -> None:
+        """Older installs kept one file per app under <state>/permits/."""
+        legacy = self.paths.state / "permits" / f"{name}.json"
+        if legacy.exists() and not self.perms.get(name, "run"):
+            self.perms.grant(name, "run", "use")
         try:
-            self._file(name).unlink()
+            legacy.unlink()
         except FileNotFoundError:
             pass
 
+    def grant(self, name: str, declared: Optional[Iterable[str]] = None) -> None:
+        self._check(name)
+        self.perms.grant(name, "run", "use", declared=list(declared) if declared is not None else None)
+
+    def revoke(self, name: str) -> None:
+        self._check(name)
+        # Only the run permit. Ownership of a shared folder must outlive it: otherwise revoking
+        # (say) Contacts would free the name 'contacts' for any other app to claim.
+        self.perms.revoke(name, "run")
+
     def is_permitted(self, name: str) -> bool:
-        return self._file(name).exists()
+        self._check(name)
+        self._migrate_legacy(name)
+        return self.perms.has(name, "run")
 
     def require(self, name: str) -> None:
         if not self.is_permitted(name):
             raise PermitError(
                 f"{name} has not been given permission to run (run: kos permit {name})")
 
+    def check_declared(self, name: str, manifest_permissions: Iterable[str]) -> None:
+        """Refuse if the app now asks for permissions you never approved."""
+        e = self.perms.get(name, "run")
+        if not e or "declared" not in e:      # grants made before this existed are not restricted
+            return
+        extra = sorted(set(manifest_permissions) - set(e["declared"]))
+        if extra:
+            raise PermitError(f"{name} now asks for {', '.join(extra)}, which you never approved "
+                              f"(run: kos permit {name})")
+
     def list(self) -> list[Permit]:
-        if not self.dir.exists():
-            return []
-        out = []
-        for f in sorted(self.dir.glob("*.json")):
-            try:
-                d = json.loads(f.read_text())
-                out.append(Permit(d["name"], d["granted_at"]))
-            except (ValueError, KeyError):
-                continue
-        return out
+        return [Permit(e["app"], e["at"]) for e in self.perms.list("run")]

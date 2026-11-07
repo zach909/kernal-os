@@ -9,6 +9,37 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **Per-run caches on tmpfs.** An app's cache is scratch that is wiped when it ends. Putting it in RAM would mean
+  zero SSD writes for it and no overwrite-and-fsync wipe at all (data is gone at power-off), at the price of RAM
+  (it would need its own size cap). Not done: it changes `appdirs`/`cache`/`registry` layout and the wipe's
+  guarantees.
+- **seccomp for aarch64, and an allowlist.** The filter is an x86_64 denylist; other architectures run with
+  Landlock + namespaces only. Needs that architecture's syscall numbers verified on real hardware.
+- **Something outside the audit log that remembers its length.** A log cut short at the very end is not
+  detected. A counter/anchor in a TPM or on another machine would close it.
+- **Event-driven foreground session loop.** It wakes 4x/s while an app is in front of you; a pidfd plus a
+  deadline-only timeout would remove that, but it is the trusted password overlay's loop.
+- **Bind run permits to the app's hash.** `kos security` now lists grants for apps that are gone and permits that
+  were never pinned to a `declared` list; binding to the sealed hash (already a backlog item below) would make
+  them impossible.
+
+- **More shared spaces.** The mechanism exists (`owns:`/`uses:`, `kos grant`); only `contacts`, `calendar` and
+  `tasks` are wired. Candidates: the mail client and server sharing mailboxes, cloud storage and file sync,
+  and calendar automation writing to `calendar`.
+- **Grants that survive a reinstall safely.** Grants are by app name. Binding them to the app's sealed hash
+  (and asking again when the hash changes) would stop a replaced app inheriting access.
+- **`kos remove --purge`.** Removing an app keeps its `data/` (user data should not die by accident); an
+  explicit purge that also deletes it and its grants would be the intentional way to wipe an app.
+- **Seal the vault with a key.** Vault items are clear text on the LUKS volume. Derive a per-app key at launch
+  (the password is available then) and keep it in the session, so items are sealed like `.kapp`s.
+- **Audio / video / camera channel.** Conferencing, voice calling, speech recognition, text-to-speech, scanning
+  and capture need device commands in the protocol (booted with the password like mouse and keyboard).
+- **SMTP/IMAP/HTTP broker.** The mail server cannot listen on a port from inside the sandbox. A broker that owns
+  the socket and forwards validated messages as commands would allow it.
+- **Real charts.** Data apps draw text bars; a `chart` draw op in graphical mode would not need new trust.
+- **Run-on-demand schedules.** Automation apps keep a schedule field but nothing fires it (no background
+  services, by design). A password-started, bounded "run these at these times" session, like `kos scan watch`.
+
 - **npm/Node apps as `.kapp`s.** Today a `.kapp` app is either Python
   (imported straight from the zip) or a static native binary (run from a
   sealed memfd). Node can't import straight from a zip the way Python can,
@@ -65,6 +96,24 @@ land instead of getting lost in chat.
   support. First real target: boot the produced image in QEMU with OVMF
   and confirm the two password gates and `run hello` actually work.
 
+## Backlog - from the addresses / extensions / layers round
+
+- **Route the rest through the layers.** `layers.traverse` covers using an app (open, run, close, switch,
+  extend). Install, update, remove, permit, grant, device boots and `scan watch` still have their own gates; each
+  would need a gui question ("is there a button?" - the file picker / the installer row) and an app question.
+- **Live extension reload.** Contributions are read when a host starts or is attached. A `kos extend` while the
+  host is attached could be pushed as a fresh `extensions` command, still only to that host.
+- **More contribution types.** Only `entries` and `colors.accent` exist. Candidates that stay data: keymaps,
+  a menu of requests the host may offer, a `background` color once a host uses it.
+- **Per-entry approval for mods.** `app.mod` approves the whole add-on; showing the owner the entries and colors in
+  the password prompt ("pin Hello, Browser; accent #c2410c") would make the decision more informed.
+- **A `go` verb for the line shell.** `kos go` exists, and in the line shell a lone `kos://...` line or
+  `open kos://...` opens the address, but `go` itself is not in the multilingual lexicon yet.
+- **Sealed delivery.** Seal the pin record with a key derived at `kos extend` time so delivery can verify more
+  than a sha256 without holding the password.
+- **`kos aios` and the layers.** If AI OS requests should be forced through gui, app and kernel in KOS (not only
+  in the NeuroClaw engine), `kos aios` is the thing to wire in; today it is deliberately a pass-through.
+
 ## Backlog - from the line-shell / desktop / admin round
 
 - **Admin keyboard as its own privileged process.** Today the lease is a
@@ -87,6 +136,14 @@ land instead of getting lost in chat.
   is possible if that is too noisy.
 
 ## Shipped
+
+- **Addresses, extensions, mods, and the three layers.** `kos go kos://web/example.com` opens an app the way
+  a browser opens a site (`open` and `run` take addresses too; the app is told the path). Two kinds of app, both
+  ordinary `.kapp`s: an **extension** adds to an ordinary app, a **mod** modifies a system app, as validated data
+  the owner switches on with `kos extend` (password, pinned to the exact build). Every way of using an app - open,
+  run, close, switch, extend - passes through one door, `layers.traverse`: the graphical button clicker, then app
+  commands, then kernel commands, each audited, a refusal stopping the rest (so no password for an unpermitted
+  app). See ARCHITECTURE.md for the table and the gaps.
 
 - **Line shell, desktop of apps, administrator keyboard.** Every line is a
   command in the user's own language, and code is a command too (run sandboxed,

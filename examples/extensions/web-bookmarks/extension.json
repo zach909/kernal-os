@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "label": "Example",
+      "address": "kos://web/example.com"
+    },
+    {
+      "label": "Wikipedia",
+      "address": "kos://web/en.wikipedia.org"
+    },
+    {
+      "label": "Python docs",
+      "address": "kos://web/docs.python.org/3"
+    }
+  ]
+}

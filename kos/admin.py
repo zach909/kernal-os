@@ -300,9 +300,12 @@ def open_admin_devices(lease: Lease):
 
 # --- what the policy table means here ----------------------------------------------
 
-def requirements(keyboard: AdminKeyboard, grant: Optional[Grant] = None) -> Requirements:
+def requirements(keyboard: AdminKeyboard, grant: Optional[Grant] = None,
+                 firmware: Optional[Callable[[], Optional[str]]] = None) -> Requirements:
     """The ``before`` side of ``requires.RULES`` for this machine. With a login
-    ``grant`` the administrator keyboard can be *booted* to satisfy it."""
+    ``grant`` the administrator keyboard can be *booted* to satisfy it. With a
+    ``firmware`` check (None = fine, str = why not) unlocking also needs the OS
+    to be in control of the machine's management processors."""
     def kernel() -> Optional[str]:
         gaps = kernel_gaps(keyboard.kernel_report())
         return None if (not gaps or weak_allowed()) else "; ".join(gaps)
@@ -315,7 +318,10 @@ def requirements(keyboard: AdminKeyboard, grant: Optional[Grant] = None) -> Requ
             return str(e)
 
     boots = {"admin.keyboard": lambda: keyboard.boot(grant)} if grant is not None else {}
-    return Requirements({"kernel": kernel, "admin.keyboard": booted}, boots)
+    checks = {"kernel": kernel, "admin.keyboard": booted}
+    if firmware is not None:
+        checks["firmware"] = firmware
+    return Requirements(checks, boots)
 
 
 def _quarantine(paths: Paths, file: Path) -> Path:

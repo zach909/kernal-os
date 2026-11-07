@@ -13,6 +13,8 @@
 #     here without the password.
 #   * The password is read by cryptsetup itself (echo off, locked memory);
 #     it never passes through a shell variable.
+#   * Refuses to boot at all if a management processor (Intel ME, AMD PSP, a BMC)
+#     is running and not provably disabled (firmware.sh; kos.firmware=warn opts out).
 #   * Three attempts per boot with growing delays, and LUKS2 uses Argon2id,
 #     so each guess costs ~1s and ~1 GiB of RAM.
 
@@ -32,6 +34,12 @@ mount -t sysfs    -o nosuid,nodev,noexec sysfs    /sys  || halt_forever "cannot 
 mount -t devtmpfs -o nosuid,mode=0755    devtmpfs /dev  || halt_forever "cannot mount /dev"
 echo 1 > /proc/sys/kernel/printk 2>/dev/null   # keep kernel messages off the prompt
 
+# Firmware gate: if a management processor (Intel ME, AMD PSP, a BMC) is running
+# below the OS and is not provably off, refuse to boot - before the disk, before
+# the password. Missing script = fail closed. See firmware.sh.
+. /firmware.sh || halt_forever "firmware gate missing"
+kos_firmware_gate || halt_forever "a management processor is running; the OS is not in control"
+
 # kos.root=UUID=<luks uuid> (or a /dev path) comes from the signed kernel command line.
 root_spec=""
 for arg in $(cat /proc/cmdline); do
@@ -43,16 +51,18 @@ done
 
 dev=""
 i=0
-while [ $i -lt 50 ]; do          # wait up to 10s for the disk to appear
+# USB sticks enumerate slowly (hubs, cheap controllers): wait up to 60s.
+while [ $i -lt 300 ]; do
     case "$root_spec" in
         UUID=*) dev=$(blkid -U "${root_spec#UUID=}" 2>/dev/null) ;;
         /dev/*) [ -b "$root_spec" ] && dev="$root_spec" ;;
     esac
     [ -n "$dev" ] && break
+    [ $i -eq 25 ] && echo "kos-preboot: waiting for the boot disk (USB sticks can take a while)..."
     sleep 0.2
     i=$((i + 1))
 done
-[ -n "$dev" ] || halt_forever "root device $root_spec not found"
+[ -n "$dev" ] || halt_forever "root device $root_spec not found (is the USB stick still plugged in?)"
 
 clear
 cat <<'BANNER'

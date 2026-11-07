@@ -46,14 +46,20 @@ class Paths:
         return self.etc / "auth.json"
 
     def ensure(self) -> None:
-        for d in (self.etc, self.state, self.apps, self.logs, self.cells):
+        for d in (self.etc, self.state, self.apps, self.logs, self.cells, self.state / "appdata",
+                  self.state / "spaces", self.state / "permissions"):
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
 
 
 def atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
-    """Write ``data`` to ``path`` so readers see either the old or new file."""
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    """Write ``data`` to ``path`` so readers see either the old or new file.
+
+    The temp name is unique per call. It used to be ``<name>.tmp.<pid>`` with
+    O_EXCL, so a crash mid-write left a file that made every later write by a
+    process with the same pid fail - and ``kos-init`` is always pid 1, which
+    could lock the failed-login counter out of ever being saved."""
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{os.urandom(4).hex()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
     try:
         with os.fdopen(fd, "wb") as f:
