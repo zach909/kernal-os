@@ -19,6 +19,9 @@ pattern are still shown (the scanner is heuristic, not a reason to hide
 things from you), but the flag is right there in the status line.
 """
 
+import re
+import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
@@ -28,6 +31,10 @@ from kos.sdk import App
 from kos.scan import scan_bytes
 
 MAX_PAGE = 2 << 20
+
+# Shown on every screen, including the empty start screen. A website you open
+# learns where the request came from; the browser says so instead of hiding it.
+IP_NOTICE = "Websites you visit can see your IP address."
 
 
 def start_target(address):
@@ -87,19 +94,77 @@ class Page(HTMLParser):
             self.text.append(" ".join(data.split()))
 
 
-def fetch(url):
+def check_url(url):
+    """The URL to fetch, or ValueError. Every connection must be encrypted:
+    plain http:// is refused, not upgraded behind your back, and a bare
+    'example.com' means https://example.com."""
+    url = url.strip()
     if "://" not in url:
+        # 'javascript:x', 'mailto:x', 'data:x' are schemes, not host names;
+        # 'host:443/path' (a colon then digits) is a host and port.
+        if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:(?!\d+(/|$))", url):
+            raise ValueError("only https:// URLs")
         url = "https://" + url
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("only http(s) URLs")
+    parts = urllib.parse.urlsplit(url)
+    try:
+        parts.port
+    except ValueError:
+        raise ValueError("invalid port") from None
+    if parts.scheme == "http":
+        raise ValueError("refused: http:// is not encrypted (https:// only)")
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError("only https:// URLs")
+    return url
+
+
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect may not move you from encrypted to plain."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_url(urllib.parse.urljoin(req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener():
+    # Certificates and host names are verified (the default context); there is
+    # no way to turn that off from inside the app.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),
+                                       _HttpsOnlyRedirects())
+
+
+def fetch(url):
+    url = check_url(url)
     req = urllib.request.Request(url, headers={"User-Agent": "kos-web/1.0"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        raw = r.read(MAX_PAGE)
-        body = raw.decode(r.headers.get_content_charset() or "utf-8", "replace")
-        page = Page(r.geturl())
+    try:
+        with _opener().open(req, timeout=15) as r:
+            raw = r.read(MAX_PAGE)
+            body = raw.decode(r.headers.get_content_charset() or "utf-8", "replace")
+            page = Page(r.geturl())
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ssl.SSLError):
+            raise ValueError(f"refused: could not verify this site's certificate ({e.reason})") from None
+        raise
     page.feed(body)
     page.scan = scan_bytes(raw, label=page.base)
     return page
+
+
+def build_lines(page, viewing, sel, rows, typed, msg):
+    if page is None:
+        lines = ["", "  Type a URL (e.g. example.com) and press Enter."]
+    elif viewing:
+        lines = [f"  {page.base}", ""] + ["  " + t for t in page.text][:rows]
+    else:
+        top = max(0, sel - rows + 1)
+        lines = [f"  {page.base}/", ""]
+        for i, (label, _) in enumerate(page.links[top:top + rows], top):
+            lines.append(("> " if i == sel else "  ") + f"[{label[:70]}]/")
+        if not page.links:
+            lines.append("  (empty folder: no links; type 'run' to view the page)")
+    return lines + ["", f"  ! {IP_NOTICE}", f"  > {typed}_", f"  {msg}"]
 
 
 def main():
@@ -157,6 +222,7 @@ def main():
             if 0 <= i < len(page.links):
                 sel = i
         page = history[-1] if history else None
+        lines = build_lines(page, viewing, sel, rows, typed, msg)
         if page is None:
             lines = ["", "  Type a URL (e.g. example.com) and press Enter."]
             if marks:

@@ -69,6 +69,8 @@ ACTIONS: dict[str, str] = {
     "file.write": "write file",
     "code.run": "run code",
     "admin.boot": "boot the administrator keyboard",
+    "app.convert": "convert a Debian package into an app",
+    "skill.make": "make agent skills from the installed apps and commands",
     "audit.verify": "check the authorization log for tampering",
     "app.extend": "switch on an extension for an app",
     "app.mod": "let a mod modify a system app",

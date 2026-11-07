@@ -11,6 +11,67 @@ micro-VM kernels, and a command line that understands nine human languages.
 operating system, Landlock sandbox, LUKS2 encrypted boot, KVM micro-VM,
 sandboxed apps, malware scanner, multilingual command shell, Python OS.
 
+## Rules
+
+These four rules govern every change to KOS. A change that breaks one is wrong.
+
+1. **Everything needs verification.**
+   - In the OS: every action goes through `Authority.authorize(action, target)`
+     and needs the password typed for *that* action. A new command or feature
+     must add its action to `ACTIONS` in `kos/auth.py` and call `authorize`
+     before it does anything. A second kind of verification (a `requires`
+     dependency, a security scan, a signed seal) adds to the password; it never
+     replaces it.
+   - In the work: nothing is called done until it has been run and checked.
+     Tests pass, or the failure is reported as it is.
+2. **Everything is an app.** Features ship as sandboxed `.kapp`s that talk to
+   the OS only through the command protocol (`request` for system functions,
+   with the `system` permission and a permit). The OS core stays small: auth,
+   sandbox, devices, protocol. The taskbar and App Library are the model.
+3. **Every connection is blocked by default.** Any connection between anything
+   (app to internet, app to app, app to cell, the OS to the internet, inbound
+   listeners, any protocol, any port) is denied until a firewall rule allows it.
+   - Websites are blocked too. A site installed as an app follows the same
+     rules as any other app.
+   - The firewall is an app. It holds no power of its own: it asks the OS, and
+     every change needs the password. Enforcement stays in the OS, so the
+     firewall app being broken or hostile leaves the default at deny.
+   - A rule names one app, one host, one port and one protocol. No wildcards
+     unless typed out.
+   - Using a privilege asks at the moment of use, after the password that ran
+     the app, in the OS's own prompt. Grants last until the app exits unless
+     you explicitly make one permanent (which costs a password).
+   - Every connection is encrypted and verifiable. Plain-text connections
+     (`http://`, FTP, anything unencrypted) are refused, never silently
+     upgraded. The peer's certificate and host name must verify, with no
+     "continue anyway" and no switch to turn it off. A redirect may not move
+     from encrypted to plain.
+   - The browser tells you on every page that websites can see your IP address.
+   - Every allowed and every blocked attempt goes in the audit log.
+
+4. **The whole pipeline is encrypted.** What you see, what you click, the
+   commands between the app and the OS, and the OS's calls down to the kernel
+   and hardware: screen <- `frame`/`screen` <- app <- `key`/`pointer`/`button`
+   <- OS <- kernel <- hardware. Apps never touch the kernel or hardware; only
+   the OS does. Every channel between separate parties is encrypted and
+   authenticated.
+
+Agent skills for AI agents working on this repo live in `.claude/skills/`:
+`kos-rules` (these rules as a checklist) and one per layer of the pipeline -
+`kos-graphics`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
+`kos-hardware`.
+
+### Where the code does not meet the rules yet
+
+Honest list, so nobody assumes these are covered:
+
+| Rule | Gap |
+|---|---|
+| Verification | Run with no password: `list`, `ps`, `activity`, `audit`, `owed`, `cell list`, `scan file`, `ls`, `pack`, `doctor`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
+| Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
+| Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
+| Everything is an app | `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
+
 ## How it works
 
 ```
@@ -32,6 +93,9 @@ power on
 
 | Idea | How it's built |
 |---|---|
+| Debian conversion | `kos/debconv.py`, `kos/debshim.py`, `kos convert`: a `.deb` becomes a `.kapp`. The package is read in memory only (never unpacked to disk), bounded and path-checked, and the result is scanned; a flagged or unconvertible package is refused **before** any password prompt. The password (`app.convert`) is needed to write the file, and `kos install` then scans again, asks again and seals. **Maintainer scripts are never run and never kept.** Only **statically linked** programs convert (dynamic ones are refused with the package's `Depends` shown); symlinks and devices are dropped; setuid bits are stripped; the app gets **no permissions**. A small shim runs the program from a sealed in-RAM file with no stdin, a 10 s limit and a 64 KiB output cap, and shows its output as a text page. |
+| Skill maker | `kos/skillmaker.py`, `kos skills`: one skill for the commands (read from the real parser) and one per installed app. One password (`skill.make`) verifies every app's seal first; a tampered app is skipped. Each file is scanned, and a flagged app skill is left out. An app's free-text description never reaches the instructions - it sits in one inert, labelled data block. Printing writes nothing; `--out DIR` writes each file through the guarded `file.write` path. |
+| Password on everything | `kos/auth.py`: scrypt-derived master key; every action (`app.run`, `device.mouse`, `file.view`, ...) needs the password typed for *that* action. All decisions go to an audit log (`kos audit`). |
 | Password on everything | `kos/auth.py`: scrypt-derived master key; every action (`app.run`, `device.mouse`, `file.view`, ...) needs the password typed for *that* action. All decisions go to a tamper-evident audit log: hash-chained, with every grant anchored to your password (`kos audit`, `kos audit --verify`). |
 | Apps are zip files that are never unzipped | `kos/kapp.py`, `kos/loader.py`: the zip is stored as-is, sealed with a password-derived key. At run time it's copied into a sealed in-RAM file (memfd) and run from there. A modified zip refuses to run. |
 | Mouse/keyboard are "booted" | `kos/devices.py`, `kos/session.py`: apps never touch devices. The OS reads them and sends **commands** (`key`, `pointer`, `button`) to the app; the app answers with commands (`screen`, `frame`) that the OS checks and draws. Password prompts are an OS overlay the app can't see or cover. Ctrl-C always quits. |
@@ -51,6 +115,24 @@ power on
 | Every app action passes gui, app, kernel | `kos/layers.py`: opening, running, closing, switching to and extending an app all go through one door, `layers.traverse`, which sends the request through the **graphical button clicker** (is there a button for it?), then **app commands** (is it permitted?), then **kernel commands** (the password, the seal, the sandbox), in that order. A layer that says no stops the rest, so an unpermitted app is refused before any password is asked. Every layer's `pass` or `refused` is in `kos audit`. A test fails if any other code asks for the password to use an app. |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
+## Install as a Debian package
+
+The whole repository builds into one `.deb`, from the last commit (so a version
+always means the same bytes; building twice gives identical files):
+
+```
+python3 packaging/build_deb.py          # -> dist/kernal-os_VERSION_all.deb
+sudo dpkg -i dist/kernal-os_*.deb       # installs files only
+kos setup                               # choose your password
+```
+
+It installs the tree under `/usr/lib/kernal-os/` with `kos` and `kos-run` in
+`/usr/bin`. It has **no maintainer scripts**, starts no service, touches
+nothing in `/etc` and creates no state, which is KOS's own rule applied to its
+package. Needs `python3 (>= 3.11)`; the full test suite was run from an
+extracted copy on 3.11, 3.12 and 3.13. Not done yet: a license (the repo has
+none, so the package ships no copyright file), a changelog, and an apt
+repository.
 ## Productivity suite
 
 149 products were asked for (document/spreadsheet/slides editors, mail, calendar, databases, project and
@@ -127,6 +209,9 @@ kos scan watch DIR...       scan every file written here until Ctrl-C (password 
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
 kos optimize                 recompress apps, prune dead state, reclaim disk space
 kos admin [status|boot|lock] the elevated administrator keyboard (boots at login)
+kos convert PKG.deb -o OUT.kapp [--exe PATH]
+                             convert a Debian package into an app (static programs only)
+kos skills [--out DIR]       make agent skills from the installed apps and commands
 kos write PATH --text T      write a file (needs the admin keyboard); owes a scan + optimize afterwards
 kos owed / kos settle        what earlier writes still owe / do it now
 kos exec --code LINE         run one line of code as a sandboxed command
