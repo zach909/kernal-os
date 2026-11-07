@@ -38,3 +38,39 @@ def app(title, make, scope="full", note="", *, name="", network=False, graphical
 def none(title, note, name="") -> PackEntry:
     """Not built. `note` must say why, and where to look instead if something else covers it."""
     return PackEntry(title, "pack", "none", note, name)
+
+
+# ---- shared folders -------------------------------------------------------------------------------------
+# An app that `owns` a space stores its records there as {"next": N, "items": [...]} under the key "records" (the
+# same shape RecordList/Data uses, so an owner built on RecordList is already compatible). An app that `uses` it
+# reads or appends with these helpers. Nothing is readable until the owner grants it (`kos grant APP space:NAME`).
+MAX_SHARED = 2000
+
+
+def shared_items(host, space: str) -> list:
+    """The records other apps put in `space`; [] if you have no grant, it is empty or it is malformed."""
+    import json
+    try:
+        d = json.loads(host.get("records", space) or "null")
+    except (ValueError, TypeError):
+        return []
+    items = d.get("items") if isinstance(d, dict) else None
+    return [r for r in items if isinstance(r, dict)][:MAX_SHARED] if isinstance(items, list) else []
+
+
+def shared_add(host, space: str, rec: dict) -> bool:
+    """Append one record to a space you own or hold a write grant on. False if refused or full."""
+    import json
+    import time
+    try:
+        d = json.loads(host.get("records", space) or "null")
+    except (ValueError, TypeError):
+        d = None
+    if not isinstance(d, dict) or not isinstance(d.get("items"), list):
+        d = {"next": 1, "items": []}
+    if len(d["items"]) >= MAX_SHARED:
+        return False
+    n = d["next"] if isinstance(d.get("next"), int) else len(d["items"]) + 1
+    d["items"].append({**{str(k)[:40]: v for k, v in rec.items()}, "_id": n, "_at": time.strftime("%Y-%m-%d %H:%M")})
+    d["next"] = n + 1
+    return bool(host.put("records", json.dumps(d, separators=(",", ":"), ensure_ascii=False), space))

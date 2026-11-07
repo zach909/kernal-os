@@ -85,3 +85,4 @@ pack_hw	Weather
 pack_hw	Cloud and Device Synchronization
 pack_hw	Wireless Sharing and Streaming
 pack_hw	Accessibility Services
+pack_tour	Get to Know KOS

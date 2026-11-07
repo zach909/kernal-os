@@ -36,3 +36,35 @@ For every app that does computation: (a) exact expected results from known vecto
 Run only your file: `python3 -m unittest tests.test_pack_<group>`. `tests/test_packs.py` (owned by the integrator)
 checks titles, notes, manifests and a key battery over every app; run it too, but ignore failures about *other* packs.
 Do not run the whole suite and do not run git.
+
+## Shared folders between packs (permissions)
+
+Every app declares exactly the permissions it needs in its manifest through `app(..., owns=[...], uses=[...])`
+(`storage` is always there; `network` only where the app cannot work without it). Related apps give each other data
+through *shared folders*: the **owner** app declares `owns=["space"]` and keeps its records there; a **user** app
+declares `uses=["space"]` and may read it only after the person who owns the machine grants it with their password
+(`kos grant APP space:NAME --level read|write`). An app that declares a `uses` it never reads, or an `owns` it never
+writes, is wrong: permissions are least-privilege. When access is missing the user app must still work and say so.
+Owner records live in the space under the key `records` (the shape `RecordList`/`Data` already uses: build the owner
+with `Data(SpaceHost(host, "space"), SPEC)` exactly as `catalog._shared` does). User apps read with
+`packkit.shared_items(host, "space")` and append with `packkit.shared_add(host, "space", {...})`; read fields with
+`.get()` and tolerate any missing or odd value. Use these exact space names and field names:
+
+| space | owner (writes) | record fields | users |
+|---|---|---|---|
+| `contacts` | Contact Manager (existing) | name, company, email, phone | CRM, Support Desk, Invoicing |
+| `tasks` | Task Manager (existing) | title, assignee, status, due | Reminders, Focus Manager |
+| `places` | Places | name, lat, lon, category | Route Planner, Map Tools |
+| `invoices` | Invoicing | number, customer, total, status, due | Accounting, Sales Management |
+| `inventory` | Inventory Management | sku, name, on_hand, reorder_point, unit_cost | Procurement |
+| `employees` | Human Resources | name, department, manager, title, email | CRM, Support Desk, Procurement |
+| `deals` | CRM | name, account, value, stage, close_date | Sales Management |
+| `decks` | Flashcards | deck, front, back | Reference Library, Book Reader (they add cards) |
+| `music` | Music Library | title, artist, album | Music Studio (registers compositions) |
+| `repos` | Version Control | path, text, branch | Code Review, Config Editor, Build Planner |
+| `logs` | Log Viewer | name, text | Website Analytics, Debug Helper |
+| `palettes` | Color Tools | name, colors | Avatar Maker, Animation Maker |
+| `health` | Health Records | kind, value, unit, date | Fitness Tracker |
+
+`value`, `total`, `on_hand`, `lat`, `lon` are numbers stored as text (as RecordList stores them); `colors` is a
+comma-separated list of #rrggbb. The agent (Ctrl-N) never gets a shared folder or the network: it sees its own app only.

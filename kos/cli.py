@@ -1059,6 +1059,25 @@ def cmd_line(args, paths: Paths) -> int:
     return run_shell(_execute_line, input, print, explain=args.explain)
 
 
+def cmd_help(args, paths: Paths) -> int:
+    """`kos help` lists every command; `kos help COMMAND` explains one. Read-only, needs no password."""
+    sub = next(a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction))
+    if args.topic:
+        sp = sub.choices.get(args.topic)
+        if sp is None:
+            eprint(f"no command called {args.topic!r}. Try: kos help")
+            return 2
+        print(sp.format_help().rstrip())
+        return 0
+    helps = {a.dest: a.help for a in sub._choices_actions if a.help != argparse.SUPPRESS}
+    width = max(map(len, helps)) + 2
+    print("kos COMMAND ...   (kos help COMMAND explains one; in the line shell, type 'help')\n")
+    for name in sorted(helps):
+        print(f"  {name:<{width}}{helps[name]}")
+    print("\nHelp inside KOS: the 'KOS Help' and 'Get to Know KOS' apps; press Ctrl-N in any app for its agent (/help).")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kos", description="KOS security layer")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1198,6 +1217,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("aios", help="AI OS: button clicker, app commands, kernel commands, skill maker")
     s.add_argument("layer", choices=["status", "gui", "app", "kernel", "skill"])
     s.add_argument("words", nargs="*")
+    s = sub.add_parser("help", help="list the commands, or explain one")
+    s.add_argument("topic", nargs="?", help="a command name, e.g. install")
     s = sub.add_parser("line", help="the line shell: every line you type is a command")
     s.add_argument("--explain", action="store_true", help="show how each line was understood")
     return p
@@ -1212,7 +1233,7 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb}
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
 
 
 def main(argv: list[str] | None = None) -> int:
