@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import backup, cache
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
@@ -177,6 +178,24 @@ class SystemBridge:
             if action == "close":
                 inst = close_instance(self.paths, authority, req["id"])
                 result(True, f"closed {inst.id}", id=inst.id)
+                return None
+            if action == "backup":
+                items, stats = backup.snapshot(self.paths, authority, "backup.list", "app")
+                reply({"cmd": "backup",
+                       "stats": {"items": stats.items, "unique": stats.unique_blobs,
+                                 "logical": stats.logical_bytes, "stored": stats.stored_bytes,
+                                 "saved": stats.saved_bytes},
+                       "items": [{"id": i.id, "path": clean_text(i.path, 200), "size": i.size,
+                                  "sha256": i.sha256[:12]}
+                                 for i in reversed(items[-MAX_LISTED:])]})
+                return None
+            if action == "backup_add":
+                report = backup.add(self.paths, authority, [req["path"]])
+                result(not report.flagged, report.summary())
+                return None
+            if action == "backup_remove":
+                item, gone = backup.remove(self.paths, authority, req["id"])
+                result(True, f"removed {item.id}" + (" and its body" if gone else ""), id=item.id)
                 return None
             if action == "focus":
                 inst = layers.traverse(self.paths, authority,

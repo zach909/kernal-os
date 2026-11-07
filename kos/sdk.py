@@ -184,6 +184,18 @@ class App:
     def request_close(self, instance_id: str) -> None:
         self.send({"cmd": "request", "action": "close", "id": instance_id})
 
+    # Backups (needs the 'system' permission). The OS asks for the password in
+    # its own prompt for every one of these; the app only ever sees the answer:
+    # {"cmd": "backup", "stats": {...}, "items": [...]} or a "result" event.
+    def request_backup(self) -> None:
+        self.send({"cmd": "request", "action": "backup"})
+
+    def request_backup_add(self, path: str) -> None:
+        self.send({"cmd": "request", "action": "backup_add", "path": path})
+
+    def request_backup_remove(self, item_id: str) -> None:
+        self.send({"cmd": "request", "action": "backup_remove", "id": item_id})
+
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch
         didn't provide one. It is wiped the moment this app's process ends -

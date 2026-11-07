@@ -42,6 +42,10 @@ class Paths:
         return self.state / "cells"
 
     @property
+    def backup(self) -> Path:
+        return self.state / "backup"
+
+    @property
     def auth_file(self) -> Path:
         return self.etc / "auth.json"
 

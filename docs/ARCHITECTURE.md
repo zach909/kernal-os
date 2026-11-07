@@ -120,6 +120,19 @@ following ones via `preboot`.
 Gap: the desktop's first-session password also covers every later app it
 switches to for *devices*; opening an app still always asks.
 
+## Backups (`kos/backup.py`)
+Why it is OS-side: an app is sandboxed (no file reads, nothing persists, no
+network by default), so it cannot back anything up. The engine runs as KOS
+itself; the `backup` app only sends `request` commands (`backup`, `backup_add`,
+`backup_remove`, schema-checked in `protocol.py`, handled in `SystemBridge`).
+Each one needs the `system` permission *and* the password in the OS prompt.
+Vault: `<state>/backup/blobs/ab/<sha256>` (0600) + `index.json` carrying an
+HMAC under `subkey(master, "backup-index")`. Items are counted, not
+ref-counted: a body is deleted when no item names it. The index is written
+before a body is deleted, so a crash leaves an orphan body, never a dangling
+item. KOS's own state (`etc`, `state`) is never read into the vault.
+Gap: bodies are plaintext on disk (protected by LUKS2 + 0700, not per-file
+crypto); no off-box copy, so this is not a disaster-recovery backup yet.
 ## App folders, permissions and shared spaces
 `appdirs.py` gives every app `<state>/appdata/<app>/{cache,data,run}`. **cache** is the per-run scratch the
 sandbox may write, wiped by whoever owns the process when it ends (`cache.py`, unchanged in behaviour but now

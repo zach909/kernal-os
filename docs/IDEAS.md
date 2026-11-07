@@ -9,6 +9,13 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **Backup follow-ups.** Encrypt blob bodies with a password-derived key
+  instead of relying on LUKS2 + 0700 (needs a streaming AEAD; stdlib has none,
+  so this wants the Rust port first). Restore a whole folder/snapshot in one
+  password rather than per item. A "share this folder with the app" permission
+  (see the per-resource permissions item below) so the `backup` app could be
+  handed a folder instead of asking the OS to read a path. Garbage-collect
+  orphan bodies after a crash between index write and blob delete.
 - **Per-run caches on tmpfs.** An app's cache is scratch that is wiped when it ends. Putting it in RAM would mean
   zero SSD writes for it and no overwrite-and-fsync wipe at all (data is gone at power-off), at the price of RAM
   (it would need its own size cap). Not done: it changes `appdirs`/`cache`/`registry` layout and the wipe's
@@ -137,6 +144,17 @@ land instead of getting lost in chat.
 
 ## Shipped
 
+- **Backup, as a KOS app (`kos backup`, `examples/backup`).** The Universal
+  Backup System's core idea - content-addressed dedup - brought in under KOS's
+  rules. Engine in `kos/backup.py`: bodies stored once per SHA-256, scanned
+  before they are stored, index HMAC-sealed, bodies re-hashed on read, every
+  action password-gated, restore through the guarded write and never
+  overwriting. The `backup` app is a `system`-permission front-end: a sandboxed
+  app can't read files or keep state, so it asks the OS. Deliberately *not*
+  brought over: the HTTP server, user accounts/JWTs, cloud-provider connectors,
+  the browser extension and the mock ad-earnings ledger - they conflict with
+  "no background services, no network without your password" and were never
+  backup logic.
 - **Addresses, extensions, mods, and the three layers.** `kos go kos://web/example.com` opens an app the way
   a browser opens a site (`open` and `run` take addresses too; the app is told the path). Two kinds of app, both
   ordinary `.kapp`s: an **extension** adds to an ordinary app, a **mod** modifies a system app, as validated data
@@ -193,7 +211,9 @@ land instead of getting lost in chat.
 A password is asked for anything that *starts, stops, changes, or reveals
 the contents of* something: `open`, `close`, `boot desktop`, `cat`/`view`,
 `install`, `update`(`all`), `remove`, `run`, `permit`(`--revoke`),
-`optimize`, starting `scan watch`, booting a device. Plain listings don't
+`optimize`, starting `scan watch`, booting a device, and every `backup`
+action (`add`, `list`, `remove`, `restore` - listing too, since file names are
+private; restore asks twice: once to read the vault, once for the guarded write). Plain listings don't
 ask (`ps`, `ls`, `list`, `doctor`, `audit`, `activity`, `permit --list`,
 `scan file`) - `scan file` is read-only in the same sense `kos list` is,
 even though it's a security check, because it changes nothing and reveals

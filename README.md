@@ -107,6 +107,7 @@ power on
 | Every line is a command | `kos/lang.py`, `kos/coderun.py`: a line of human language (en/es/fr/de/pt/it/ru/zh/ja) becomes exactly one structured `kos` command - never a shell string. A line of **code is a command too**: *run this line* - but never on the host. It is scanned, needs your password, and runs as a one-shot app in the usual sandbox (no files, no network, time limit, nothing carries over to the next line). `kos do WORDS...` runs one line; `kos line` is the shell; login starts it instead of `/bin/sh`. |
 | The OS is made of apps | `kos/desktop.py`, `kos/system.py`, `examples/system/`: the **taskbar** and the **App Library** are ordinary sandboxed apps. They never touch the screen or other apps - they *ask* the OS with a `request` command (needs the `system` permission in the manifest + a permit; opening/closing needs your password in the OS's own prompt). The **right mouse button is the App Library**, handled by the OS from any app. |
 | Elevated administrator keyboard + **requires** | `kos/admin.py`, `kos/requires.py`: *requires* is a dependency, not an action. **Unlocking requires the elevated administrator keyboard, which requires the kernel**: the unlock password boots the keyboard (a lease signed with a password-derived key, bound to this boot) and if the kernel protections are missing the computer simply does not unlock. **Writing a file requires a security scan and a disk optimize afterwards**: the write is recorded on a ledger as owing both, they are done in order under the same password, and anything left owed (a crash, a failed step) survives restarts and blocks the next write until `kos settle`. |
+| Backups (the backup app) | `kos/backup.py`, `examples/backup`: **content-addressed, deduplicated** backups. A file body is stored once under its SHA-256 no matter how many names or times it is added; every file is **scanned before it is stored** (flagged files never enter the vault); `add`/`list`/`remove`/`restore` each need the password; the index is HMAC-sealed with a password-derived key and every body is re-hashed when read, so tampering is refused. **Restore is a write**, so it goes through the guarded write (admin keyboard, scan, optimize) and never overwrites. The `backup` app is a sandboxed front-end that can't read files itself - it *asks* the OS (`system` permission) and the password is typed in the OS's own prompt. |
 | AI OS: KOS is the engine | `kos/aios.py`: four layers only - the graphical button clicker (`gui`), terminal app commands (`app`), kernel commands (`kernel`, NeuroClaw's Linux permission tools) and the auto skill maker (`skill`). KOS carries a request to the NeuroClaw engine on this computer and asks for no password; the engine's own tool gate and approvals decide what happens. Nothing else of NeuroClaw is reachable, nothing autostarts, and the engine address must be loopback. |
 | Security check | `kos security` (`kos/secure.py`): one read-only check, no password, nothing changed, nothing running in the background. Kernel protections, private folders and secrets, audit-chain integrity, every installed app rescanned and compared with what was installed, permissions nothing uses any more or that were never pinned, owed work, crash leftovers. Exit code 3 if anything failed. |
 | Firmware control (no ME, PSP or BMC in charge) | `kos/firmware.py`, `boot/initramfs/firmware.sh`: before the disk is unlocked, and again in `kos-init`, KOS looks for management processors that run below the OS - **Intel ME/AMT, AMD PSP, server BMCs (IPMI)**, and every other chip with its own firmware (Thunderbolt/USB4, USB-C port controller, embedded controller, network, GPU, NVMe, wireless), plus a missing IOMMU. If one is running it alerts, cuts the OS's side of it (unbinds the driver, forbids rebinding) and **refuses to boot**. Only an Intel ME whose own status register says *disabled* is believed off. `kos.firmware=warn` on the signed kernel command line boots anyway. **This cannot switch them off** - see the limits in `docs/ARCHITECTURE.md`; almost no real hardware will boot under the default policy (VMs will). There is no resident checker: it runs once at boot and at each unlock. An owner-written allow list (`boot/firmware.allow`, `/etc/kos/firmware.allow`) accepts chips whose firmware you replaced yourself; KOS never flashes anything. `kos firmware` also lists which protections (IOMMU, memory encryption, LUKS2, Thunderbolt security) narrow what the remaining chips can see. |
@@ -213,6 +214,10 @@ kos convert PKG.deb -o OUT.kapp [--exe PATH]
                              convert a Debian package into an app (static programs only)
 kos skills [--out DIR]       make agent skills from the installed apps and commands
 kos write PATH --text T      write a file (needs the admin keyboard); owes a scan + optimize afterwards
+kos backup add PATH...       back up files/folders (scanned, stored once per content)
+kos backup [list]            what is backed up + what deduplication saved
+kos backup restore ID DIR    put one item back (guarded write, never overwrites)
+kos backup remove ID         forget one item (body deleted when nothing else uses it)
 kos owed / kos settle        what earlier writes still owe / do it now
 kos exec --code LINE         run one line of code as a sandboxed command
 kos do WORDS...              one line of human language, run as one command
@@ -245,7 +250,10 @@ desktop view unless you ask for one with `kos boot desktop`.
 (including `.kapp` apps) as one continuous tree - `cd`-ing into a zip is
 just another `cd`, and nothing is ever extracted to disk to look at it.
 
-Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
+Included apps: `examples/backup` (a front-end for `kos backup`: `kos pack
+examples/backup -o backup.kapp && kos install backup.kapp && kos permit backup`,
+then `run backup` - `r` lists, `a` adds a path, `d` removes; each asks the OS for
+your password), `examples/hello` (text + graphical + cmd-mode demo) and
 `examples/web` — a no-graphics browser: type a URL, the page appears as a
 folder of links you click through, type `run` to view the page text. Every
 page it fetches is scanned before you see it; the status line says so.
@@ -432,6 +440,17 @@ Secure Boot: enroll the key you signed with, or the stick will be refused.
   the OS prompt through a real broker); and the real CLI end to end through a
   pseudo-terminal (`desktop install`, `admin boot`, `write`, EICAR blocked,
   `boot desktop` with switching, right-click, launching from the library).
+* **Backup (this round):** dedup across names and re-adds, versions of a
+  changed file, directory walking (symlinks and KOS state skipped), password on
+  every action with nothing changed on a wrong one, flagged files never stored,
+  shared-body removal, a tampered index and a tampered body both refused,
+  restore through the guarded write (round trip, never overwrites, refused
+  before any password without the admin keyboard), the app's requests through
+  the bridge, and the real CLI through a pseudo-terminal. **Not run here:** the
+  `backup` app *running* inside the sandbox - this container's Python lacks
+  `fcntl.F_ADD_SEALS`, so no sandboxed app (existing ones too: 14 pre-existing
+  test failures) can start; the app's key handling and requests are unit-tested
+  instead.
 * **Also tested here (hardening round):** a seccomp filter checked three ways (BPF program interpreted, syscall
   numbers compared with the kernel header, every denied call tried from inside the real sandbox); the audit chain
   including a forger who re-links it and concurrent appends/trims (nothing recorded is lost); hostile file and

@@ -163,6 +163,18 @@ def _request(msg: dict) -> dict:
         if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
             raise ProtocolError("request.id must be an open instance id")
         return {"cmd": "request", "action": action, "id": ident}
+    if action == "backup":
+        return {"cmd": "request", "action": "backup"}
+    if action == "backup_add":
+        path = msg.get("path")
+        if not isinstance(path, str) or not path or len(path) > 1024 or "\x00" in path:
+            raise ProtocolError("request.path must be a file or folder path")
+        return {"cmd": "request", "action": "backup_add", "path": path}
+    if action == "backup_remove":
+        ident = msg.get("id")
+        if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{12}", ident):
+            raise ProtocolError("request.id must be a backup item id")
+        return {"cmd": "request", "action": "backup_remove", "id": ident}
     raise ProtocolError(f"unknown request {action!r}")
 
 
