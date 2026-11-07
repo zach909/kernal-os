@@ -38,8 +38,3 @@ class AppDirs:
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)
         return self
-
-
-def all_apps(paths: Paths) -> list[str]:
-    base = paths.state / "appdata"
-    return sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []

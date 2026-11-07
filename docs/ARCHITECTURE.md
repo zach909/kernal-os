@@ -67,7 +67,7 @@ and the password is never asked) → password → seal → store zip unchanged.
 run: permit check (`kos/permit.py`; refused before the password too) →
 password → verify seal *before* parsing → sealed memfd → sandboxed process
 (nobody, no_new_privs, user/net/ipc/uts namespaces, rlimits, Landlock
-fs+net+signal scoping, one private writable cache dir) → only a command
+fs+net+signal scoping, a seccomp denylist on x86_64, one private writable cache dir) → only a command
 socket to the OS. The cache dir is securely wiped (`kos/cache.py`) the
 instant the process ends, by whichever of `run`'s `_run_session` or the
 `open` broker's `_shutdown` owns that process.
@@ -147,6 +147,48 @@ being the trust boundary (a reinstalled app of the same name inherits them - rev
 or `kos grant --revoke`); the instance socket path is now `appdata/<app>/run/<id>.sock`, which stays under
 the 108-byte limit for real `/var/lib/kos` roots but can exceed it for deep dev `KOS_ROOT`s; cells get no vault.
 
+## Audit log (`AuditLog` in `kos/auth.py`)
+Every line commits to the one before it: `p` is the previous line's `h`, and `h = SHA-256(p, entry)`. Editing,
+deleting or reordering a line breaks the chain from there on (`kos audit --verify`, and `kos security` without a
+password). A line written while the password was in hand (a grant) also carries `m = HMAC(key, h)`, where the key
+is derived from the password. Anyone running as the owner can recompute a plain chain; nobody can recompute `m`
+without the password, so the likely cover-up - delete a failed attempt, re-link what follows - makes every later
+grant's anchor fail. A grant whose `m` was removed is itself reported.
+
+Appends are serialised with `flock` plus an inode re-check, because `kos optimize` trims the log by replacing the
+file: without that, two processes could fork the chain and a record made during a trim could be written to the
+old file and lost. Tests hold both properties (and fail within three runs if the lock is removed). `kos audit` and
+`kos activity` read only the tail of the file.
+
+Limits, stated plainly: cutting the end off the log is not detected, a forger who also relabels every grant is not
+caught, and after `optimize` the chain is checked from the first line that is left. Lines from before the chain
+existed stay readable and are reported as unprotected. A damaged log never blocks recording a decision; `verify`
+reports the damage.
+
+## Security check (`kos/secure.py`)
+`kos security` is one read-only pass, run when asked (no daemon, same rule as everything else): kernel
+protections, private folders and secrets (modes), audit-chain integrity, every installed app rescanned and its
+bytes compared with the hash recorded at install, grants for apps that are not installed (a reinstalled app of the
+same name would inherit them), run permits never pinned to a `declared` list, owed work, interrupted writes.
+It cannot check the seals themselves or the audit anchors (HMACs under a password-derived key); `run` and
+`kos audit --verify` do, with the password. A check that crashes is reported as a failure, never dropped.
+
+## Performance notes (what was measured, and what was left alone)
+Idle cost is low by design: no services, and PID 1 blocks in `wait()`. What was measured and changed:
+* A background broker (`kos open`) used to wake once a second per app; it now sleeps in `select()` with no timeout,
+  woken by a pidfd (app exit) and a signal wakeup pipe (SIGTERM): 1.00 -> 0.00 wakeups/s, and SIGTERM to full
+  shutdown 1.31 s -> 0.05 s. Kernels without `pidfd_open` fall back to the 1 s poll. The CPU saved is below what
+  the kernel reports; the gain is idle-state residency.
+* Apps run with `-B` from a read-only tree, so nothing could ever cache bytecode and each launch recompiled the SDK.
+  The image build now precompiles it: importing the suite modules measured ~94 ms -> ~62 ms (noise in a shared
+  container is ~10%).
+Measured and deliberately NOT changed: `kos optimize` recompresses every app on every call, but all 144 suite apps
+total 67 KiB and it costs 80 ms; CLI start-up (~85 ms) could shed at most ~19 ms by lazy imports; the secure wipe
+of an app's cache fsyncs, which is the point of it; scrypt is the security parameter, not waste (measured here:
+~0.6 s of CPU and ~140 MiB of memory for every password check). The foreground session loop still wakes 4x/s
+while an app is in front of you: the timeout serves the first-frame deadline for the boot prompts and a
+child-exit check, and it could be made event-driven, but that loop drives the trusted password/device overlay, so
+it was left alone for a saving of four wakeups a second while the screen is on.
 ## Addresses, extensions, mods and the three layers
 **Addresses** (`address.py`). `kos://APP[/path][?query]`, or a bare name. One strict parser: only the `kos://`
 scheme, an app name, then optional `/path` and `?query` from a small safe alphabet (no `%`, `#`, whitespace,
@@ -247,7 +289,12 @@ hypervisor) as a bare-metal backend.
 * A process running as the owner outside KOS could read `auth.json` and guess
   passwords offline (at scrypt cost). Fix: root-owned verifier + tiny setuid-free
   broker over SO_PEERCRED.
-* No seccomp filter yet; Landlock + namespaces only.
+* seccomp is a short denylist (EPERM, not kill), x86_64 only. It is not an allowlist, and other
+  architectures get no filter (their syscall numbers could not be tested here); `kos doctor` says so.
+* The audit log's tail can be cut off undetected, and a forger who relabels every grant is not caught
+  (see "Audit log"). Nothing outside the log remembers what it should say.
+* Run permits granted before permission tracking existed carry no `declared` list, so an update to such an
+  app can add `network`/`system` without asking. `kos security` lists them; `kos permit NAME` re-records.
 * Updates are checked for version order but not for publisher signature yet.
 * Background apps (`kos open`): the broker's Unix socket path is under
   `<state>/instances/`, which must fit in `sizeof(sockaddr_un.sun_path)`

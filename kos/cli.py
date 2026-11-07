@@ -426,11 +426,12 @@ def _resolve_mixed(path: str):
 
 
 def cmd_ls(args, paths: Paths) -> int:
+    from .protocol import escape_text
     vfs, last = _resolve_mixed(args.path)
     vfs.cd(last)
     for e in vfs.list():
         tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
-        print(f"{e.name}{tag}")
+        print(f"{escape_text(e.name)}{tag}")
     return 0
 
 
@@ -448,7 +449,7 @@ def cmd_explore(args, paths: Paths) -> int:
     """An interactive shell for walking real directories and zip files as one
     tree: `cd something.kapp` steps straight into the archive. Browsing
     (`cd`/`ls`) needs no password; `cat` does, same as `kos view`."""
-    from .protocol import clean_text
+    from .protocol import clean_text, escape_text
     from .vfs import VFS
 
     vfs = VFS(args.start)
@@ -471,7 +472,7 @@ def cmd_explore(args, paths: Paths) -> int:
             elif cmd == "ls":
                 for e in vfs.list():
                     tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
-                    print(f"{e.name}{tag}")
+                    print(f"{escape_text(e.name)}{tag}")
             elif cmd in ("cd", "up") and (cmd == "up" or not rest):
                 vfs.up()
             elif cmd == "cd":
@@ -755,6 +756,8 @@ def cmd_doctor(args, paths: Paths) -> int:
     r = report()
     ok = lambda b: "yes" if b else "NO"
     print(f"Landlock ABI          : {r['landlock_abi'] or 'NOT AVAILABLE (apps will refuse to run)'}")
+    print(f"seccomp filter (apps) : {ok(r['seccomp_filter'])}" if r["seccomp_filter"]
+          else "seccomp filter (apps) : not built for this CPU architecture (Landlock + namespaces still apply)")
     print(f"user namespaces       : {ok(r['user_namespaces'])}")
     print(f"KVM (kernel cells)    : {ok(r['kvm'])}")
     print(f"vhost-vsock (cells)   : {ok(r['vhost_vsock'])}")
@@ -793,9 +796,40 @@ def cmd_firmware(args, paths: Paths) -> int:
 def cmd_audit(args, paths: Paths) -> int:
     import time
     from .auth import AuditLog
-    for e in AuditLog(paths).entries()[-args.n:]:
+    from .protocol import escape_text
+    log = AuditLog(paths)
+    if args.verify:
+        return _audit_verify(log, paths)
+    for e in log.tail(args.n):
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
-        print(f"{t}  {e['outcome']:13} {e['action']:15} {e['target']}")
+        # targets can hold names that came from disks and zips: print them escaped
+        print(f"{t}  {escape_text(e['outcome']):13} {escape_text(e['action']):15} {escape_text(e['target'])}")
+    return 0
+
+
+def cmd_security(args, paths: Paths) -> int:
+    """`kos security`: every check KOS can run on itself without your password."""
+    from .secure import FAIL, render, run_checks
+    checks = run_checks(paths)
+    print(render(checks))
+    return 3 if any(c.level == FAIL for c in checks) else 0
+
+
+def _audit_verify(log, paths: Paths) -> int:
+    """`kos audit --verify`: check the hash chain, and with the password every anchor."""
+    from .auth import AUDIT_KEY_LABEL
+    authority, _ = _authority(paths)
+    with authority.authorize("audit.verify") as grant:
+        rep = log.verify(grant.key(AUDIT_KEY_LABEL))
+    print(f"{rep.entries} line(s): {rep.chained} chained, {rep.anchored} anchored to your password, "
+          f"{rep.legacy} older unprotected")
+    if rep.trimmed:
+        print("note: older lines were trimmed by 'kos optimize'; the chain is checked from the first one left")
+    if not rep.ok:
+        print(f"TAMPERED at line {rep.bad_line}: {rep.problem}")
+        return 3
+    print("intact: no line was edited, deleted or reordered, and every anchor matches your password")
+    print("(a log cut short at the very end cannot be detected - nothing else remembers its length)")
     return 0
 
 
@@ -1001,11 +1035,14 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    sub.add_parser("security", help="check everything KOS can verify about itself (no password, read-only)")
     s = sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
     s.add_argument("fw_cmd", nargs="?", choices=["status", "plan"],
                    help="plan: read-only advice on what each blocking chip would need")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
+    s.add_argument("--verify", action="store_true",
+                   help="check the log for tampering (needs your password to check the anchors)")
     s = sub.add_parser("admin", help="the elevated administrator keyboard")
     s.add_argument("admin_cmd", nargs="?", choices=["status", "boot", "lock"])
     sub.add_parser("owed", help="what earlier writes still owe (a scan, an optimize)")
@@ -1049,6 +1086,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize,
+            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit, "security": cmd_security,
             "cell": cmd_cell, "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop, "aios": cmd_aios, "usb": cmd_usb}

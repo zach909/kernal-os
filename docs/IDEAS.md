@@ -9,6 +9,20 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **Per-run caches on tmpfs.** An app's cache is scratch that is wiped when it ends. Putting it in RAM would mean
+  zero SSD writes for it and no overwrite-and-fsync wipe at all (data is gone at power-off), at the price of RAM
+  (it would need its own size cap). Not done: it changes `appdirs`/`cache`/`registry` layout and the wipe's
+  guarantees.
+- **seccomp for aarch64, and an allowlist.** The filter is an x86_64 denylist; other architectures run with
+  Landlock + namespaces only. Needs that architecture's syscall numbers verified on real hardware.
+- **Something outside the audit log that remembers its length.** A log cut short at the very end is not
+  detected. A counter/anchor in a TPM or on another machine would close it.
+- **Event-driven foreground session loop.** It wakes 4x/s while an app is in front of you; a pidfd plus a
+  deadline-only timeout would remove that, but it is the trusted password overlay's loop.
+- **Bind run permits to the app's hash.** `kos security` now lists grants for apps that are gone and permits that
+  were never pinned to a `declared` list; binding to the sealed hash (already a backlog item below) would make
+  them impossible.
+
 - **More shared spaces.** The mechanism exists (`owns:`/`uses:`, `kos grant`); only `contacts`, `calendar` and
   `tasks` are wired. Candidates: the mail client and server sharing mailboxes, cloud storage and file sync,
   and calendar automation writing to `calendar`.
