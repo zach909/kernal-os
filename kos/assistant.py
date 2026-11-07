@@ -52,8 +52,8 @@ ERRORS = ("not-configured", "refused", "unreachable", "bad-reply")
 # Control characters, C1 and bidi overrides are dropped; newline stays (a reply has paragraphs),
 # tab becomes a space.
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
-_URL_OK = re.compile(r"^[\x21-\x7e]+$")      # printable ASCII, no spaces: no unicode hosts
-_HOST_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_URL_OK = re.compile(r"[\x21-\x7e]+")      # printable ASCII, no spaces: no unicode hosts
+_HOST_RE = re.compile(r"(?=.{1,253}\Z)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 
 
 class AssistantError(Exception):
@@ -79,7 +79,7 @@ def check_endpoint(kind: str, url: str) -> str:
     """Return ``url`` if the policy allows it for ``kind`` ('local' or 'api'), else PolicyError."""
     if kind not in ("local", "api"):
         raise PolicyError("kind must be local or api")
-    if not isinstance(url, str) or not url or len(url) > 2048 or not _URL_OK.match(url):
+    if not isinstance(url, str) or not url or len(url) > 2048 or not _URL_OK.fullmatch(url):
         raise PolicyError("the endpoint must be a plain ASCII URL")
     try:
         p = urlsplit(url)
@@ -99,7 +99,7 @@ def check_endpoint(kind: str, url: str) -> str:
         if port not in (None, 443):
             raise PolicyError("an API endpoint must use port 443")
         h = host.lower()
-        if not _HOST_RE.match(h) or h.endswith((".localhost", ".local", ".internal", ".lan")):
+        if not _HOST_RE.fullmatch(h) or h.endswith((".localhost", ".local", ".internal", ".lan")):
             raise PolicyError("an API endpoint must be a public DNS name (not an IP address or a local name)")
         return url
     if scheme not in ("http", "https"):

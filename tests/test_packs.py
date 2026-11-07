@@ -50,6 +50,17 @@ class TestPackList(unittest.TestCase):
                 self.assertNotIn("network", k.manifest.permissions, f"{e.name}: packs ask for no network unless the note says why") if not e.network else None
                 self.assertIn(e.pack.encode(), k.read("app.py") if hasattr(k, "read") else e.pack.encode())
 
+    def test_every_shared_folder_has_exactly_one_owner_and_every_user_has_one_to_use(self):
+        owners = {}
+        for e in ENTRIES:
+            for sp in e.owns: owners.setdefault(sp, []).append(e.name)
+        self.assertEqual({sp: o for sp, o in owners.items() if len(o) > 1}, {}, "two apps cannot own one folder: the second is locked out")
+        core_owned = {"contacts", "calendar", "tasks"}                                  # owned by core apps
+        for e in ENTRIES:
+            for sp in e.uses:
+                self.assertTrue(sp in owners or sp in core_owned, f"{e.name} uses '{sp}', which nothing owns")
+            self.assertFalse(set(e.owns) & set(e.uses), f"{e.name} both owns and uses the same folder")
+
     def test_no_pack_needs_the_network_by_default(self):
         for e in BUILT:
             if e.network: self.assertIn("network", e.note.lower(), e.title)

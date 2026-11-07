@@ -1241,7 +1241,28 @@ def erp_summary(host) -> list:
     return out
 
 
+class ErpHost:
+    """The ERP hub keeps its OWN copy of the invoices / inventory / employees data, shared only among its own five
+    modules, and never touches the shared folders of the standalone Invoicing / Inventory / Human Resources apps (an
+    app that `owns` a folder can be the only one to: two owners would lock each other out). `contacts` passes through."""
+    PRIVATE = ("invoices", "inventory", "employees")
+
+    def __init__(self, host):
+        self.h = host
+
+    def __getattr__(self, n): return getattr(self.h, n)
+    def _k(self, k, space): return f"erp-{space}-{k}"
+    def get(self, k, space=None): return self.h.get(self._k(k, space)) if space in self.PRIVATE else self.h.get(k, space)
+    def put(self, k, v, space=None): return self.h.put(self._k(k, space), v) if space in self.PRIVATE else self.h.put(k, v, space)
+    def delete(self, k, space=None): return self.h.delete(self._k(k, space)) if space in self.PRIVATE else self.h.delete(k, space)
+    def keys(self, space=None):
+        if space not in self.PRIVATE: return self.h.keys(space)
+        pre = f"erp-{space}-"
+        return [k[len(pre):] for k in self.h.keys() if k.startswith(pre)]
+
+
 def make_erp(host, e=None):
+    host = ErpHost(host)
     def sub(mk, prefix):
         def f():
             r = mk(PrefixHost(host, prefix))
@@ -1250,7 +1271,7 @@ def make_erp(host, e=None):
     return Menu("ERP", [("Accounting", sub(make_accounting, "acc-")), ("Invoicing", sub(make_invoicing, "inv-")),
                         ("Inventory Management", sub(make_inventory, "stk-")), ("Procurement", sub(make_procurement, "pro-")),
                         ("Human Resources", sub(make_hr, "hr-")), ("Summary (receivables, open POs, stock, headcount)", lambda: view("ERP summary", erp_summary(host)))],
-                wrap("One module, five apps, each with its own storage prefix. They share the invoices, inventory and employees folders, so Accounting "
+                wrap("One module, five apps, each with its own storage prefix. Inside the hub they share the invoices, inventory and employees data, so Accounting "
                      "can see Invoicing and Procurement can see stock. Nothing is posted between them automatically except what you confirm in "
                      "Accounting ('post suggested entries').", 76))
 
@@ -1275,7 +1296,7 @@ ENTRIES: list = [
         "Employee records (no government ID or bank numbers collected), leave types with monthly accrual, requests with approval, org chart with cycle "
         "detection, headcount. No payroll, no holidays calendar (Mon-Fri days), no carry-over, no documents.", owns=["employees"]),
     app("ERP", _first(make_erp), "partial",
-        "A hub that opens the five apps with separate storage prefixes plus a read-only summary. Single user; the only cross-module posting is "
+        "A hub that opens the five apps with separate storage prefixes plus a read-only summary. It keeps its own copy of the data (it does not share with the standalone Invoicing, Inventory or HR apps). Single user; the only cross-module posting is "
         "Accounting's confirmed 'post suggested entries' from invoices; no automatic postings for stock, purchasing or payroll.",
-        owns=["invoices", "inventory", "employees"], uses=["contacts"]),
+        uses=["contacts"]),
 ]

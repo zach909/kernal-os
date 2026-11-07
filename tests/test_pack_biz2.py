@@ -336,7 +336,8 @@ class TestSharingAndErp(unittest.TestCase):
         self.assertEqual((e["Human Resources"].owns, e["Human Resources"].uses), (["employees"], []))
         self.assertEqual((e["Accounting"].owns, e["Accounting"].uses), ([], ["invoices"]))
         self.assertEqual((e["Procurement"].owns, e["Procurement"].uses), ([], ["inventory", "employees"]))
-        self.assertEqual((sorted(e["ERP"].owns), e["ERP"].uses), (["employees", "inventory", "invoices"], ["contacts"]))
+        # ERP owns nothing: two apps cannot own one folder (the second would be locked out of its own data)
+        self.assertEqual((e["ERP"].owns, e["ERP"].uses), ([], ["contacts"]))
         for x in e.values():
             self.assertGreater(len(x.note), 20); self.assertFalse(x.network)
         src = (Path(b.__file__)).read_text()
@@ -351,3 +352,20 @@ class TestSharingAndErp(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestErpNeverTouchesTheStandaloneAppsFolders(unittest.TestCase):
+    def test_erp_data_for_the_owned_folders_stays_private_to_the_hub_and_contacts_passes_through(self):
+        from kos.office.pack_biz2 import ErpHost
+        from kos.office.packkit import shared_add, shared_items
+        from kos.office.ui import FakeHost
+        h = FakeHost([])
+        erp = ErpHost(h)
+        for sp in ("invoices", "inventory", "employees"):
+            self.assertTrue(shared_add(erp, sp, {"number": "1"}))
+            self.assertEqual(h.spaces, {}, sp)                          # nothing went into a shared folder
+            self.assertEqual(len(shared_items(erp, sp)), 1)             # the hub's own modules still see it
+            self.assertEqual(shared_items(FakeHost([]), sp), [])        # and a different app does not
+        self.assertTrue(shared_add(erp, "contacts", {"name": "Ann"}))
+        self.assertEqual(len(shared_items(FakeHost([], data={}), "contacts")), 0)
+        self.assertEqual([r["name"] for r in h.spaces["contacts"] and shared_items(h, "contacts")], ["Ann"])    # contacts is the real shared folder
+
