@@ -375,6 +375,19 @@ class Lab:
         self.work = [fn(self.clean(i)) for i in range(len(self.work))]
 
 
+class PasteEditor(Editor):
+    """Editor whose Ctrl-S loads the text and shows the reason if it is refused."""
+
+    def save(self):
+        try:
+            self.on_save(self.area.text)
+        except ValueError as e:
+            self.flash = ("not loaded: " + str(e))[:70]
+            return
+        self.area.dirty = False
+        self.flash = "loaded"
+
+
 def make_lab(host, entry):
     lab = Lab(host)
 
@@ -396,7 +409,7 @@ def make_lab(host, entry):
                                f"sample rate {lab.fs:g} Hz (set it with 'Sample rate')", "Stored unencrypted in this app's vault."])
 
     def paste():
-        return ("push", Editor("Paste CSV", lab.csv, lambda t: do_load(t), hint="Ctrl-S loads"))
+        return ("push", PasteEditor("Paste CSV", lab.csv, lab.load, hint="Ctrl-S loads"))
 
     def demo():
         lab.fs = 250.0
@@ -573,7 +586,7 @@ ENTRIES: list = [
     app("Neural Data Manager", make_ndm, "partial", NOTE_NDM),
     none("Neural Interface Devices",
          "Brain-computer interfaces, signal acquisition, thought-to-text, neural keyboard/mouse, intent recognition and device monitoring need sensors, "
-         "real-time processing and device access apps never get. Signal Lab covers recorded data only."),
+         "real-time processing and device access apps never get. Signal Lab covers recorded data only; `kos usb` and `kos firmware` are not neural links."),
     none("Assistive and Clinical Control",
          "Prosthetic and mobility control, sensory/haptic feedback, neurofeedback, rehabilitation and memory aids are safety-critical medical "
          "functions. KOS will not simulate them or imply they work, and a sandboxed app has no device path to them."),

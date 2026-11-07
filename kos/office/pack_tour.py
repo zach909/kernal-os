@@ -241,7 +241,6 @@ SAFARI = (
     ("Track spending against a budget", "Budget Tracker", "Money in and out."),
     ("Play a board game", "Chess", "A game, offline."),
     ("Keep a daily diary", "Journal", "One entry a day."),
-    ("Pin a quick reminder note", "Sticky Notes", "Small notes."),
     ("Build a daily streak of habits", "Habit Tracker", "Streaks."),
     ("Save places with a category", "Places", "It owns the places folder."),
     ("Read help about KOS itself", "KOS Help", "Help built into the suite."),

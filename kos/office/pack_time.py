@@ -120,7 +120,7 @@ class _App(Screen):
         d = self.st.load(self.KEY, None)
         d = d if isinstance(d, dict) else {}
         for k, v in default.items():
-            if k not in d or not isinstance(d[k], type(v)):
+            if k not in d or (v is not None and not isinstance(d[k], type(v))):
                 d[k] = v
         self.d, self.nav, self.msg = d, ListNav(0), ""
 
