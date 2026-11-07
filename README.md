@@ -71,7 +71,7 @@ Honest list, so nobody assumes these are covered:
 | Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
 | Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
 | Everything is an app | `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
-| Search box | The Ctrl-N box and the App Library's `/` search (`kos/office/finder.py`) only *show*: a command hit is the line to type, never a run, and an app hit is a `request` the OS still asks your password for. File search covers only what the app can already read (its own vault plus the shared folders it was granted), at most 200 items and 20,000 characters each per place, and never keys that look like credentials (`llm`, `api_key`, `token`, `password`, ...), the agent's chat history or exports. That filter is a **name pattern, not a classifier**: a secret stored under an ordinary key name (say `note-7`) would be searchable by that same app. The App Library has no files of its own, so it searches apps and commands only, and its "Ask the assistant" row opens the `ai-assistant` app but cannot hand it your question. The command list is a generated table (`python3 -m kos.office.cmdindex --write`); a test fails if it drifts from `kos help`. Not tested: the graphical-mode drawing of the Ctrl-N box. |
+| Search box | The Ctrl-N box and the App Library's `/` search (`kos/office/finder.py`) only *show*: a command hit is the line to type, never a run, and an app hit is a `request` the OS still asks your password for. File search covers only what the app can already read (its own vault plus the shared folders it was granted), at most 200 items and 20,000 characters each per place, and never keys that look like credentials (`llm`, `api_key`, `token`, `password`, ...), the agent's chat history or exports. That filter is a **name pattern, not a classifier**: a secret stored under an ordinary key name (say `note-7`) would be searchable by that same app. The App Library has no files of its own, so it searches apps and commands only, and its "Ask the assistant" row opens the `ai-assistant` app but cannot hand it your question. The command list is a generated table (`python3 -m kos.office.cmdindex --write`); a test fails if it drifts from `kos help`. Ctrl-Y is OS-handled only under `kos boot desktop` and only after the keyboard is booted; an app that wanted Ctrl-Y for itself loses it there. The Ctrl-Y mapping is tested through the terminal path and scripted devices, **not on a real evdev keyboard**. Not tested: the graphical-mode drawing of the Ctrl-N box. |
 
 ## How it works
 
@@ -334,7 +334,9 @@ first; each code line is its own app, so variables do not persist.
 
 ## One search box
 
-Press **Ctrl-N** in any suite app (or **/** in the App Library). One line, no modes to pick, and the box
+Press **Ctrl-Y on the desktop, from any app or screen**: the OS (not the app) switches to the App Library with its
+search box open, the same way the right mouse button opens the Library. Inside a suite app, **Ctrl-N** opens the same
+box with that app's own files too (and **/** or Ctrl-Y in the App Library). One line, no modes to pick, and the box
 decides what you meant:
 
 ```
@@ -353,6 +355,8 @@ find> (empty, Enter)              Talk to the assistant
   assistant's own history are never indexed.
 * **Assistant** opens this app's built-in agent with your words already sent. With no model connected it
   answers from local tools and says so.
+* Ctrl-Y is the OS's key: it is never forwarded, so no app can see or block it. It works under `kos boot desktop`,
+  where the OS knows the App Library; a plain `run APP` has nowhere to switch to, so the key then goes to the app.
 * The **App Library** adds installed apps to the same list (Enter asks the OS to open one, with your password in
   the OS's own prompt). Text from app descriptions and files is untrusted and stripped of control characters
   before it is drawn.

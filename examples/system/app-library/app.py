@@ -2,7 +2,7 @@
 It cannot open anything by itself: the OS checks the app is permitted and
 asks for your password in its own prompt, which this app cannot see or cover.
 
-Keys: up/down select, enter open, g toggles graphical, r refresh, q back, / search.
+Keys: up/down select, enter open, g toggles graphical, r refresh, q back, / or Ctrl-Y search.
 
 Search (/): one line that looks at the installed apps and the KOS commands, and offers "Ask the
 assistant" (kos/office/finder.py - the same search the Ctrl-N box uses). Search only shows: a command
@@ -217,7 +217,7 @@ def main():
                 app.request_open(act[1], act[2])
         elif cmd == "key":
             k = ev["key"]
-            if k == "/":
+            if k in ("/", "ctrl-y"):
                 state["query"], state["sel"], state["note"] = "", 0, ""
             elif k in ("up", "k") and n:
                 state["sel"] = (state["sel"] - 1) % n

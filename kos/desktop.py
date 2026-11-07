@@ -8,6 +8,8 @@ attaches your terminal to one of them at a time:
 * the taskbar (or the App Library) asks the OS to ``focus`` an app -> attach there;
 * the right mouse button, anywhere, -> the App Library (the OS handles it; no
   app ever sees it);
+* Ctrl-Y, anywhere, -> the App Library with its search box open (commands, apps, "ask the
+  assistant"); the OS handles it too, and no app ever sees the key;
 * Ctrl-C detaches from an app and returns to the taskbar; Ctrl-C on the
   taskbar leaves the desktop. Nothing is closed by leaving.
 
@@ -40,10 +42,12 @@ class Desktop:
     outcome: {"switch": ("instance", id) | None, "booted": [...], "exit_code": n}"""
 
     def run(self) -> int:
-        target, booted = self.home, ()
+        target, booted, search = self.home, (), False
         while True:
             ctx = {"preboot": booted,
-                   "right_click_to": None if target == self.library else self.library}
+                   "right_click_to": None if target == self.library else self.library,
+                   "search_to": None if target == self.library else self.library,
+                   "first_key": "/" if search and target == self.library else ""}
             try:
                 out = self.attach(target, ctx)
             except (KAppError, RegistryError, OSError) as e:
@@ -54,8 +58,9 @@ class Desktop:
             booted = tuple(out.get("booted") or booted)
             switch = out.get("switch")
             if switch and switch[0] == "instance":
-                target = switch[1]
+                target, search = switch[1], bool(out.get("search"))
                 continue
+            search = False
             if target == self.home:
                 return int(out.get("exit_code", 0))
             target = self.home

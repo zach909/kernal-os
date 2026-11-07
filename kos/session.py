@@ -13,7 +13,9 @@ Flow for ``run graphical <app>`` (``run <app>`` is the same with a TUI page):
 Desktop sessions add three things, all driven by the OS and never by the app:
 ``preboot`` (devices already booted by the desktop's own password carry over
 from one app to the next), ``right_click_to`` (the right mouse button is the
-OS's: it switches to the App Library and is never forwarded), and ``bridge``
+OS's: it switches to the App Library and is never forwarded), ``search_to`` (the
+same, for the search key: Ctrl-Y from any app opens the App Library with its search
+box ready - kos/office/finder.py), and ``bridge``
 (an app with the ``system`` permission may *ask* the OS to open, close or
 switch apps - see ``system.py``). ``outcome`` reports where to go next.
 
@@ -108,12 +110,19 @@ class SessionPrompter:
         self.s.show_modal(None)
 
 
+# The OS's own key, handled from any app on the desktop and never forwarded (like the right mouse
+# button): it opens the App Library with the search box ready. Ctrl-Y maps the same on a terminal and on
+# evdev; Ctrl-Space does not (a terminal sends NUL).
+SEARCH_KEY = "ctrl-y"
+
+
 class Session:
     def __init__(self, *, name: str, mode: str, channel: Channel,
                  proc: Optional[subprocess.Popen], surface, devices, authority: Authority,
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
+                 search_to: Optional[str] = None, first_key: str = "",
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None):
         self.name, self.mode = name, mode
         self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
@@ -128,6 +137,9 @@ class Session:
         self.bridge = bridge
         self.vault = vault
         self.right_click_to = right_click_to
+        self.search_to = search_to          # instance id of the App Library; None inside the library itself
+        self.first_key = first_key          # a key the OS types for the user once, right after hello
+        self.search_requested = False
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
         self.log = log
@@ -203,6 +215,10 @@ class Session:
         if t == "key":
             if "keyboard" not in self.booted:
                 self.flash("keyboard not booted for this app")
+                return
+            if ev["key"] == SEARCH_KEY and self.search_to:
+                self.search_requested = True       # the search key is the OS's here; the app never sees it
+                self._switch(("instance", self.search_to))
                 return
             self._send({"cmd": "key", "key": ev["key"]})
             return
@@ -336,6 +352,8 @@ class Session:
             self._send({"cmd": "extensions", "items": self.extensions.get("items", []),
                         "skipped": self.extensions.get("skipped", [])})
         self._preboot_devices()
+        if self.first_key:
+            self._send({"cmd": "key", "key": self.first_key})
         started = time.monotonic()
         try:
             while not self.stop_requested and self._app_alive():
@@ -369,7 +387,7 @@ class Session:
         finally:
             self.shutdown()
             if self.outcome is not None:
-                self.outcome.update(booted=sorted(self.booted), switch=self.switch,
+                self.outcome.update(booted=sorted(self.booted), switch=self.switch, search=self.search_requested,
                                     detached=self.detached, exit_code=self.exit_code or 0)
         if self.exit_code is None and self.proc is not None:
             self.exit_code = self.proc.returncode or 0

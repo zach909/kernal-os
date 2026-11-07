@@ -1448,6 +1448,10 @@ def _keys(text):
     return [{"type": "key", "key": c} for c in text]
 
 
+def _keys_named(*names):
+    return [{"type": "key", "key": n} for n in names]
+
+
 ENTER = {"type": "key", "key": "enter"}
 
 
@@ -1649,6 +1653,33 @@ class TestDesktopSessions(DesktopSessionEnv):
         self.assertIn('"button":"left"', out)                    # ordinary clicks still reach the app
         self.assertNotIn('"button":"right"', out)                # the right button is the OS's
 
+    def test_the_search_key_opens_the_library_search_from_any_app_and_the_app_never_sees_it(self):
+        s = self.start(EXAMPLE, "hello", "cmd", search_to="library-aaaaaa")
+        self.boot_both()
+        self.devices.push(*_keys("x"), *_keys_named("ctrl-y"), {"type": "interrupt"})   # the interrupt is only a safety net
+        s.run(first_frame_timeout=0.5)
+        self.assertEqual(self.outcome["switch"], ("instance", "library-aaaaaa"))
+        self.assertTrue(self.outcome["search"])
+        out = self.output()
+        self.assertIn('"cmd":"key","key":"x"', out)              # ordinary keys still reach the app
+        self.assertNotIn("ctrl-y", out)                          # the search key is the OS's
+
+    def test_without_a_library_to_go_to_the_search_key_belongs_to_the_app(self):
+        s = self.start(EXAMPLE, "hello", "cmd")
+        self.boot_both()
+        self.devices.push(*_keys_named("ctrl-y"), {"type": "interrupt"})
+        s.run(first_frame_timeout=0.5)
+        self.assertIsNone(self.outcome["switch"])
+        self.assertFalse(self.outcome["search"])
+        self.assertIn("ctrl-y", self.output())
+
+    def test_the_library_opens_with_its_search_box_ready_when_the_os_types_the_first_key(self):
+        s = self.start(SYSTEM_DIR / "app-library", "app-library", bridge=SystemBridge(self.paths), first_key="/")
+        self.boot_both()
+        threading.Timer(2.5, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("search>", self.output())
+
     def test_devices_booted_by_the_desktop_carry_over_with_no_new_prompt(self):
         s = self.start(EXAMPLE, "hello", "cmd", preboot=("mouse", "keyboard"))
         self.devices.push(*_keys("x"), {"type": "interrupt"})   # no y/password anywhere
@@ -1736,6 +1767,19 @@ class TestDesktopNavigation(unittest.TestCase):
             {"switch": ("instance", "library-222222")}, {"switch": None}, {"exit_code": 0}])
         self.assertEqual(calls[1][0], "library-222222")
         self.assertIsNone(calls[1][1]["right_click_to"])
+
+    def test_search_key_goes_to_the_library_with_the_first_key_typed_and_only_once(self):
+        _, calls = self.run_desktop([
+            {"switch": ("instance", "hello-333333")},
+            {"switch": ("instance", "library-222222"), "search": True},
+            {"switch": None},                      # back home from the library
+            {"switch": ("instance", "library-222222")},   # right mouse: no search box this time
+            {"exit_code": 0}, {"exit_code": 0}])
+        self.assertEqual(calls[1][1]["search_to"], "library-222222")
+        self.assertEqual(calls[2][0], "library-222222")
+        self.assertEqual(calls[2][1]["first_key"], "/")
+        self.assertIsNone(calls[2][1]["search_to"])            # inside the library the key is the library's own
+        self.assertEqual(calls[4][1]["first_key"], "")
 
     def test_vanished_app_falls_back_home_but_vanished_taskbar_is_an_error(self):
         _, calls = self.run_desktop([

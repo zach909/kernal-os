@@ -367,7 +367,8 @@ def cmd_boot(args, paths: Paths) -> int:
         prompter.close()
         outcome: dict = {}
         _attach_session(paths, authority, inst, outcome=outcome,
-                        preboot=tuple(ctx["preboot"]), right_click_to=ctx["right_click_to"])
+                        preboot=tuple(ctx["preboot"]), right_click_to=ctx["right_click_to"],
+                        search_to=ctx.get("search_to"), first_key=ctx.get("first_key", ""))
         return outcome
 
     try:
