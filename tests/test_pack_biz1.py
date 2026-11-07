@@ -184,11 +184,11 @@ class TestScreens(unittest.TestCase):
         m = e.args["make"](h, e)
         self.assertIn("(1 available)", m.entries[4][0])
         self.assertIn("none: empty or not granted", m.entries[5][0])
-        h2 = FakeHost(["5", "enter", "ctrl-s", "ctrl-q"])        # menu item 5: pick Ann, save prefilled deal
+        h2 = FakeHost(["5", "enter", "enter", "Big", "enter", "ctrl-s", "ctrl-q"])        # menu item 5: pick Ann, save prefilled deal
         h2.spaces = h.spaces
         run(h2, e.args["make"](h2, e))
         d = shared_items(h2, "deals")[0]
-        self.assertEqual((d["contact"], d["account"], d["name"]), ("Ann", "Acme", ""))
+        self.assertEqual((d["contact"], d["account"], d["name"]), ("Ann", "Acme", "Big"))
 
     def test_pick_empty_screen(self):
         h = FakeHost(["6", "escape", "ctrl-q"])
@@ -205,7 +205,7 @@ class TestScreens(unittest.TestCase):
         out = "\n".join(P.sales_report([], [], got, [{"status": "paid", "total": "50", "due": "2026-11-02"}, {"status": "draft", "total": "9", "due": "2026-11-02"},
                                                          {"status": "sent", "total": "25.5", "due": "2026-11-09"}]))
         self.assertIn("lead", out)
-        self.assertIn("2026-11 target         0.00  billed        75.50", out)
+        self.assertIn("2026-11  target         0.00  billed        75.50", out)
         m = sales.args["make"](b, sales)
         m.entries[0][1]()                                          # opens without error
         self.assertIn("not been granted", "\n".join(P.sales_report([], [])))

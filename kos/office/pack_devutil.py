@@ -19,8 +19,10 @@ from bisect import bisect_left, bisect_right
 from collections import Counter
 from datetime import datetime, timedelta
 
-from .packkit import app
-from .ui import Editor, Menu, Store, TextView, bar, table, wrap
+from .packkit import app, shared_add, shared_items
+from .records import Data, RecordList
+from .specs import R
+from .ui import Editor, Menu, Message, SpaceHost, Store, TextView, bar, table, wrap
 
 CAP = 100_000          # characters of input a tool looks at
 MAXLINES = 5000        # lines of a log / list a tool looks at
@@ -52,13 +54,20 @@ def _render(fn, text: str) -> list:
     return res[:2000] or ["(nothing to show)"]
 
 
-def _suite(title: str, key: str, tools: list, intro: list):
-    """tools: (label, fn(text) -> lines, sample text, hint). One Menu; each tool is an Editor and Ctrl-R shows the result."""
+LOGS = R("logs", "Saved logs", "log", "name*; text: long*")      # the shared folder `logs` (owner: Log Viewer)
+NO_LOGS = ["No saved logs to show. Either none are saved yet, or this app has not been granted read access to the",
+           "shared folder 'logs' (the owner of the machine can run: kos grant APP space:logs --level read).",
+           "Nothing is lost: paste the text into any tool instead."]
+
+
+def _suite(title: str, key: str, tools: list, intro: list, role: str = ""):
+    """tools: (label, fn(text) -> lines, sample, hint[, prefix]). One Menu; each tool is an Editor and Ctrl-R shows the result.
+    role 'owner': Log Viewer keeps saved logs in the shared space `logs`; role 'user': reads them (read-only)."""
     def make(host, entry):
         store = Store(host)
 
         def opener(i):
-            label, fn, sample, hint = tools[i]
+            label, fn, sample, hint = tools[i][:4]
 
             def go():
                 saved = store.load(f"{key}.{i}", None)
@@ -69,10 +78,31 @@ def _suite(title: str, key: str, tools: list, intro: list):
 
                 def run(ed):
                     return ("push", TextView(label, _render(fn, ed.area.text)))
-                return ("push", Editor(label, text, on_save=save, extra_keys={"ctrl-r": run},
-                                       hint="Ctrl-R run   " + hint))
+                extra = {"ctrl-r": run}
+                if role == "owner":
+                    def keep(ed):
+                        ok = shared_add(SpaceHost(host, "logs"), "logs", {"name": f"{label[:20]} {time.strftime('%Y-%m-%d %H:%M')}", "text": ed.area.text[:CAP]})
+                        ed.flash = "saved to the logs folder" if ok else "could not save (folder full or refused)"
+                    extra["ctrl-g"] = keep
+                return ("push", Editor(label, text, on_save=save, extra_keys=extra,
+                                       hint="Ctrl-R run   " + ("Ctrl-G keep as a saved log   " if role == "owner" else "") + hint))
             return go
-        return Menu(title, [(t[0], opener(i)) for i, t in enumerate(tools)], intro)
+
+        def pick_log():
+            items = [r for r in shared_items(SpaceHost(host, "logs"), "logs") if isinstance(r.get("text"), str)][:200]
+            if not items:
+                return ("push", Message("Saved logs", NO_LOGS))
+
+            def with_tool(text):
+                return ("push", Menu("Run on this log", [(t[0], (lambda t=t: ("push", TextView(t[0], _render(t[1], (t[4] if len(t) > 4 else "") + text[:CAP]))))) for t in tools]))
+            return ("push", Menu("Saved logs", [(str(r.get("name", "?"))[:60], (lambda r=r: with_tool(r["text"]))) for r in items]))
+        entries = [(t[0], opener(i)) for i, t in enumerate(tools)]
+        if role == "owner":
+            entries.append(("Saved logs (shared folder: add, edit, delete)", lambda: ("push", RecordList(Data(SpaceHost(host, "logs"), LOGS)))))
+            entries.append(("Run a tool on a saved log", pick_log))
+        elif role == "user":
+            entries.append(("Run a tool on a saved log (read-only)", pick_log))
+        return Menu(title, entries, intro)
     return make
 
 
@@ -657,7 +687,7 @@ LOG_SAMPLE = ("2024-03-05T10:00:01Z INFO server started\n2024-03-05T10:00:09Z ER
               '203.0.113.9 - - [05/Mar/2024:10:03:00 +0000] "GET /missing HTTP/1.1" 404 153 "-" "curl/8.0"')
 LOG_TOOLS = [
     ("Summary (formats, levels, top messages)", t_log_summary, LOG_SAMPLE, "paste log lines"),
-    ("Filter by level / time / text", t_log_filter, "level>=WARN from=2024-03-05T10:00 text=timeout\n" + LOG_SAMPLE, "line 1 = filter"),
+    ("Filter by level / time / text", t_log_filter, "level>=WARN from=2024-03-05T10:00 text=timeout\n" + LOG_SAMPLE, "line 1 = filter", "\n"),
     ("Top messages", t_log_top, LOG_SAMPLE, ""), ("Timeline", t_log_time, LOG_SAMPLE, ""),
     ("Errors grouped by signature", t_log_errors, LOG_SAMPLE, ""),
 ]
@@ -1145,13 +1175,13 @@ ENTRIES: list = [
     app("Developer Utilities", _suite("Developer Utilities", "devutil", DEV_TOOLS,
         ["Type or paste text, press Ctrl-R to run, Ctrl-S to keep it in the vault."]), "full",
         "Regex (conservative guard: nested repeats refused), base64/hex/URL, hashes, UUID4, timestamps, JSON, diff, bases, JWT decode (never verifies), line tools. Text only."),
-    app("Log Viewer", _suite("Log Viewer", "logview", LOG_TOOLS, [NOTE_LOG]), "partial",
-        "Parses syslog, ISO-timestamp, JSON-lines and access-log text you paste; it cannot read /var/log, the console or crash reports by itself."),
-    app("Debug Helper", _suite("Debug Helper", "debughelp", DEBUG_TOOLS, ["Reads pasted text. It does not run or profile your code."]), "partial",
-        "Explains pasted Python tracebacks and JavaScript stacks and summarises pasted pstats text; it does not run code, attach a debugger or profile anything."),
+    app("Log Viewer", _suite("Log Viewer", "logview", LOG_TOOLS, [NOTE_LOG], "owner"), "partial",
+        "Parses syslog, ISO-timestamp, JSON-lines and access-log text you paste; it cannot read /var/log, the console or crash reports by itself. Keeps saved logs in the shared folder logs.", owns=["logs"]),
+    app("Debug Helper", _suite("Debug Helper", "debughelp", DEBUG_TOOLS, ["Reads pasted text. It does not run or profile your code."], "user"), "partial",
+        "Explains pasted Python tracebacks and JavaScript stacks and summarises pasted pstats text; it does not run code, attach a debugger or profile anything. Can read saved logs.", uses=["logs"]),
     app("Scheduled Task Planner", _suite("Scheduled Task Planner", "cronplan", CRON_TOOLS,
         ["Plans cron schedules. KOS has no background services: nothing here runs."]), "partial",
         "Parses and explains cron, lists next runs, finds overlaps and exports crontab text; KOS has no scheduler, so nothing is ever run for you."),
-    app("Website Analytics", _suite("Website Analytics", "webstats", WEB_TOOLS, ["Reports from access-log lines you paste. No tracking, no live data."]), "partial",
-        "Statistics from pasted access-log lines only; there is no tracking script, live feed or log collection."),
+    app("Website Analytics", _suite("Website Analytics", "webstats", WEB_TOOLS, ["Reports from access-log lines you paste. No tracking, no live data."], "user"), "partial",
+        "Statistics from pasted access-log lines only; there is no tracking script, live feed or log collection. Can read saved logs.", uses=["logs"]),
 ]

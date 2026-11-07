@@ -253,12 +253,13 @@ class Shared(unittest.TestCase):
         keys = "<down><down><down><enter>a<enter><enter>70<enter><ctrl-s>"
         h1 = drive(E("Health Records"), keys)
         a = H.Measures(H.SpaceHost(h1, "health"), H.S_MEAS, "records", h1)       # add a height and a heart rate too
+        a.add({"kind": "weight", "value": "70", "unit": "kg", "date": "2026-11-01"})
         a.add({"kind": "height", "value": "175", "unit": "cm", "date": "2026-11-01"})
         a.add({"kind": "heart rate", "value": "62", "unit": "", "date": "2026-11-02"})
         self.assertNotIn("records", h1.data)                      # shared, not private
         h2 = FakeHost("<down><down><down><down><escape>")
         h2.spaces = h1.spaces                                     # a second app, same shared folder
-        self.assertEqual(len(H.shared_items(h2, "health")), 3)
+        self.assertEqual(len(H.shared_items(h2, "health")), 4)
         out = "\n".join(H.fitness_report([], [], [], "2026-11-07", H.shared_items(h2, "health")))
         self.assertIn("latest heart rate 62 bpm (2026-11-02)", out)
         self.assertIn("BMI", out)

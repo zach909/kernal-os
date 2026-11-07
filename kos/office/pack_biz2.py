@@ -513,8 +513,6 @@ def make_accounting(host, e=None):
 
     def rep(fn): return lambda: fn(ns.chart.items, ns.led.entries)
 
-    def ledger_prompt():
-        return ("push", Prompt("Account ledger", "Account code:", "", lambda v: ns._open(v)))
     ns._open = lambda v: ns._stash.append(account_ledger(ns.chart.items, ns.led.entries, v.strip(), ctx["from"], ctx["to"]))
     ns._stash = []
 

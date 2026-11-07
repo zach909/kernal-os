@@ -61,7 +61,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(P.streaks(days, "2026-11-09"), (0, 3))      # a gap of one full day breaks it
         self.assertEqual(P.streaks([], "2026-11-07"), (0, 0))
         self.assertEqual(P.streaks(["2026-12-01"], "2026-11-07"), (0, 0))   # future days ignored
-        self.assertEqual(P.last_days(days, "2026-11-07"), 4)           # 11-01 is outside the 7 days? 11-01..11-07 all inside
+        self.assertEqual(P.last_days(days, "2026-11-07"), 6)           # 11-01..11-07 are all inside the 7 days
         self.assertEqual(P.last_days(days, "2026-11-07", 3), 3)
 
 
@@ -71,8 +71,9 @@ class TestClock(unittest.TestCase):
         self.assertEqual(P.alarm_next((9, 0), now, 0), ts(2026, 1, 2, 9, 0))
         self.assertEqual(P.alarm_next((10, 30), now, 0), ts(2026, 1, 1, 10, 30))
         self.assertEqual(P.alarm_next((10, 0), now, 0), ts(2026, 1, 2, 10, 0))   # strictly after now
-        # a clock that is 2 h ahead of UTC: 11:00 local is the same instant as 09:00 UTC
-        self.assertEqual(P.alarm_next((12, 0), now, 7200), ts(2026, 1, 1, 10, 0))
+        # a clock that is 2 h ahead of UTC: 13:00 local is the same instant as 11:00 UTC
+        self.assertEqual(P.alarm_next((13, 0), now, 7200), ts(2026, 1, 1, 11, 0))
+        self.assertEqual(P.alarm_next((12, 0), now, 7200), ts(2026, 1, 2, 10, 0))     # 12:00 local is now: next is tomorrow
         self.assertEqual(P.alarm_next((11, 0), now, 7200), ts(2026, 1, 2, 9, 0))
 
     def test_stopwatch_and_laps(self):
@@ -97,7 +98,7 @@ class TestClock(unittest.TestCase):
     def test_world_clock_both_sources(self):
         now = ts(2026, 1, 15, 12, 0)
         t, mins, src = P.zone_time("Tokyo", now, use_zoneinfo=False)
-        self.assertEq(( t.hour, mins, src), (21, 540, "fixed"))
+        self.assertEqual(( t.hour, mins, src), (21, 540, "fixed"))
         t, mins, src = P.zone_time("Delhi", now, use_zoneinfo=False)
         self.assertEqual((t.hour, t.minute, mins), (17, 30, 330))
         t, mins, src = P.zone_time("New York", now)
@@ -198,8 +199,10 @@ class TestReminders(unittest.TestCase):
         now = ts(2026, 11, 7, 9)
         host, scr = drive(P.Reminders, "aone<enter><enter>daily<enter> ", now=now)
         self.assertEqual(scr.d["items"][0]["due"], "2026-11-08")
-        host, scr = drive(P.Reminders, "aone<enter><enter>none<enter>s/zzz<enter>", now=now)
-        self.assertNotIn("one", host.text.split("Tasks")[0].split("\n", 3)[-1])
+        host, scr = drive(P.Reminders, "aone<enter><enter><enter>s", now=now)
+        self.assertEqual(scr.d["items"][0]["due"], "2026-11-08")                  # empty date = today, snoozed one day
+        host, scr = drive(P.Reminders, "aone<enter><enter><enter>/zzz<enter>", now=now)
+        self.assertEqual(scr.rows(), [])
 
     def test_tasks_folder_two_hosts(self):
         shared = {}
@@ -243,7 +246,7 @@ class TestSticky(unittest.TestCase):
         self.assertEqual((len(lines), cols), (15, 1))
 
     def test_screen(self):
-        host, scr = drive(P.Sticky, "aHello world<enter>aSecond\x07<enter>pcd", now=1.0)
+        host, scr = drive(P.Sticky, "aHello world<enter>aSecond\x07<enter>pc", now=1.0)
         texts = [n["t"] for n in scr.d["items"]]
         self.assertEqual(texts, ["Hello world", "Second"])
         self.assertIn("Hello world", host.text)
@@ -318,7 +321,7 @@ class TestHabits(unittest.TestCase):
         self.assertEqual(scr.d["items"][0]["days"], ["2026-11-06", "2026-11-07"])
         host, scr = drive(P.Habits, "s", host=FakeHost(data=host.data), now=now)
         self.assertIn("Run", host.text)
-        self.assertIn("#.", host.text.replace("\n", ""))
+        self.assertIn(".....##  2/7", host.text.replace("\n", ""))
         self.assertIn("Overall completion: 29%", host.text)
 
 
@@ -343,7 +346,7 @@ class TestFocus(unittest.TestCase):
         self.assertEqual(P.pomo_at(-5)["focused"], 0)
         self.assertEqual(P.pomo_at(10 ** 9)["pomodoros"], P.pomo_at(P.MAX_SESSION)["pomodoros"])   # capped
         r = P.pomo_at(100, work=10, short=5, long=5, every=2)
-        self.assertEqual(r["pomodoros"], 6)
+        self.assertEqual((r["pomodoros"], r["phase"], r["left"]), (7, "break", 5))   # 3 full cycles + the work phase ending exactly at 100
 
     def test_totals_helpers(self):
         log = [{"d": "2026-11-07", "min": 25, "task": "A"}, {"d": "2026-11-07", "min": 10, "task": "A"}, {"d": "2026-11-01", "min": 50, "task": "B"}, {"d": "2026-10-01", "min": 99}, {"d": "bad", "min": 5}]
@@ -386,6 +389,17 @@ class TestFocus(unittest.TestCase):
         self.assertIn("Task Write report", "\n".join(scr.totals()))
         self.assertIn("25 min", "\n".join(scr.totals()))
 
+    def test_regression_missing_run_key_and_battery_with_carried_data(self):
+        """A vault that holds JSON without the 'run' key (or {} at all) used to raise KeyError in Focus Manager."""
+        for data in ({}, {"focus": "{}"}, {"focus": '{"log": 5, "run": "x"}'}):
+            scr = P.Focus(FakeHost(data=data))
+            self.assertIsNone(scr.d["run"])
+        data = {}
+        for k in ["enter", "a", "n", "t", "g", "x", "/", "b", "?", "e", "c", "h", "r", "i", "s", "d", "R", "f", " ", "l", "o", "p", "u", "m", "w", "1"]:
+            host = FakeHost([k, "a", "enter", "s", "t", "escape", "escape"], data=data)
+            run(host, P.Focus(host))
+            data = host.data
+
     def test_bad_screen_time_refused(self):
         for bad in ["abc", "-5", "99999", ""]:
             host = FakeHost("m" + bad + "<enter>")
@@ -402,7 +416,7 @@ class TestEntriesAndKeys(unittest.TestCase):
             if e.scope == "partial": self.assertGreater(len(e.note), 20)
             self.assertEqual(e.uses, ["tasks"] if e.title in ("Reminders", "Focus Manager") else [])
             self.assertEqual(e.owns, [])
-        self.assertIn("no sound", P.ENTRIES[0].note)
+        self.assertIn("no audio", P.ENTRIES[0].note)
         self.assertIn("SELF-REPORTED", P.ENTRIES[5].note)
 
     def test_every_app_survives_a_key_battery(self):

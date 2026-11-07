@@ -120,7 +120,7 @@ class _App(Screen):
         d = self.st.load(self.KEY, None)
         d = d if isinstance(d, dict) else {}
         for k, v in default.items():
-            if not isinstance(d.get(k), type(v)):
+            if k not in d or not isinstance(d[k], type(v)):
                 d[k] = v
         self.d, self.nav, self.msg = d, ListNav(0), ""
 
@@ -430,14 +430,14 @@ class Reminders(_App):
 
     def ask_date(self, text):
         t = clean(text, MAX_TEXT)
-        return ("push", Prompt("When", "Date (YYYY-MM-DD, today, tomorrow, +N):", "today", lambda v: self.ask_rep(t, v))) if t else None
+        return ("push", Prompt("When", "Date (YYYY-MM-DD, today, tomorrow, +N; empty = today):", "", lambda v: self.ask_rep(t, v))) if t else None
 
     def ask_rep(self, t, v):
         due = parse_date(v, self.today())
         if not due:
             self.msg = "date not understood"
             return None
-        return ("push", Prompt("Repeat", "Repeat (none/daily/weekly/weekdays/monthly):", "none", lambda r: self.create(t, due, r)))
+        return ("push", Prompt("Repeat", "Repeat (none/daily/weekly/weekdays/monthly; empty = none):", "", lambda r: self.create(t, due, r)))
 
     def create(self, t, due, rep):
         rep = clean(rep, 12).lower() or "none"

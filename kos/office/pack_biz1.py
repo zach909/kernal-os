@@ -94,7 +94,7 @@ def _picker(host, data, space, label, fill):
     def form(r):
         rec = {f.key: f.default for f in data.spec.fields}
         rec.update({k: str(v)[:200] for k, v in fill(r).items() if k in rec})
-        f = RecordForm(data, rec, lambda x: data.add(x))
+        f = RecordForm(data, rec, lambda x: data.add(x) and None)
         f.title = "New " + data.spec.item
         return f
     n = f"{len(rows)} available" if rows else "none: empty or not granted"
