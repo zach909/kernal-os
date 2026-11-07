@@ -187,7 +187,8 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
     try:
         inst.broker_pid = os.getpid()
         daemonize(log_path)
-        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir), policy, log_path)
+        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir, inst.address),
+                             policy, log_path)
         b.close()
         Broker(inst, registry, a, proc, cache_dir).run()
     except BaseException as e:  # pragma: no cover - last-resort broker crash path

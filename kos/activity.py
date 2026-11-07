@@ -29,7 +29,11 @@ def build_feed(paths: Paths, limit: int = 30) -> list[ActivityItem]:
         state = {"running": "open", "starting": "opening", "exited": "closed"}.get(
             i.status, i.status)
         items.append(ActivityItem(i.started, f"{i.name} [{i.mode}] {state} - {i.id}", True))
-    for e in AuditLog(paths).entries()[-limit:]:
+    # Every action passes three layers (layers.py) and each pass is audited; `kos audit` shows all of
+    # them, but a glanceable feed only needs the layer that said no.
+    shown = [e for e in AuditLog(paths).entries()
+             if not (e["action"].startswith("layer.") and e["outcome"] == "pass")]
+    for e in shown[-limit:]:
         items.append(ActivityItem(e["t"], f"{e['outcome']}: {e['action']} {e['target']}".strip(),
                                   False))
     items.sort(key=lambda x: (x.live, x.t), reverse=True)

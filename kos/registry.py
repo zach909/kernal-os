@@ -41,6 +41,7 @@ class Instance:
     app_pid: int = 0
     status: str = "starting"  # starting -> running -> exited
     system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
+    address: str = ""         # the path+query of the kos:// address it was opened with (checked by the OS)
 
 
 def _alive(pid: int) -> bool:

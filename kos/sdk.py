@@ -61,6 +61,12 @@ class App:
         self.width = 80
         self.height = 24
         self.devices: set[str] = set()
+        # The path+query of the kos:// address this app was opened with, e.g. "/news?n=3" ("" if none).
+        self.address = os.environ.get("KOS_ADDRESS", "")
+        # What extensions (or, for a system app, mods) the owner switched on for this app:
+        # [{name, version, kind, entries: [{label, address}], colors: {..}}]. Set by the
+        # {"cmd": "extensions"} event that follows hello; empty when there are none.
+        self.extensions: list = []
         self._queue: deque = deque()     # events that arrived while waiting for a vault reply
         self._seq = 0
         self.vault_error = ""           # why the last vault call was refused, for the app to show
@@ -91,6 +97,8 @@ class App:
                 self.height = ev.get("height", self.height)
             elif cmd == "device" and ev.get("state") == "attached":
                 self.devices.add(ev.get("device", ""))
+            elif cmd == "extensions":
+                self.extensions = list(ev.get("items", []))
             elif cmd == "quit":
                 return
             yield ev
@@ -165,6 +173,10 @@ class App:
 
     def request_open(self, app: str, mode: str = "tui") -> None:
         self.send({"cmd": "request", "action": "open", "app": app, "mode": mode})
+
+    def request_address(self, address: str, mode: str = "tui") -> None:
+        """Ask the OS to open ``kos://NAME[/path][?query]`` (like clicking a link)."""
+        self.send({"cmd": "request", "action": "open", "address": address, "mode": mode})
 
     def request_focus(self, instance_id: str) -> None:
         self.send({"cmd": "request", "action": "focus", "id": instance_id})
