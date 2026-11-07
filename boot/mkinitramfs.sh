@@ -16,7 +16,7 @@ mkdir -p "$work"/{bin,sbin,dev,proc,sys,newroot,run,lib,lib64,usr/lib}
 
 busybox=$(command -v busybox) || { echo "need busybox (static)" >&2; exit 1; }
 cp "$busybox" "$work/bin/busybox"
-for applet in sh mount umount mkdir sleep cat clear switch_root poweroff blkid echo; do
+for applet in sh mount umount mkdir sleep cat clear switch_root poweroff blkid echo od; do
     ln -sf busybox "$work/bin/$applet"
 done
 
@@ -30,6 +30,8 @@ copy_with_libs() {
 copy_with_libs "$(command -v cryptsetup)"
 
 install -m 0755 "$here/initramfs/init" "$work/init"
+install -m 0644 "$here/initramfs/firmware.sh" "$work/firmware.sh"
+install -m 0644 "$here/firmware.allow" "$work/firmware.allow"   # the owner's allow list rides in the signed image
 mknod -m 600 "$work/dev/console" c 5 1 2>/dev/null || true
 
 (cd "$work" && find . -print0 | sort -z | cpio --null -o -H newc --reproducible 2>/dev/null) \

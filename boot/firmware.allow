@@ -1,0 +1,12 @@
+# KOS firmware allow list - the owner vouches for hardware here.
+#
+#   pci 8086:1234     one PCI device (vendor:device, hex)
+#   kind typec-port   a whole kind of chip (see `kos firmware`): intel-me, amd-psp, bmc-ipmi,
+#                     thunderbolt, network, display, nvme, wireless, typec-port,
+#                     embedded-controller
+#
+# Use it after you have replaced a chip's firmware with firmware you trust, offline, with a
+# programmer. KOS does not flash anything and cannot verify that firmware is what this file says.
+# Allowed chips are still printed at boot (ALLOWED). The same file must be installed on the
+# encrypted root as /etc/kos/firmware.allow (mkimage.sh does this).
+# Empty = nothing allowed.

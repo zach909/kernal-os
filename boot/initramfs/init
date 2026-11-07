@@ -13,6 +13,8 @@
 #     here without the password.
 #   * The password is read by cryptsetup itself (echo off, locked memory);
 #     it never passes through a shell variable.
+#   * Refuses to boot at all if a management processor (Intel ME, AMD PSP, a BMC)
+#     is running and not provably disabled (firmware.sh; kos.firmware=warn opts out).
 #   * Three attempts per boot with growing delays, and LUKS2 uses Argon2id,
 #     so each guess costs ~1s and ~1 GiB of RAM.
 
@@ -31,6 +33,12 @@ mount -t proc     -o nosuid,nodev,noexec proc     /proc || halt_forever "cannot 
 mount -t sysfs    -o nosuid,nodev,noexec sysfs    /sys  || halt_forever "cannot mount /sys"
 mount -t devtmpfs -o nosuid,mode=0755    devtmpfs /dev  || halt_forever "cannot mount /dev"
 echo 1 > /proc/sys/kernel/printk 2>/dev/null   # keep kernel messages off the prompt
+
+# Firmware gate: if a management processor (Intel ME, AMD PSP, a BMC) is running
+# below the OS and is not provably off, refuse to boot - before the disk, before
+# the password. Missing script = fail closed. See firmware.sh.
+. /firmware.sh || halt_forever "firmware gate missing"
+kos_firmware_gate || halt_forever "a management processor is running; the OS is not in control"
 
 # kos.root=UUID=<luks uuid> (or a /dev path) comes from the signed kernel command line.
 root_spec=""

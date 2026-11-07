@@ -33,6 +33,7 @@
     kos cell start NAME --kernel K --initrd I [--cpus 2,3] [--memory 256]
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
+    kos firmware                    management processors (Intel ME, AMD PSP, BMC) and whether the OS may boot
     kos audit                       show the authorization log
     kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
     kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
@@ -759,8 +760,34 @@ def cmd_doctor(args, paths: Paths) -> int:
     print(f"vhost-vsock (cells)   : {ok(r['vhost_vsock'])}")
     print(f"framebuffer /dev/fb0  : {ok(r['framebuffer'])}")
     print(f"evdev /dev/input      : {ok(r['evdev'])}")
+    from . import firmware
+    fw = firmware.probe()
+    running = ", ".join(f.name for f in fw.blocking)
+    print(f"firmware control      : {'NO - ' + running + ' running' if running else 'yes'}")
     print(f"password configured   : {ok(PasswordStore(paths).exists())}")
     return 0
+
+
+def cmd_firmware(args, paths: Paths) -> int:
+    """Read-only: what management processors are visible and what the boot
+    gate would do. Needs no password and changes nothing."""
+    from . import firmware
+    v = firmware.probe()
+    print(f"policy: kos.firmware={v.policy}")
+    print("\n".join(v.lines()))
+    print("boot: " + ("allowed" if v.ok else "REFUSED - " + (v.reason() or "")))
+    if getattr(args, "fw_cmd", None) == "plan":
+        print("\n" + firmware.platform_firmware())
+        items = firmware.plan(verdict=v)
+        for i in items:
+            print(f"\n- {i.name} [{i.state}] open replacement: {i.open_replacement}\n    {i.advice}")
+        print("\n" + firmware.plan_summary(items))
+        print("\nThis plan is read-only. KOS never writes to a chip; flashing is an offline job.")
+        return 0 if v.ok else 1
+    print("\nwhat the chips we cannot remove can still see:")
+    for name, status, note in firmware.protections():
+        print(f"  {name:24} {status}\n      {note}")
+    return 0 if v.ok else 1
 
 
 def cmd_audit(args, paths: Paths) -> int:
@@ -974,6 +1001,9 @@ def build_parser() -> argparse.ArgumentParser:
     c = cs.add_parser("stop")
     c.add_argument("name")
     sub.add_parser("doctor", help="report kernel security features")
+    s = sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
+    s.add_argument("fw_cmd", nargs="?", choices=["status", "plan"],
+                   help="plan: read-only advice on what each blocking chip would need")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
     s = sub.add_parser("admin", help="the elevated administrator keyboard")
@@ -1019,7 +1049,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
             "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
             "explore": cmd_explore, "activity": cmd_activity,
             "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize,
-            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit,
+            "cell": cmd_cell, "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit,
             "do": cmd_do, "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write,
             "desktop": cmd_desktop, "aios": cmd_aios, "usb": cmd_usb}
 
