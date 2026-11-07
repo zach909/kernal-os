@@ -71,6 +71,7 @@ Honest list, so nobody assumes these are covered:
 | Connections blocked | There is no firewall. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
 | Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
 | Everything is an app | `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
+| New apps and the agent | The 92 pack apps and the Ctrl-N agent (see below) are tested with a scripted host, and two kinds of check run on the real machinery (`tests/test_packs_e2e.py`: the real `AppStorage` enforcing shared-folder grants, and a pack app plus its agent run in the real sealed-zip Landlock sandbox). Not tested: the `kos grant` command line against these apps, and graphical mode for the pack apps that offer it. Every pack app declares only the permissions it uses and none asks for `network`, but a declared `owns`/`uses` is only as good as the one-owner-per-folder rule (a test checks it). Health, neural and finance records are stored unencrypted in each app's private vault, because nothing in KOS is encrypted yet. The 28 pack products that need hardware, audio, a network or a secure element are listed as not built, with the reason. |
 
 ## How it works
 
@@ -176,6 +177,29 @@ it is refused until you permit again. AI apps additionally declare `network` (pa
 **without** a model using local deterministic tools; connect a model in the app's settings for open-ended
 answers.
 
+### More apps (packs), the built-in agent and help
+
+A second set of products was asked for from five capability lists (office, cloud, device, desktop, headset and neural-interface
+software; about 780 lines in all). [docs/CAPABILITIES.md](docs/CAPABILITIES.md) maps **every one of them** to an app, a real `kos`
+command, or the plain reason it cannot be a sandboxed app (it needs a camera, a microphone, a radio, another machine, a secure
+element or encryption that KOS does not have). The new apps live in small `kos/office/pack_*.py` modules, one group each, imported
+one at a time so an app loads only its own code; [docs/PACKS.md](docs/PACKS.md) is the contract, [docs/REQUESTED2.txt](docs/REQUESTED2.txt)
+the list. **92 products: 16 full, 48 partial, 28 not built** (208 buildable apps with the first 149). Highlights: Calculator (scientific,
+exact fractions, 8-64-bit programmer mode), Graphing Calculator, Chess (verified against the published perft counts), Accounting
+(double-entry, refuses unbalanced entries), Invoicing, Inventory, CRM, Version Control, Machine Learning Lab, Music Studio (writes real
+WAV and MIDI), Signal Lab (filters, FFT, band powers on recorded signals), Flashcards (SM-2), and **Get to Know KOS**: ten short
+games, one per part of the OS (pipeline, passwords, sandbox, permits, shared folders, blocked-by-default, devices, cells, commands,
+the suite), whose facts are checked against the code by tests.
+
+* **Permissions.** Each app declares exactly what it needs. Apps give each other data through *shared folders*: the owner app
+  `owns` one, a user app `uses` it, and nothing is visible until you grant it with your password (`kos grant APP space:NAME`).
+  Eleven new folders (`places`, `invoices`, `inventory`, `employees`, `deals`, `decks`, `music`, `repos`, `logs`, `palettes`, `health`)
+  are listed with their fields in docs/PACKS.md. An app that is missing a grant still works and says so.
+* **The agent (Ctrl-N in every app).** `kos/office/agent.py`: an app-aware assistant that answers from that app's own data
+  (`/about`, `/data`, `/find`), loaded only when used, writing only its own `agent-*` vault keys. Without a model it uses local tools.
+* **Help.** `kos help` lists every command, `kos help COMMAND` explains one (no password). In the line shell type `help`. The
+  **KOS Help** app has the guide, tutorials and a troubleshooting tree; **Get to Know KOS** teaches by playing.
+
 What is real vs. what is not: SQL is real SQLite; spreadsheets have a real formula parser (no `eval`); mail has
 a real delivery pipeline; TOTP matches RFC 6238; the suite's Audit Log Manager and the OS audit log (`kos audit --verify`) are both hash-chained; search is BM25. What is not:
 anything needing audio/video/camera/screen/other machines (conferencing, voice, capture, scanning, speech) and
@@ -185,6 +209,7 @@ anything that needs two *people* or two *machines* to share live data - every ap
 
 ```
 kos setup                  choose your password
+kos help [COMMAND]          list the commands, or explain one (no password)
 kos install app.kapp       install (kept zipped, sealed)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list

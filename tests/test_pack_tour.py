@@ -147,6 +147,14 @@ class TestTourPlay(unittest.TestCase):
             h.render(80, 22)
             self.assertEqual(h.done, {})
 
+class TestSandboxFactsMatchTheSandbox(unittest.TestCase):
+    def test_the_limits_the_quiz_teaches_are_the_limits_the_sandbox_sets(self):
+        from kos.sandbox import SandboxPolicy
+        p = SandboxPolicy()
+        self.assertEqual((p.max_memory, p.max_file_size), (1 << 30, 64 << 20))      # "1 GiB of memory and 64 MiB per file"
+        src = (Path(__file__).resolve().parent.parent / "kos" / "office" / "pack_tour.py").read_text()
+        self.assertIn("1 GiB of memory and 64 MiB per file", src)
+
 
 if __name__ == "__main__":
     unittest.main()

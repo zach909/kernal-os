@@ -443,7 +443,7 @@ class TestAssistantBridge(Env):
         # a new instance of the app (a new bridge) is asked again
         b2 = self.bridge()
         self.assertEqual(self.ask(b2, None)["error"], "refused")  # asked again (cancelled here)
-        self.assertEqual(self.ask(b2, PW)["ok"], True)
+        self.assertEqual(self.ask(self.bridge(), PW)["ok"], True)
 
     def test_switching_the_backend_mid_instance_asks_again(self):
         b = self.bridge()
