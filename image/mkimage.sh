@@ -75,6 +75,7 @@ cp "$repo/bin/kos" "$repo/bin/run" "$work/root/opt/kos/bin/"
 find "$work/root/opt/kos" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 chroot "$work/root" /usr/bin/python3 -m compileall -q -j 0 /opt/kos/kos /opt/kos/examples \
     || echo "warning: could not precompile bytecode; apps will start a little slower"
+install -D -m 0600 "$repo/boot/firmware.allow" "$work/root/etc/kos/firmware.allow"
 cat > "$work/root/sbin/kos-init" <<'INIT'
 #!/usr/bin/python3 -I
 import sys
@@ -111,5 +112,8 @@ mkfs.vfat -n KOS-ESP "${loop}p1" >/dev/null
 mkdir -p "$work/esp"
 mount "${loop}p1" "$work/esp"
 install -D "$work/kos.efi" "$work/esp/EFI/BOOT/BOOTX64.EFI"
+# UEFI boots removable media (USB sticks) from exactly this path; fail the build if it is missing.
+[ -s "$work/esp/EFI/BOOT/BOOTX64.EFI" ] || { echo "ESP is missing EFI/BOOT/BOOTX64.EFI" >&2; exit 1; }
 umount "$work/esp"
 echo "done: $out (root LUKS UUID $uuid)"
+echo "put it on a USB stick:  sudo bin/kos usb write $out /dev/sdX"

@@ -4,9 +4,12 @@ unlocked the encrypted disk and switched to it).
 What it does, in order:
   1. Mount the kernel pseudo-filesystems with restrictive options.
   2. Apply kernel hardening sysctls.
-  3. Ask for the password again (second gate). First boot: choose one.
-  4. Start the owner's shell, as an unprivileged user, on the console.
-  5. When the shell exits, lock: back to the password prompt.
+  3. Firmware gate: if a management processor (Intel ME, AMD PSP, a BMC) is
+     running below the OS and is not provably off, say so and refuse to go on
+     (kos/firmware.py; the pre-boot environment already refused once).
+  4. Ask for the password again (second gate). First boot: choose one.
+  5. Start the owner's shell, as an unprivileged user, on the console.
+  6. When the shell exits, lock: back to the password prompt.
 
 What it deliberately does NOT do: start any service, daemon, network, timer or
 anything else on its own. There is no autostart list to edit, because there is
@@ -27,8 +30,11 @@ import sys
 import termios
 import time
 
+from pathlib import Path
+
+from . import firmware
 from .admin import AdminKeyboard, requirements
-from .auth import AuthError, Authority, AuthorizationDenied, PasswordStore
+from .auth import AuditLog, AuthError, Authority, AuthorizationDenied, PasswordStore
 from .paths import Paths
 from .prompt import TTYPrompter
 from .requires import Ledger, Unsatisfied
@@ -143,6 +149,28 @@ def start_shell(console: str) -> int:
             return os.waitstatus_to_exitcode(status)
 
 
+def firmware_gate(paths: Paths, prompter, root: Path = Path("/")) -> firmware.Verdict:
+    """Look for management processors, alert, cut the OS's side of them, and
+    refuse to continue if any is still running (policy ``enforce``)."""
+    verdict = firmware.enforce(root)
+    audit = AuditLog(paths)
+    for f in verdict.findings:
+        audit.record("firmware.gate", f.where, f"{f.kind}:{f.state}")
+    if verdict.findings or verdict.caveat:
+        prompter.info("\nKOS firmware check:\n  " + "\n  ".join(verdict.lines()))
+    if verdict.ok:
+        return verdict
+    audit.record("firmware.gate", "", "refused-to-boot")
+    prompter.info("\nThe OS does not have complete control of this machine, so it will not boot.\n"
+                  "A management processor is running below it and could not be switched off from\n"
+                  "here. Disable it in the firmware (BIOS switch, me_cleaner/HAP, coreboot), or\n"
+                  "build the image with kos.firmware=warn to boot anyway. Power the machine off.")
+    if os.getpid() != 1:
+        raise SystemExit(70)
+    while True:           # PID 1 must not exit; there is no shell to fall back to
+        time.sleep(3600)
+
+
 def login_loop(paths: Paths, console: str) -> None:
     prompter = TTYPrompter(console)
     store = PasswordStore(paths)
@@ -161,7 +189,8 @@ def login_loop(paths: Paths, console: str) -> None:
             # (kos/requires.py): the chain is satisfied, deepest first, with
             # this same password - no second prompt - or the computer stays locked.
             with authority.authorize("session.login") as grant:
-                brought_up = requirements(keyboard, grant).ensure("session.unlock")
+                brought_up = requirements(
+                    keyboard, grant, firmware=lambda: firmware.probe().reason()).ensure("session.unlock")
             if "admin.keyboard" in brought_up:
                 prompter.info("Administrator keyboard booted.")
         except AuthorizationDenied:
@@ -195,6 +224,7 @@ def main() -> None:
         harden()
     console = os.environ.get("KOS_CONSOLE", "/dev/console")
     paths = Paths.from_env()
+    firmware_gate(paths, TTYPrompter(console))
     while True:
         try:
             login_loop(paths, console)

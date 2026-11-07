@@ -70,6 +70,9 @@ ACTIONS: dict[str, str] = {
     "code.run": "run code",
     "admin.boot": "boot the administrator keyboard",
     "audit.verify": "check the authorization log for tampering",
+    "app.extend": "switch on an extension for an app",
+    "app.mod": "let a mod modify a system app",
+    "app.unextend": "switch off an extension or mod",
 }
 
 

@@ -11,6 +11,51 @@
    login exists.
 4. Every action after that goes through `Authority.authorize(action, target)`.
 
+## Firmware control (`kos/firmware.py`, `boot/initramfs/firmware.sh`)
+Rule: the OS must be in control of the machine or it does not boot. Intel's
+Management Engine (with AMT), AMD's Platform Security Processor and server BMCs
+are separate computers that start before the OS and keep running under it.
+1. **Scan** (sysfs only): PCI `8086` class `0780` = Intel MEI, `1022` class `1080` = AMD PSP,
+   DMI type 38 or `/dev/ipmi*` or `/sys/class/ipmi` = BMC. The pre-boot shell script and the
+   Python module implement the same scan; `tests/test_firmware.py` runs both on the same fake
+   sysfs and requires the same verdict.
+2. **Alert**, then **mitigate**: unbind the driver and write a nonexistent name to
+   `driver_override`. The device is *left visible* so a later scan cannot mistake "we hid it"
+   for "absent". Mitigation never changes a verdict.
+3. **Verdict**: an Intel ME is believed off only if HFSTS1 (PCI config 0x40) bits 19:16 read 3
+   (disabled). Any other mode, an unreadable register, a PSP or a BMC is "running" and stops
+   the boot (`enforce`, the default and the result of any unknown value). `kos.firmware=warn`
+   in the signed command line continues after alerting. PID 1 ignores the environment; a dev
+   run honours `KOS_DEV_FIRMWARE=warn`.
+4. Placed twice: in `/init` before the disk or the password, and in `kos-init` before the login
+   prompt; also a `before` of `session.unlock` in `requires.py`, so every unlock re-checks.
+
+Limits, stated plainly:
+* **The OS cannot disable these.** They have their own CPU and flash. KOS only detaches itself;
+  the ME keeps its memory access and (with AMT) its network path. Actually disabling means the
+  flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; KOS does not write flash.
+* **Almost no physical machine boots under `enforce`.** Besides the ME/PSP/BMC, any chip with its own
+  firmware blocks it too: Thunderbolt/USB4, USB-C port controller, embedded controller, and network, GPU,
+  NVMe and wireless controllers (PCI classes in `FIRMWARE_CLASSES`), and so does DMA hardware with no
+  IOMMU. These are not unbound (that would break the machine); the strict IOMMU in `kernel/cmdline.txt`
+  confines them. VMs ignore the emulated ones. Use `kos.firmware=warn` to boot with the alert.
+* **Power-down for optional chips.** Thunderbolt/USB4 and wireless controllers are unbound and asked for D3cold
+  (`d3cold_allowed`, `power/control=auto`); they stop blocking only if `power_state` then reads D3cold, in both the
+  shell and Python scanners. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down on a running machine.
+  KOS does not erase, corrupt or overvolt anything, and does not try to rewrite other chips' firmware.
+* **`kos firmware plan` is read-only advice**, from a static table (`PLAN`): per blocking chip, whether open firmware
+  exists (coreboot + me_cleaner for some Intel boards, OpenBMC for some servers, open EC for Framework/Chromebook/
+  System76; none for PSP, USB-C/Thunderbolt, NIC, GPU, NVMe), and a verdict on whether this machine can pass. The OS
+  cannot verify any of it on the hardware in front of it, and flashing is an offline job KOS does not do.
+* **`kos.machine=framework`** (signed command line, shipped off) refuses to boot on anything whose DMI `sys_vendor` is
+  not `Framework`. The vendor string is what the firmware reports: it prevents mistakes and swapped hardware, not a
+  hostile BIOS. The allow list cannot waive it. Turning it on makes VMs and the QEMU flow refuse to boot.
+* **No resident checker.** The gate runs once at boot and at each unlock; no daemon, loop or watcher.
+* **Absence is unprovable.** A BIOS may hide the ME's PCI function; on bare-metal Intel/AMD with
+  nothing visible KOS prints a caveat and boots.
+* The HFSTS1 decoding follows coreboot/intelmetool and is untested on hardware here; the tests use
+  synthetic config space. The kernel config also drops the in-kernel MEI, CCP and IPMI drivers.
+
 ## Keys
 `master = scrypt(password, salt)`. Stored: salt, params, `HMAC(master,
 "verifier")`. Derived: `HMAC(master, "kapp-seal")` seals apps. The master key
@@ -144,6 +189,70 @@ of an app's cache fsyncs, which is the point of it; scrypt is the security param
 while an app is in front of you: the timeout serves the first-frame deadline for the boot prompts and a
 child-exit check, and it could be made event-driven, but that loop drives the trusted password/device overlay, so
 it was left alone for a saving of four wakeups a second while the screen is on.
+## Addresses, extensions, mods and the three layers
+**Addresses** (`address.py`). `kos://APP[/path][?query]`, or a bare name. One strict parser: only the `kos://`
+scheme, an app name, then optional `/path` and `?query` from a small safe alphabet (no `%`, `#`, whitespace,
+control characters, `.`/`..` segments); `mode=` is lifted out of the query. Nothing is trimmed or repaired.
+The path and query travel as data: `Instance.address` (written by the OS from the checked value), then
+`KOS_ADDRESS` in the app's environment (`loader.plan` re-checks it), then `App.address` in the SDK. An app may
+ask for one with `{"cmd":"request","action":"open","address":...}`; `protocol._request` validates it the same way.
+
+**Kinds** (`kapp.py`). Everything is an app, and an app has one `kind`: `app`, `extension` (adds to an ordinary
+app) or `mod` (modifies a system app: `taskbar`, `app-library`). Add-ons are ordinary `.kapp`s - same install scan,
+seal, permit, open and close. The manifest enforces what each may target (an extension cannot target a system
+app and a mod cannot target an ordinary one), forbids the `system` permission on any add-on, and requires
+`extension.json` for an add-on and forbids it on an ordinary app, so a thing is exactly what its manifest says.
+
+**Contributions** (`extensions.py`). `extension.json` is data validated when the add-on is installed (and each
+time it is read): at most 12 `entries` of `{label, address}` (label 1-24 plain characters, address canonicalised by
+the same parser) and, for mods only, `colors.accent`. Unknown keys are refused. The host is never modified: its zip
+and seal are untouched. `kos extend NAME` (needs install + permit; the password action is `app.extend`, and
+`app.mod` for a mod) records `extend:HOST` / `mod:HOST` in the universal permission store **pinned to the sha256 of
+the exact zip approved**. When a host session starts or attaches, `Session.run` sends `{"cmd":"extensions",
+"items":[...],"skipped":[...]}` right after `hello`, only to the host the grant names and only if there is
+something to say. An add-on whose zip no longer matches its pin, that is gone, that lost its permit, or that
+stopped extending that host is reported in `skipped` with a reason and contributes nothing; at most 8 add-ons are
+delivered per host and the rest are also reported as skipped. What a host does with the entries is the host's
+business: the taskbar pins them (keys a-i, chips), the App Library lists them as a shelf, `web` lists extension
+bookmarks. A pinned entry is only a request to open an address: it goes through the pipeline below and asks for
+the password like any other open.
+
+**The layers** (`layers.py`). `layers.traverse(paths, authority, Request(verb, target, mode))` is the one door for
+using an app. Verbs: `open`/`run`, `close`, `focus` (switching, `kos attach`), `extend`/`unextend`. It runs the
+three action layers of AI OS (`aios.LAYERS` minus `skill`), in this order, each one:
+
+| layer | question | open / run | close | focus | extend |
+|---|---|---|---|---|---|
+| `gui` (graphical button clicker) | is there a button? | the App Library lists the app, with that mode | the taskbar lists the instance | same | the App Library lists an add-on whose host is installed |
+| `app` (app commands) | is it permitted? | the run permit | - | - | the add-on's run permit |
+| `kernel` (kernel commands) | what the kernel says | password for exactly this action, seal verified, manifest within the permit, network question, sandbox policy | password | the process is alive | password (`app.extend`/`app.mod`) + seal |
+
+A refusing layer stops everything behind it, so an unpermitted app is refused by `app` and `kernel` never runs: no
+password is asked and, on the command line, the authority (which opens `/dev/tty`) is never even built
+(`traverse` takes a factory for that reason). Each layer writes `layer.LAYER.VERB` `pass`/`refused` to the audit
+log (`kos audit` shows them all; `kos activity` shows only refusals) and a refusal carries `.layer`, which the
+bridge puts in the reply (`"app layer: ..."`). `open_background` (so `kos open`, `kos go`, the desktop and an app's
+`open` request), `cmd_run`, `close_instance`, the bridge's `focus`, `kos attach`, the desktop's attach and
+`kos extend` all call it. `TestLayers.test_no_code_outside_layers_...` fails if the name of any of those password
+actions appears outside `layers.py` (bar `auth.py`, which defines them, and `store.py`, which checks a grant is
+one of them), so a new path cannot quietly skip a layer.
+
+Gaps, stated plainly:
+* **Scope.** The layers cover *using* an app. `install`, `update`, `remove`, `permit`, `grant`, device boots,
+  `scan watch`, `optimize`, `admin`, `write`, `exec` and `kos aios` keep their own gates and do not pass through
+  them. (`kos aios` hands a request to the NeuroClaw engine, a separate process; it is not this pipeline.)
+* Some layer/verb pairs have nothing to check (`app` for close and focus). They are traversed and audited anyway.
+* **A host must cooperate.** An add-on can only change what its host chooses to draw; hosts that ignore the
+  `extensions` command are unaffected. Nothing is injected into a running or sealed app.
+* **No live reload.** The grant takes effect the next time the host starts or is attached (`hello` is re-sent on
+  each attach). It is not pushed into a host that is already attached.
+* **Delivery checks the pin, not the seal.** The seal is an HMAC under the password-derived key, and no password
+  is present when a session starts. The password is spent at `kos extend`, which verifies the seal and records the
+  sha256; delivery recomputes the sha256 of the stored zip. Code running as the owner that can rewrite both the zip
+  and `permissions/grants.json` can therefore forge a delivery - the same tamper-evident-not-tamper-proof gap as
+  the rest of the owner-writable state above. It cannot make the host's own seal verify.
+* The path of an address cannot contain `%` or `#`, so a URL that needs them cannot be expressed as `kos://web/...`.
+* Only `colors.accent` exists; there is no way for an add-on to add behaviour, only entries and an accent.
 
 ## Scanning
 `kos/scan.py` is static and heuristic: the EICAR test string plus a short

@@ -1032,9 +1032,12 @@ class TestPermit(Env):
             p.require("hello")
 
     def test_permit_gate_blocks_run_before_any_password_prompt(self):
-        """PermitStore.require() runs before _authority() in cmd_run/cmd_open,
-        so an unpermitted app is refused without ever touching a TTY."""
+        """An installed app that was never permitted is refused by the app layer, which runs
+        before the kernel layer builds the authority - so without ever touching a TTY.
+        (The app has to be installed: an app that does not exist is refused earlier, by the gui
+        layer, as 'no button' - see TestLayers.)"""
         import os as _os
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
         old_root = _os.environ.get("KOS_ROOT")
         _os.environ["KOS_ROOT"] = str(self.paths.root)
         try:
@@ -1569,7 +1572,7 @@ class TestSystemBridge(Env):
 class DesktopSessionEnv(Env):
     """Runs a real sandboxed app in a Session against scripted devices."""
 
-    def start(self, kapp_dir, name, mode="tui", *, bridge=None, authority=None, **kw):
+    def start(self, kapp_dir, name, mode="tui", *, bridge=None, authority=None, address="", **kw):
         kapp = Path(self.tmp.name) / f"{name}.kapp"
         pack(kapp_dir, kapp)
         store = AppStore(self.paths)
@@ -1578,7 +1581,7 @@ class DesktopSessionEnv(Env):
         with self.authority(PW).authorize("app.run", name) as g:
             app = store.load_verified(name, g)
         a, b = socket.socketpair()
-        proc = loader.launch(loader.plan(app, b.fileno(), mode), SandboxPolicy(), None)
+        proc = loader.launch(loader.plan(app, b.fileno(), mode, None, address), SandboxPolicy(), None)
         b.close()
         self.devices = ScriptedDevices()
         self.outfile = tempfile.TemporaryFile()
@@ -1916,3 +1919,902 @@ class TestAiOs(unittest.TestCase):
         fake = self.Fake({"layers": [{"id": "gui", "label": "x", "available": True}]})
         self.assertEqual(aios.status(opener=fake)["layers"][0]["id"], "gui")
         self.assertEqual(fake.sent[0][1], "GET")
+
+
+# ---------------------------------------------------------------------------
+# Addresses, extensions and mods, and the gui -> app -> kernel layers
+# ---------------------------------------------------------------------------
+import contextlib as _contextlib  # noqa: E402
+import importlib.util as _importlib_util  # noqa: E402
+from unittest import mock as _mock  # noqa: E402
+
+from kos import address as kaddress  # noqa: E402
+from kos import aios as _aios  # noqa: E402
+from kos import layers as klayers  # noqa: E402
+from kos.extensions import Extensions, parse_contributions  # noqa: E402
+from kos.kapp import Manifest  # noqa: E402
+from kos.registry import RegistryError  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+class TestAddress(unittest.TestCase):
+    def test_a_bare_name_and_a_full_address_are_both_addresses(self):
+        self.assertEqual(kaddress.parse("web"), kaddress.Address("web"))
+        a = kaddress.parse("kos://web/news/today?n=3&mode=graphical")
+        self.assertEqual((a.app, a.path, a.query, a.mode), ("web", "/news/today", "n=3", "graphical"))
+        self.assertEqual(a.launch, "/news/today?n=3")
+        self.assertEqual(str(a), "kos://web/news/today?n=3&mode=graphical")
+        self.assertEqual(kaddress.parse("KOS://web").app, "web")           # the scheme is not case sensitive
+        self.assertEqual(kaddress.parse(str(a)), a)                        # canonical form round-trips
+
+    def test_hostile_addresses_are_refused_not_repaired(self):
+        for bad in ("", "  ", "http://web", "file:///etc/passwd", "/etc/passwd", "../web",
+                    "kos://", "kos://Web", "kos://-web", "kos://web/../x", "kos://web/./x",
+                    "kos://web/%2e%2e", "kos://web#frag", "kos://web/a b", "kos://web\n", "kos://web\x1b[31m",
+                    "kos://web?mode=root", "kos://web?mode=tui&mode=cmd", "kos://web??x",
+                    "kos://web/" + "a" * 300, "kos://web/‮", None, 5, ["web"]):
+            with self.assertRaises(kaddress.AddressError, msg=repr(bad)):
+                kaddress.parse(bad)
+
+    def test_an_address_error_is_a_kapp_error_so_the_cli_reports_it_cleanly(self):
+        self.assertTrue(issubclass(kaddress.AddressError, KAppError))
+
+    def test_check_launch(self):
+        for ok in ("", "/a", "/a/b?c=d&e=f", "?q=1"):
+            self.assertEqual(kaddress.check_launch(ok), ok)
+        for bad in ("a", "/a/../b", "/a??b", "/a b", "/a%41", "/" + "x" * 300, 7):
+            with self.assertRaises(kaddress.AddressError, msg=repr(bad)):
+                kaddress.check_launch(bad)
+
+    def test_the_request_protocol_accepts_an_address_and_normalises_it(self):
+        v = validate_app_message({"cmd": "request", "action": "open",
+                                  "address": "kos://web/a/b?x=1&mode=graphical"}, "tui")
+        self.assertEqual((v["app"], v["mode"], v["address"]), ("web", "graphical", "/a/b?x=1"))
+        plain = validate_app_message({"cmd": "request", "action": "open", "app": "hello"}, "tui")
+        self.assertEqual((plain["app"], plain["mode"], plain["address"]), ("hello", "tui", ""))
+        for bad in ({"address": "http://x"}, {"address": "kos://web/../x"}, {"address": 5},
+                    {"address": "kos://web", "app": "web"}, {"address": "kos://web", "mode": "root"}):
+            with self.assertRaises(ProtocolError, msg=bad):
+                validate_app_message({"cmd": "request", "action": "open", **bad}, "tui")
+
+
+def _addon_zip(name="ext-hello", kind="extension", extends="hello", contributions=None,
+               perms=(), version="1.0", extra=None, with_file=True):
+    manifest = {"name": name, "version": version, "runtime": "python", "entry": "app",
+                "kind": kind, "extends": extends, "permissions": list(perms), **(extra or {})}
+    if kind == "app":
+        manifest.pop("extends")
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("manifest.json", json.dumps(manifest))
+        z.writestr("app.py", "def main():\n    pass\n")
+        if with_file:
+            z.writestr("extension.json", json.dumps(
+                contributions if contributions is not None
+                else {"entries": [{"label": "Hi", "address": "kos://hello/start?x=1"}]}))
+    return b.getvalue()
+
+
+class TestAddressesInTheLineShell(unittest.TestCase):
+    def test_a_lone_address_opens_like_typing_a_url_and_open_run_take_addresses(self):
+        from kos.lang import interpret
+        for line, argv in (("kos://web/example.com", ("open", "kos://web/example.com")),
+                           ("  kos://web/x?n=3&mode=cmd  ", ("open", "kos://web/x?n=3&mode=cmd")),
+                           ("open kos://web/example.com", ("open", "kos://web/example.com")),
+                           ("abre kos://web/example.com", ("open", "kos://web/example.com")),
+                           ("open graphical kos://hello", ("open", "graphical", "kos://hello")),
+                           ("run kos://web/news?x=1", ("run", "kos://web/news?x=1"))):
+            got = interpret(line)
+            self.assertEqual((got.kind, got.argv), ("command", argv), line)
+
+    def test_an_address_with_anything_after_it_is_still_just_code_never_run_on_the_host(self):
+        from kos.lang import interpret
+        for line in ("kos://web; rm -rf /", "kos://web && reboot", "kos://web $(id)", "open kos://web; rm -rf /"):
+            got = interpret(line)
+            self.assertNotEqual(got.argv[:1], ("open",), line)
+            self.assertIn(got.kind, ("code", "unknown"), line)
+
+    def test_a_hostile_lone_address_reaches_the_strict_parser_as_one_argument(self):
+        from kos.lang import interpret
+        got = interpret("kos://web/../x")
+        self.assertEqual(got.argv, ("open", "kos://web/../x"))      # one argv entry, no shell anywhere
+        with self.assertRaises(kaddress.AddressError):
+            kaddress.parse(got.argv[1])                              # and the parser refuses it
+
+
+class TestKinds(unittest.TestCase):
+    def test_an_extension_and_a_mod_are_valid_apps(self):
+        ext = KApp(_addon_zip())
+        self.assertEqual((ext.manifest.kind, ext.manifest.extends), ("extension", "hello"))
+        self.assertEqual(ext.contributions["entries"], [{"label": "Hi", "address": "kos://hello/start?x=1"}])
+        mod = KApp(_addon_zip("tb", "mod", "taskbar", {"entries": [], "colors": {"accent": "#ABCDEF"}}))
+        self.assertEqual(mod.contributions["colors"], {"accent": "#abcdef"})
+
+    def test_an_extension_adds_to_ordinary_apps_and_a_mod_modifies_system_apps(self):
+        for kind, extends in (("extension", "taskbar"), ("extension", "app-library"),
+                              ("mod", "hello"), ("mod", "web")):
+            with self.assertRaises(KAppError, msg=(kind, extends)):
+                KApp(_addon_zip("x1", kind, extends))
+
+    def test_an_add_on_cannot_ask_for_the_system_permission(self):
+        for kind, extends in (("extension", "hello"), ("mod", "taskbar")):
+            with self.assertRaises(KAppError, msg=kind):
+                KApp(_addon_zip("x1", kind, extends, perms=["system"]))
+        KApp(_addon_zip("x1", "extension", "hello", perms=["storage"]))     # other permissions are fine
+
+    def test_an_app_is_exactly_what_its_manifest_says(self):
+        with self.assertRaises(KAppError):                  # an add-on must carry its contributions
+            KApp(_addon_zip(with_file=False))
+        with self.assertRaises(KAppError):                  # an ordinary app must not carry them
+            KApp(_addon_zip("plain", "app"))
+        KApp(_addon_zip("plain", "app", with_file=False))
+        with self.assertRaises(KAppError):                  # 'extends' only means something for an add-on
+            Manifest.parse(json.dumps({"name": "x", "version": "1", "runtime": "python", "entry": "a",
+                                       "extends": "hello"}).encode())
+        for bad in ({"kind": "plugin"}, {"extends": "Hello"}, {"extends": "ext-hello"}, {"extends": 5}):
+            with self.assertRaises(KAppError, msg=bad):
+                KApp(_addon_zip(extra=bad))
+        with self.assertRaises(KAppError):                  # an add-on cannot extend itself
+            KApp(_addon_zip("loop", "extension", "loop"))
+
+    def test_contributions_are_strictly_validated_data(self):
+        def ent(label="A", address="kos://hello"):
+            return {"entries": [{"label": label, "address": address}]}
+        for bad in (b"not json", b"[]", b'{"scripts": []}', b'{"entries": "x"}',
+                    json.dumps({"entries": [ent()["entries"][0]] * 13}).encode(),
+                    json.dumps({"entries": [{"label": "A"}]}).encode(),
+                    json.dumps({"entries": [{"label": "A", "address": "kos://hello", "run": "x"}]}).encode(),
+                    json.dumps(ent(label="")).encode(), json.dumps(ent(label="x" * 25)).encode(),
+                    json.dumps(ent(label="a\x1b[31mb")).encode(),
+                    json.dumps(ent(address="http://evil")).encode(),
+                    json.dumps(ent(address="kos://hello/../x")).encode(),
+                    json.dumps({"colors": {"accent": "red"}}).encode(),
+                    json.dumps({"colors": {"accent": "#fff"}}).encode(),
+                    json.dumps({"colors": {"font": "#ffffff"}}).encode(),
+                    json.dumps({"colors": {"background": "#000000"}}).encode()):     # no host uses it: not allowed
+            with self.assertRaises(KAppError, msg=bad[:60]):
+                parse_contributions(bad, "mod")
+        with self.assertRaises(KAppError):                  # only a mod may recolor
+            parse_contributions(json.dumps({"colors": {"accent": "#ffffff"}}).encode(), "extension")
+        # addresses are stored in their canonical form
+        out = parse_contributions(json.dumps(ent(address="KOS://hello?mode=cmd")).encode(), "extension")
+        self.assertEqual(out["entries"][0]["address"], "kos://hello?mode=cmd")
+
+
+class AddOnEnv(Env):
+    """`hello` installed and permitted as the host; `ext-hello` an extension of it."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = AppStore(self.paths)
+        self.store.install(self.kapp, self.authority(PW))
+        PermitStore(self.paths).grant("hello")
+        self.install_addon()
+
+    def install_addon(self, name="ext-hello", kind="extension", extends="hello", permit=True, **kw):
+        f = Path(self.tmp.name) / f"{name}.kapp"
+        f.write_bytes(_addon_zip(name, kind, extends, **kw))
+        self.store.install(f, self.authority(PW))
+        if permit:
+            PermitStore(self.paths).grant(name)
+        return f
+
+    def audit(self):
+        return [(e["action"], e["outcome"]) for e in AuditLog(self.paths).entries()]
+
+    def switch_on(self, name="ext-hello"):
+        a = self.authority(PW)
+        passage = klayers.traverse(self.paths, a, klayers.Request("extend", name))
+        return Extensions(self.paths).enable(passage.app)
+
+
+from kos.auth import AuditLog  # noqa: E402
+
+
+class TestExtensions(AddOnEnv):
+    def test_an_extension_is_an_ordinary_app(self):
+        rows = {r["name"]: r for r in list_apps(self.paths)}
+        self.assertEqual((rows["ext-hello"]["kind"], rows["ext-hello"]["extends"]), ("extension", "hello"))
+        self.assertEqual((rows["hello"]["kind"], rows["hello"]["extends"]), ("app", ""))
+        # the same store, the same seal, the same permit, the same open path as any app
+        self.assertEqual({a.name for a in self.store.installed()}, {"hello", "ext-hello"})
+        spawned = []
+
+        def spawner(inst, app, mode, policy, registry, log_path, cache_dir=None):
+            spawned.append(inst.name)
+            inst.status, inst.broker_pid = "running", os.getpid()
+            registry.write(inst)
+        inst = open_background(self.paths, self.authority(PW), "ext-hello", spawner=spawner)
+        self.assertEqual((spawned, inst.name), (["ext-hello"], "ext-hello"))
+
+    def test_nothing_is_delivered_until_the_owner_switches_it_on(self):
+        self.assertEqual(Extensions(self.paths).payload("hello"), {"items": [], "skipped": []})
+
+    def test_switching_on_needs_the_password_and_delivers_data_to_the_host_only(self):
+        with self.assertRaises(AuthorizationDenied):
+            klayers.traverse(self.paths, self.authority("no", "no", "no"), klayers.Request("extend", "ext-hello"))
+        self.assertEqual(Extensions(self.paths).enabled(), [])
+        self.assertEqual(self.switch_on(), "extend:hello")
+        got = Extensions(self.paths).payload("hello")
+        self.assertEqual(got["skipped"], [])
+        self.assertEqual([(i["name"], i["kind"], i["version"]) for i in got["items"]],
+                         [("ext-hello", "extension", "1.0")])
+        self.assertEqual(got["items"][0]["entries"], [{"label": "Hi", "address": "kos://hello/start?x=1"}])
+        self.assertEqual(Extensions(self.paths).payload("taskbar"), {"items": [], "skipped": []})
+        self.assertEqual(Extensions(self.paths).payload("web"), {"items": [], "skipped": []})
+
+    def test_a_mod_is_a_separate_password_action_from_an_extension(self):
+        self.install_addon("tb-mod", "mod", "taskbar", contributions={"colors": {"accent": "#c2410c"}})
+        self.install_addon("tb", "app", with_file=False)           # (an unrelated ordinary app)
+        self.store.install(self._pack_system("taskbar"), self.authority(PW))
+        self.switch_on("ext-hello")
+        self.switch_on("tb-mod")
+        granted = [a for a, o in self.audit() if o == "granted" and a in ("app.extend", "app.mod")]
+        self.assertEqual(granted, ["app.extend", "app.mod"])
+        self.assertEqual(Extensions(self.paths).payload("taskbar")["items"][0]["colors"], {"accent": "#c2410c"})
+
+    def _pack_system(self, name):
+        out = Path(self.tmp.name) / f"sys-{name}.kapp"
+        pack(SYSTEM_DIR / name, out)
+        return out
+
+    def test_the_switch_is_pinned_to_the_exact_build_that_was_approved(self):
+        self.switch_on()
+        newer = Path(self.tmp.name) / "ext-new.kapp"
+        newer.write_bytes(_addon_zip(version="1.1", contributions={"entries": [
+            {"label": "Evil", "address": "kos://hello"}]}))
+        self.store.update(newer, self.authority(PW))
+        got = Extensions(self.paths).payload("hello")
+        self.assertEqual(got["items"], [])
+        self.assertEqual(got["skipped"][0]["name"], "ext-hello")
+        self.assertIn("changed since you switched it on", got["skipped"][0]["why"])
+        self.switch_on()                                           # approving the new build again
+        self.assertEqual(Extensions(self.paths).payload("hello")["items"][0]["version"], "1.1")
+
+    def test_a_tampered_zip_on_disk_stops_contributing(self):
+        self.switch_on()
+        (self.paths.apps / "ext-hello.kapp").write_bytes(_addon_zip(contributions={"entries": []}))
+        got = Extensions(self.paths).payload("hello")
+        self.assertEqual((got["items"], got["skipped"][0]["name"]), ([], "ext-hello"))
+
+    def test_losing_the_permit_or_the_install_stops_it_and_says_why(self):
+        self.switch_on()
+        PermitStore(self.paths).revoke("ext-hello")
+        self.assertIn("no longer permitted", Extensions(self.paths).payload("hello")["skipped"][0]["why"])
+        PermitStore(self.paths).grant("ext-hello")
+        self.assertEqual(len(Extensions(self.paths).payload("hello")["items"]), 1)
+        self.store.remove("ext-hello", self.authority(PW))
+        self.assertIn("no longer installed", Extensions(self.paths).payload("hello")["skipped"][0]["why"])
+
+    def test_switching_off_needs_the_password_and_removes_it(self):
+        self.switch_on()
+        with self.assertRaises(AuthorizationDenied):
+            klayers.traverse(self.paths, self.authority("no", "no", "no"), klayers.Request("unextend", "ext-hello"))
+        self.assertEqual(len(Extensions(self.paths).enabled()), 1)
+        klayers.traverse(self.paths, self.authority(PW), klayers.Request("unextend", "ext-hello"))
+        self.assertEqual(Extensions(self.paths).disable("ext-hello"), 1)     # (the CLI does both)
+        self.assertEqual(Extensions(self.paths).payload("hello"), {"items": [], "skipped": []})
+
+    def test_only_add_ons_can_be_switched_on_and_only_with_an_installed_host(self):
+        with self.assertRaises(KAppError):
+            klayers.traverse(self.paths, self.authority(), klayers.Request("extend", "hello"))
+        self.install_addon("ext-ghost", extends="ghost")
+        with self.assertRaises(KAppError) as cm:
+            klayers.traverse(self.paths, self.authority(), klayers.Request("extend", "ext-ghost"))
+        self.assertIn("ghost", str(cm.exception))
+        self.assertEqual(self.prompter.asked, [])
+
+    def test_more_than_the_limit_are_reported_as_skipped_not_silently_dropped(self):
+        from kos.extensions import MAX_ADD_ONS
+        names = [f"ext-{c}" for c in "abcdefghijk"][:MAX_ADD_ONS + 2]
+        for n in names:
+            f = self.install_addon(n)
+            Extensions(self.paths).perms.grant(n, "extend:hello", "use", pin=KApp.from_file(f).sha256)
+        got = Extensions(self.paths).payload("hello")
+        self.assertEqual(len(got["items"]), MAX_ADD_ONS)
+        self.assertEqual(len(got["skipped"]), 2)
+        self.assertIn("too many add-ons", got["skipped"][0]["why"])
+        self.assertEqual(sorted(i["name"] for i in got["items"]) + sorted(s["name"] for s in got["skipped"]),
+                         sorted(names))
+
+    def test_extension_state_never_touches_the_hosts_zip(self):
+        before = (self.paths.apps / "hello.kapp").read_bytes()
+        seal = (self.paths.apps / "hello.seal").read_bytes()
+        self.switch_on()
+        self.assertEqual((self.paths.apps / "hello.kapp").read_bytes(), before)
+        self.assertEqual((self.paths.apps / "hello.seal").read_bytes(), seal)
+
+    def test_the_examples_pack_scan_clean_and_parse(self):
+        want = {"extensions/web-bookmarks": ("extension", "web"), "mods/taskbar-pins": ("mod", "taskbar"),
+                "mods/library-shelf": ("mod", "app-library")}
+        for rel, (kind, host) in want.items():
+            out = Path(self.tmp.name) / (rel.split("/")[1] + ".kapp")
+            m = pack(REPO / "examples" / rel, out)
+            self.assertEqual((m.kind, m.extends), (kind, host), rel)
+            self.assertTrue(scan_bytes(out.read_bytes(), m.name).clean, rel)
+            self.assertTrue(KApp.from_file(out).contributions["entries"], rel)
+
+
+class TestLayers(AddOnEnv):
+    def spawner(self, inst, app, mode, policy, registry, log_path, cache_dir=None):
+        inst.status, inst.broker_pid = "running", os.getpid()
+        registry.write(inst)
+
+    def trail(self):
+        return [(a, o) for a, o in self.audit() if a.startswith("layer.")]
+
+    def test_there_are_three_layers_and_they_are_the_ai_os_layers_in_order(self):
+        self.assertEqual(klayers.LAYERS, ("gui", "app", "kernel"))
+        self.assertEqual(klayers.LAYERS, tuple(l for l in _aios.LAYERS if l in klayers.LAYERS))
+        self.assertTrue(set(klayers.LAYERS) <= set(_aios.LAYERS))
+
+    def test_opening_goes_through_gui_then_app_then_kernel_and_the_password_is_asked_in_the_kernel(self):
+        open_background(self.paths, self.authority(PW), "hello", spawner=self.spawner)
+        self.assertEqual(self.trail(), [("layer.gui.open", "pass"), ("layer.app.open", "pass"),
+                                        ("layer.kernel.open", "pass")])
+        actions = [a for a, _ in self.audit()]
+        self.assertLess(actions.index("layer.app.open"), actions.index("app.open"))     # password after app
+        self.assertLess(actions.index("app.open"), actions.index("layer.kernel.open"))   # ... inside kernel
+
+    def test_the_gui_layer_refuses_what_has_no_button_and_nothing_after_it_runs(self):
+        for name, mode in (("ghost", "tui"), ("ext-hello", "graphical")):      # not installed / no such mode
+            with self.assertRaises(KAppError) as cm:
+                open_background(self.paths, self.authority(), name, mode, spawner=self.spawner)
+            self.assertEqual(cm.exception.layer, "gui")
+        self.assertEqual(self.trail(), [("layer.gui.open", "refused")] * 2)
+        self.assertEqual(self.prompter.asked, [])
+
+    def test_the_app_layer_refuses_an_unpermitted_app_and_no_password_is_ever_asked(self):
+        PermitStore(self.paths).revoke("hello")
+        with self.assertRaises(PermitError) as cm:
+            open_background(self.paths, self.authority(), "hello", spawner=self.spawner)
+        self.assertEqual(cm.exception.layer, "app")
+        self.assertEqual(self.trail(), [("layer.gui.open", "pass"), ("layer.app.open", "refused")])
+        self.assertNotIn("app.open", [a for a, _ in self.audit()])
+        self.assertEqual(self.prompter.asked, [])
+
+    def test_the_kernel_layer_refuses_a_wrong_password(self):
+        with self.assertRaises(AuthorizationDenied) as cm:
+            open_background(self.paths, self.authority("no", "no", "no"), "hello", spawner=self.spawner)
+        self.assertEqual(cm.exception.layer, "kernel")
+        self.assertEqual(self.trail(), [("layer.gui.open", "pass"), ("layer.app.open", "pass"),
+                                        ("layer.kernel.open", "refused")])
+
+    def test_the_kernel_layer_refuses_a_tampered_app_before_it_runs(self):
+        (self.paths.apps / "hello.kapp").write_bytes((self.paths.apps / "hello.kapp").read_bytes() + b"x")
+        with self.assertRaises(TamperedError) as cm:
+            open_background(self.paths, self.authority(PW), "hello", spawner=self.spawner)
+        self.assertEqual(cm.exception.layer, "kernel")
+
+    def test_the_lazy_authority_is_only_built_by_the_kernel_layer(self):
+        def never():
+            raise AssertionError("the authority (and so the terminal) was touched too early")
+        PermitStore(self.paths).revoke("hello")
+        with self.assertRaises(PermitError):
+            klayers.traverse(self.paths, never, klayers.Request("run", "hello"))
+        with self.assertRaises(KAppError):
+            klayers.traverse(self.paths, never, klayers.Request("run", "ghost"))
+        built = []
+        PermitStore(self.paths).grant("hello")
+
+        def make():
+            built.append(1)
+            return self.authority(PW)
+        self.assertIsNotNone(klayers.traverse(self.paths, make, klayers.Request("run", "hello")).app)
+        self.assertEqual(built, [1])
+
+    def test_closing_and_switching_go_through_every_layer_too(self):
+        # The spawner records this very process as the broker, so it is only ever *focused* here:
+        # a real close sends the broker SIGTERM, and a test must not send that to itself.
+        inst = open_background(self.paths, self.authority(PW), "hello", spawner=self.spawner)
+        passage = klayers.traverse(self.paths, self.authority(), klayers.Request("focus", inst.id))
+        self.assertEqual([l for l, _ in passage.trail], ["gui", "app", "kernel"])
+        Registry(self.paths).write(Instance(id="hello-ffffff", name="hello", mode="tui", broker_pid=999999999,
+                                            sock_path="/x", log_path="/y", started=0, status="exited"))
+        close_instance(self.paths, self.authority(PW), "hello-ffffff")
+        self.assertEqual(self.trail(),
+                         [(f"layer.{l}.{v}", "pass") for v in ("open", "focus", "close") for l in klayers.LAYERS])
+
+    def test_switching_to_an_app_that_is_not_running_is_refused_by_the_kernel_layer(self):
+        Registry(self.paths).write(Instance(id="hello-dddddd", name="hello", mode="tui", broker_pid=999999999,
+                                            sock_path="/x", log_path="/y", started=0, status="exited"))
+        with self.assertRaises(KAppError) as cm:
+            klayers.traverse(self.paths, self.authority(), klayers.Request("focus", "hello-dddddd"))
+        self.assertEqual(cm.exception.layer, "kernel")
+        with self.assertRaises(RegistryError) as cm:
+            klayers.traverse(self.paths, self.authority(), klayers.Request("focus", "hello-eeeeee"))
+        self.assertEqual(cm.exception.layer, "gui")
+
+    def test_unknown_verbs_are_refused(self):
+        with self.assertRaises(KAppError):
+            klayers.traverse(self.paths, self.authority(), klayers.Request("format", "hello"))
+
+    def test_the_bridge_says_which_layer_refused(self):
+        PermitStore(self.paths).revoke("hello")
+        sent = []
+        SystemBridge(self.paths, spawner=self.spawner).handle(
+            {"cmd": "request", "action": "open", "app": "hello", "mode": "tui"}, sent.append, self.authority())
+        self.assertFalse(sent[-1]["ok"])
+        self.assertTrue(sent[-1]["detail"].startswith("app layer:"), sent[-1]["detail"])
+        self.assertIn("permission to run", sent[-1]["detail"])
+
+    def test_no_code_outside_layers_asks_for_the_password_to_use_an_app(self):
+        """Everyone goes through each layer: the names of the password actions for using an app
+        (open, run, graphical, close, extend, mod, unextend) appear in layers.py and nowhere else
+        - bar auth.py, which defines them, and store.py, which checks a grant is one of them. A new
+        code path that authorizes one itself (and so skips the gui and app layers) fails here,
+        even if it keeps the name in a variable first."""
+        import re
+        pattern = re.compile(r"""["']app\.(?:open|run|graphical|close|extend|mod|unextend)["']""")
+        offenders = []
+        for f in sorted((REPO / "kos").rglob("*.py")):
+            if f.name in ("layers.py", "auth.py", "store.py"):
+                continue
+            for n, line in enumerate(f.read_text().splitlines(), 1):
+                if pattern.search(line):
+                    offenders.append(f"{f.relative_to(REPO)}:{n}: {line.strip()}")
+        self.assertEqual(offenders, [])
+        for rel, needle in (("kos/system.py", "layers.traverse"), ("kos/cli.py", "layers.traverse")):
+            self.assertIn(needle, (REPO / rel).read_text())
+
+
+class TestOpeningAnAddress(AddOnEnv):
+    def setUp(self):
+        super().setUp()
+        self.spawned = []
+
+    def spawner(self, inst, app, mode, policy, registry, log_path, cache_dir=None):
+        self.spawned.append((inst.name, mode, inst.address))
+        inst.status, inst.broker_pid = "running", os.getpid()
+        registry.write(inst)
+
+    def test_the_app_is_opened_and_told_the_path(self):
+        inst = open_background(self.paths, self.authority(PW), "hello", address="/news?n=3", spawner=self.spawner)
+        self.assertEqual(self.spawned, [("hello", "tui", "/news?n=3")])
+        self.assertEqual(Registry(self.paths).get(inst.id).address, "/news?n=3")
+
+    def test_a_bad_address_is_refused_before_anything_else_happens(self):
+        for bad in ("/../x", "/a b", "x", "/" + "y" * 300):
+            with self.assertRaises(kaddress.AddressError):
+                open_background(self.paths, self.authority(), "hello", address=bad, spawner=self.spawner)
+        self.assertEqual(self.prompter.asked, [])
+        self.assertEqual([a for a, _ in self.audit() if a.startswith("layer.")], [])
+        self.assertEqual(self.spawned, [])
+
+    def test_an_app_can_ask_for_an_address_and_the_os_still_asks_the_password(self):
+        sent = []
+        req = validate_app_message({"cmd": "request", "action": "open",
+                                    "address": "kos://hello/page?x=1"}, "tui")
+        bridge = SystemBridge(self.paths, spawner=self.spawner)
+        bridge.handle(req, sent.append, self.authority("no", "no", "no"))
+        self.assertFalse(sent[-1]["ok"])
+        self.assertEqual(self.spawned, [])
+        bridge.handle(req, sent.append, self.authority(PW))
+        self.assertTrue(sent[-1]["ok"])
+        self.assertEqual(self.spawned, [("hello", "tui", "/page?x=1")])
+
+    def test_the_address_reaches_the_app_as_an_environment_variable(self):
+        app = KApp.from_file(self.paths.apps / "hello.kapp")
+        with _mock.patch.object(loader, "sealed_memfd", lambda label, data: os.open(os.devnull, os.O_RDONLY)):
+            p = loader.plan(app, 3, "tui", None, "/news?n=3")
+            q = loader.plan(app, 3, "tui")
+            with self.assertRaises(kaddress.AddressError):
+                loader.plan(app, 3, "tui", None, "/../x")
+        self.assertEqual(p.env["KOS_ADDRESS"], "/news?n=3")
+        self.assertNotIn("KOS_ADDRESS", q.env)
+        p.close(), q.close()
+
+    def test_the_sdk_exposes_the_address_and_the_extensions_the_os_sent(self):
+        from kos.sdk import App
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        with _mock.patch.dict(os.environ, {"KOS_ADDRESS": "/news?n=3"}):
+            app = App(b)
+        self.assertEqual(app.address, "/news?n=3")
+        for ev in ({"cmd": "hello", "mode": "tui", "width": 80, "height": 24},
+                   {"cmd": "extensions", "items": [{"name": "e", "entries": []}], "skipped": []}):
+            a.sendall(json.dumps(ev).encode() + b"\n")
+        a.shutdown(socket.SHUT_WR)
+        self.assertEqual([e["cmd"] for e in app.events()], ["hello", "extensions"])
+        self.assertEqual(app.extensions, [{"name": "e", "entries": []}])
+        app.request_address("kos://hello/x", "graphical")
+        self.assertEqual(json.loads(a.recv(4096)), {"cmd": "request", "action": "open",
+                                                    "address": "kos://hello/x", "mode": "graphical"})
+
+    def test_old_instance_records_without_an_address_still_load(self):
+        reg = Registry(self.paths)
+        f = reg._file("old-aaaaaa")
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps({"id": "old-aaaaaa", "name": "old", "mode": "tui", "broker_pid": os.getpid(),
+                                 "sock_path": "/x", "log_path": "/y", "started": 0, "status": "running"}))
+        self.assertEqual(reg.get("old-aaaaaa").address, "")
+
+
+class TestSessionDeliversExtensions(Env):
+    def run_session(self, extensions):
+        a, b = socket.socketpair()
+        self.addCleanup(b.close)
+        out = tempfile.TemporaryFile()
+        self.addCleanup(out.close)
+        devices = ScriptedDevices()
+        devices.push({"type": "interrupt"})
+        s = Session(name="hello", mode="tui", channel=Channel(a), proc=None,
+                    surface=TUISurface(out.fileno(), 100, 30, "hello"), devices=devices,
+                    authority=self.authority(), boot_devices=(), extensions=extensions)
+        s.run()
+        b.settimeout(2)
+        return [json.loads(l)["cmd"] for l in b.makefile("rb").read().splitlines() if l], b
+
+    def test_extensions_follow_hello_and_precede_everything_else(self):
+        payload = {"items": [{"name": "e", "kind": "extension", "version": "1", "entries": [], "colors": {}}],
+                   "skipped": []}
+        cmds, _ = self.run_session(payload)
+        self.assertEqual(cmds[:2], ["hello", "extensions"])
+
+    def test_skipped_add_ons_are_reported_so_the_host_can_say_why(self):
+        cmds, _ = self.run_session({"items": [], "skipped": [{"name": "e", "why": "changed"}]})
+        self.assertEqual(cmds[:2], ["hello", "extensions"])
+
+    def test_an_app_with_nothing_switched_on_is_told_nothing(self):
+        for empty in (None, {}, {"items": [], "skipped": []}):
+            cmds, _ = self.run_session(empty)
+            self.assertNotIn("extensions", cmds)
+
+
+def _load_example(rel, name):
+    spec = _importlib_util.spec_from_file_location(name, REPO / rel)
+    mod = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _drive(mod, events, env=None):
+    """Run an example app's real main() against scripted OS events (no sandbox needed).
+    Returns every command the app sent back."""
+    a, b = socket.socketpair()
+    fd = os.dup(b.fileno())
+    try:
+        for ev in events:
+            a.sendall(json.dumps(ev).encode() + b"\n")
+        a.shutdown(socket.SHUT_WR)
+        with _mock.patch.dict(os.environ, {"KOS_CHANNEL_FD": str(fd), "KOS_MODE": "tui", **(env or {})}):
+            t = threading.Thread(target=mod.main, daemon=True)
+            t.start()
+            t.join(5)
+        assert not t.is_alive(), "the app did not stop at end of input"
+        a.setblocking(False)
+        data = b""
+        try:
+            while True:
+                chunk = a.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        except BlockingIOError:
+            pass
+        return [json.loads(l) for l in data.splitlines() if l]
+    finally:
+        for s in (a, b):
+            s.close()
+
+
+HELLO = {"cmd": "hello", "mode": "tui", "width": 80, "height": 24}
+PINS = {"cmd": "extensions", "skipped": [], "items": [{
+    "name": "taskbar-pins", "version": "1.0", "kind": "mod",
+    "entries": [{"label": "Browser", "address": "kos://web"}, {"label": "Hello", "address": "kos://hello?mode=graphical"}],
+    "colors": {"accent": "#c2410c"}}]}
+
+
+class TestHostApps(unittest.TestCase):
+    """The taskbar, the App Library and the browser show what add-ons contribute. Driven through
+    their real event loops."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tb = _load_example("examples/system/taskbar/app.py", "tb_app")
+        cls.lib = _load_example("examples/system/app-library/app.py", "lib_app")
+        cls.web = _load_example("examples/web/web.py", "web_app")
+
+    def screens(self, out):
+        return ["\n".join(m["lines"]) for m in out if m["cmd"] == "screen"]
+
+    def test_taskbar_helpers(self):
+        items = PINS["items"]
+        self.assertEqual(self.tb.pinned(items), [("Browser", "kos://web"), ("Hello", "kos://hello?mode=graphical")])
+        self.assertEqual(self.tb.accent(items), "#c2410c")
+        self.assertEqual(self.tb.accent([]), self.tb.ACCENT)
+        many = [{"entries": [{"label": str(i), "address": "kos://x"} for i in range(12)]}]
+        self.assertEqual(len(self.tb.pinned(many)), 9)
+        self.assertEqual(len(self.tb.pin_chips(1000, self.tb.pinned(items))), 2)
+
+    def test_taskbar_shows_pins_and_a_pin_key_asks_the_os_to_open_the_address(self):
+        out = _drive(self.tb, [HELLO, PINS, {"cmd": "key", "key": "b"}])
+        self.assertIn("Pinned (by your mods)", self.screens(out)[-1])
+        self.assertIn("b  Hello", self.screens(out)[-1])
+        reqs = [m for m in out if m["cmd"] == "request" and m["action"] == "open"]
+        self.assertEqual(reqs, [{"cmd": "request", "action": "open",
+                                 "address": "kos://hello?mode=graphical", "mode": "tui"}])
+
+    def test_taskbar_goes_to_a_pinned_app_once_the_os_has_opened_it(self):
+        out = _drive(self.tb, [HELLO, PINS, {"cmd": "result", "action": "open", "ok": True, "detail": "", "id": "web-abc123"}])
+        self.assertIn({"cmd": "request", "action": "focus", "id": "web-abc123"}, out)
+
+    def test_taskbar_without_mods_is_unchanged(self):
+        out = _drive(self.tb, [HELLO, {"cmd": "key", "key": "a"}])
+        self.assertNotIn("Pinned", self.screens(out)[-1])
+        self.assertEqual([m for m in out if m["cmd"] == "request" and m["action"] == "open"], [])
+
+    def test_library_lists_the_shelf_after_the_installed_apps(self):
+        state = {"installed": [{"name": "web", "version": "1.0", "description": "d", "modes": ["tui"],
+                                "permitted": True, "kind": "app", "extends": ""},
+                               {"name": "web-bookmarks", "version": "1.0", "description": "", "modes": ["tui"],
+                                "permitted": True, "kind": "extension", "extends": "web"}],
+                 "open": [], "sel": 0, "graphical": False, "note": "",
+                 "ext": [{"entries": [{"label": "News", "address": "kos://web/news.ycombinator.com"}],
+                          "colors": {"accent": "#0f766e"}}]}
+        self.assertEqual([k for k, _ in self.lib.rows(state)], ["app", "app", "shelf"])
+        text = "\n".join(self.lib.tui_lines(state, 30))
+        self.assertIn("[extension of web]", text)
+        self.assertIn("News", text)
+        self.assertEqual(self.lib.accent(state["ext"]), "#0f766e")
+
+    def test_library_opens_a_shelf_entry_by_asking_for_its_address(self):
+        apps = {"cmd": "apps", "installed": [], "open": []}
+        shelf = {"cmd": "extensions", "skipped": [], "items": [{"entries": [
+            {"label": "News", "address": "kos://web/news.ycombinator.com"}], "colors": {}}]}
+        out = _drive(self.lib, [HELLO, apps, shelf, {"cmd": "key", "key": "enter"}])
+        self.assertIn({"cmd": "request", "action": "open", "address": "kos://web/news.ycombinator.com",
+                       "mode": "tui"}, out)
+
+    def test_the_browser_starts_at_the_address_path_and_shows_extension_bookmarks(self):
+        self.assertEqual(self.web.start_target("/example.com/news?p=2"), "example.com/news?p=2")
+        self.assertEqual(self.web.start_target(""), "")
+        self.assertEqual(self.web.start_target("/"), "")
+        items = [{"entries": [{"label": "Example", "address": "kos://web/example.com"},
+                              {"label": "Notes", "address": "kos://notes"},          # not the browser
+                              {"label": "Root", "address": "kos://web"},             # no site
+                              {"label": "Bad", "address": "http://evil"}]}]          # not even an address
+        self.assertEqual(self.web.bookmarks(items), [("Example", "example.com")])
+        out = _drive(self.web, [HELLO, {"cmd": "extensions", "skipped": [], "items": items}])
+        self.assertIn("Bookmarks (from your extensions)", self.screens(out)[-1])
+        self.assertIn("Example", self.screens(out)[-1])
+        plain = _drive(self.web, [HELLO])
+        self.assertNotIn("Bookmarks", self.screens(plain)[-1])
+
+
+class TestAddressAndExtendCommands(AddOnEnv):
+    """The command line, end to end where no terminal is needed."""
+
+    def main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with _mock.patch.dict(os.environ, {"KOS_ROOT": str(self.paths.root)}), \
+                _contextlib.redirect_stdout(out), _contextlib.redirect_stderr(err):
+            code = kcli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_bad_address_is_a_clean_error_and_never_reaches_a_terminal(self):
+        for argv in (("go", "http://evil"), ("go", "kos://web/../x"), ("open", "kos://web/%41"),
+                     ("open", "graphical", "kos://web?mode=cmd"), ("run", "kos://web#x")):
+            code, _, err = self.main(*argv)
+            self.assertEqual(code, 1, argv)
+            self.assertIn("error:", err)
+
+    def test_going_to_an_unknown_app_says_it_has_no_button(self):
+        code, _, err = self.main("go", "kos://ghost/page")
+        self.assertEqual(code, 1)
+        self.assertIn("no button", err)
+
+    def test_an_unpermitted_app_is_refused_by_go_without_a_terminal(self):
+        PermitStore(self.paths).revoke("hello")
+        code, _, err = self.main("go", "kos://hello/page")
+        self.assertEqual(code, 2)
+        self.assertIn("permission to run", err)
+
+    def test_extend_is_refused_without_a_permit_and_without_a_terminal(self):
+        PermitStore(self.paths).revoke("ext-hello")
+        code, _, err = self.main("extend", "ext-hello")
+        self.assertEqual(code, 2)
+        self.assertIn("permission to run", err)
+        code, _, err = self.main("extend", "hello")                 # an ordinary app is not an add-on
+        self.assertEqual(code, 1)
+        self.assertIn("ordinary app", err)
+
+    def test_extend_list_and_kos_list_show_what_is_what(self):
+        code, out, _ = self.main("extend", "--list")
+        self.assertEqual((code, "no extensions or mods" in out), (0, True))
+        self.switch_on()
+        code, out, _ = self.main("extend", "--list")
+        self.assertIn("ext-hello", out)
+        self.assertIn("extend:hello", out)
+        code, out, _ = self.main("list")
+        self.assertIn("[extension of hello]", out)
+        self.assertEqual(sum("[" in l for l in out.splitlines()), 1)      # hello itself has no tag
+        code, _, err = self.main("extend")
+        self.assertEqual(code, 1)
+
+
+class TestActivityFeedStaysReadable(AddOnEnv):
+    def test_layer_passes_are_left_out_of_the_feed_but_refusals_and_the_audit_keep_them(self):
+        from kos.activity import build_feed
+
+        def spawner(inst, app, mode, policy, registry, log_path, cache_dir=None):
+            inst.status, inst.broker_pid = "running", os.getpid()
+            registry.write(inst)
+        open_background(self.paths, self.authority(PW), "hello", spawner=spawner)
+        PermitStore(self.paths).revoke("hello")
+        with self.assertRaises(PermitError):
+            open_background(self.paths, self.authority(), "hello", spawner=spawner)
+        texts = [i.text for i in build_feed(self.paths, 100) if not i.live]
+        self.assertFalse([t for t in texts if t.startswith("pass: layer.")])
+        self.assertIn("refused: layer.app.open hello", texts)
+        self.assertIn("granted: app.open hello", texts)
+        # kos audit keeps every pass: 3 for the open that worked, 1 (gui) for the one the app layer refused
+        self.assertEqual(len([a for a, o in self.audit() if a.startswith("layer.") and o == "pass"]), 4)
+
+
+class TestUninstalledAppIsRefusedAtTheFirstLayer(Env):
+    def test_run_of_an_app_that_is_not_installed_says_it_has_no_button(self):
+        with _mock.patch.dict(os.environ, {"KOS_ROOT": str(self.paths.root)}), \
+                _contextlib.redirect_stderr(io.StringIO()) as err:
+            code = kcli.main(["run", "hello"])
+        self.assertEqual(code, 1)
+        self.assertIn("no button", err.getvalue())
+
+
+import fcntl as _fcntl  # noqa: E402
+
+
+@unittest.skipUnless(hasattr(_fcntl, "F_ADD_SEALS"),
+                     "this Python has no fcntl.F_ADD_SEALS, which launching a sealed app needs")
+class TestAddOnsInARealSandbox(DesktopSessionEnv):
+    """Real sandboxed processes, real command channel, real overlay: the whole path of a mod's
+    data into the taskbar and of a pinned entry back out through gui -> app -> kernel."""
+
+    def spawner(self, inst, app, mode, policy, registry, log_path, cache_dir=None):
+        self.spawned.append((inst.name, mode, inst.address))
+        inst.status, inst.broker_pid = "running", os.getpid()
+        registry.write(inst)
+
+    def setUp(self):
+        super().setUp()
+        self.spawned = []
+        self.store = AppStore(self.paths)
+
+    def switch_on_mod(self, label="Hello", address="kos://hello/start?x=1"):
+        f = Path(self.tmp.name) / "hello-pin.kapp"
+        f.write_bytes(_addon_zip("hello-pin", "mod", "taskbar", {
+            "entries": [{"label": label, "address": address}], "colors": {"accent": "#c2410c"}}))
+        self.store.install(f, self.authority(PW))
+        PermitStore(self.paths).grant("hello-pin")
+        passage = klayers.traverse(self.paths, self.authority(PW), klayers.Request("extend", "hello-pin"))
+        Extensions(self.paths).enable(passage.app)
+
+    def test_a_mod_reaches_the_real_taskbar_and_a_pinned_key_opens_its_address(self):
+        self.store.install(self.kapp, self.authority(PW))
+        PermitStore(self.paths).grant("hello")
+        # the taskbar must be installed for the mod's host to exist
+        tb = Path(self.tmp.name) / "tb-host.kapp"
+        pack(SYSTEM_DIR / "taskbar", tb)
+        self.store.install(tb, self.authority(PW))
+        self.switch_on_mod()
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        s = self.start(SYSTEM_DIR / "taskbar", "taskbar",
+                       bridge=SystemBridge(self.paths, spawner=self.spawner), authority=auth,
+                       extensions=Extensions(self.paths).payload("taskbar"))
+        self.boot_both()
+        threading.Timer(3.0, lambda: self.devices.push(*_keys("a"))).start()     # the first pinned entry
+        self.when_modal("Password to open app", [*_keys(PW), ENTER])
+        threading.Timer(25.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        out = self.output()
+        self.assertIn("Pinned (by your mods)", out)
+        self.assertIn("a  Hello", out)
+        self.assertEqual(self.spawned, [("hello", "tui", "/start?x=1")])
+        self.assertRegex(self.outcome["switch"][1], r"^hello-[0-9a-f]{6}$")      # and it went there
+        trail = [(e["action"], e["outcome"]) for e in auth.audit.entries()
+                 if e["action"].startswith("layer.") and e["target"] == "hello"]
+        self.assertEqual(trail, [(f"layer.{l}.open", "pass") for l in klayers.LAYERS])
+
+    def test_a_pinned_entry_for_an_app_that_is_not_permitted_is_refused_by_the_app_layer(self):
+        self.store.install(self.kapp, self.authority(PW))               # installed, never permitted
+        tb = Path(self.tmp.name) / "tb-host.kapp"
+        pack(SYSTEM_DIR / "taskbar", tb)
+        self.store.install(tb, self.authority(PW))
+        self.switch_on_mod()
+        auth = Authority(self.paths, None, Throttle(self.paths, base=0))
+        s = self.start(SYSTEM_DIR / "taskbar", "taskbar",
+                       bridge=SystemBridge(self.paths, spawner=self.spawner), authority=auth,
+                       extensions=Extensions(self.paths).payload("taskbar"))
+        self.boot_both()
+        threading.Timer(3.0, lambda: self.devices.push(*_keys("a"))).start()
+        threading.Timer(6.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("app layer:", self.output())                      # the taskbar showed who said no
+        self.assertEqual(self.spawned, [])
+        self.assertNotIn(("app.open", "granted"), [(e["action"], e["outcome"]) for e in auth.audit.entries()])
+
+    def test_the_real_browser_shows_bookmarks_from_an_extension(self):
+        payload = {"skipped": [], "items": [{"name": "web-bookmarks", "version": "1.0", "kind": "extension",
+                                             "colors": {}, "entries": [{"label": "Example", "address": "kos://web/example.com"}]}]}
+        s = self.start(REPO / "examples" / "web", "web", extensions=payload)
+        self.devices.push(*_keys("y"), *_keys(PW), ENTER, *_keys("y"), *_keys(PW), ENTER)
+        threading.Timer(3.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=1.0)
+        self.assertIn("Bookmarks (from your extensions)", self.output())
+        self.assertIn("example.com", self.output())
+
+    def test_a_real_app_is_told_the_path_of_the_address_it_was_opened_with(self):
+        d = Path(self.tmp.name) / "echo"
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps(
+            {"name": "echo", "version": "1", "runtime": "python", "entry": "app:main"}))
+        (d / "app.py").write_text(
+            "from kos.sdk import App\n"
+            "def main():\n"
+            "    app = App()\n"
+            "    for ev in app.events():\n"
+            "        app.screen('echo', ['ADDRESS=[' + app.address + ']'])\n")
+        s = self.start(d, "echo", address="/news/today?n=3")
+        threading.Timer(2.0, lambda: self.devices.push({"type": "interrupt"})).start()
+        s.run(first_frame_timeout=0.5)
+        self.assertIn("ADDRESS=[/news/today?n=3]", self.output())
+
+
+@unittest.skipUnless(hasattr(_fcntl, "F_ADD_SEALS"),
+                     "this Python has no fcntl.F_ADD_SEALS, which launching a sealed app needs")
+class TestRealBrokerCarriesTheAddress(Env):
+    """`kos open kos://APP/path`: the real forked broker starts the real sandboxed app, which is told
+    the path. (The same line that `kos go` and an app's open-address request end in.)"""
+
+    def test_a_background_app_is_told_its_address(self):
+        d = Path(self.tmp.name) / "echo"
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps(
+            {"name": "echo", "version": "1", "runtime": "python", "entry": "app:main"}))
+        (d / "app.py").write_text(
+            "from kos.sdk import App\n"
+            "def main():\n"
+            "    app = App()\n"
+            "    for ev in app.events():\n"
+            "        app.screen('echo', ['ADDRESS=[' + app.address + ']'])\n")
+        kapp = Path(self.tmp.name) / "echo.kapp"
+        pack(d, kapp)
+        store = AppStore(self.paths)
+        store.install(kapp, self.authority(PW))
+        with self.authority(PW).authorize("app.open", "echo") as grant:
+            app = store.load_verified("echo", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("echo")
+        run_dir = AppDirs(self.paths, "echo").ensure().run
+        inst = Instance(id=inst_id, name="echo", mode="tui", broker_pid=0, started=0, address="/news?n=3",
+                        sock_path=str(run_dir / f"{inst_id}.sock"), log_path=str(run_dir / f"{inst_id}.log"))
+        spawn(inst, app, "tui", SandboxPolicy(), registry, Path(inst.log_path))
+        try:
+            end = _time.monotonic() + 8
+            while _time.monotonic() < end and not (
+                    inst_id in {i.id: i for i in registry.list() if i.status == "running"}):
+                _time.sleep(0.05)
+            self.assertEqual(registry.get(inst_id).status, "running")
+            self.assertEqual(registry.get(inst_id).address, "/news?n=3")
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(sock.close)
+            sock.connect(registry.get(inst_id).sock_path)
+            sock.settimeout(8)
+            sock.sendall(b'{"cmd":"hello","mode":"tui","width":80,"height":24}\n')
+            seen = b""
+            while b"ADDRESS=" not in seen:
+                chunk = sock.recv(4096)
+                self.assertTrue(chunk, f"broker closed before the app answered: {seen!r}")
+                seen += chunk
+            self.assertIn(b"ADDRESS=[/news?n=3]", seen)
+        finally:
+            try:
+                os.kill(registry.get(inst_id).broker_pid, _signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, Exception):
+                pass
+            for _ in range(50):
+                if not registry._file(inst_id).exists():
+                    break
+                _time.sleep(0.1)

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .address import check_launch
 from .kapp import KApp
 from .sandbox import SandboxPolicy
 
@@ -48,6 +49,12 @@ sys.exit(getattr(importlib.import_module(mod), fn or "main")())
 """
 
 
+# Some Python builds omit these from fcntl; the values are fixed Linux ABI (linux/fcntl.h).
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
+F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = (getattr(fcntl, n, v) for n, v in
+    (("F_SEAL_SEAL", 1), ("F_SEAL_SHRINK", 2), ("F_SEAL_GROW", 4), ("F_SEAL_WRITE", 8)))
+
+
 def sealed_memfd(label: str, data: bytes) -> int:
     fd = os.memfd_create(f"kos:{label}", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     try:
@@ -59,6 +66,7 @@ def sealed_memfd(label: str, data: bytes) -> int:
         # Fail closed: never hand out a memfd the kernel did not actually seal.
         if fcntl.fcntl(fd, F_GET_SEALS) & ALL_SEALS != ALL_SEALS:
             raise OSError("memfd sealing did not take effect")
+        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL)
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)
@@ -83,8 +91,10 @@ class LaunchPlan:
         self.owned_fds.clear()
 
 
-def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None) -> LaunchPlan:
+def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None,
+         address: str = "") -> LaunchPlan:
     m = app.manifest
+    check_launch(address)        # defence in depth: callers already checked it
     kapp_fd = sealed_memfd(m.name, app.data)
     owned = [kapp_fd]
     env = {
@@ -97,6 +107,8 @@ def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None
     }
     if cache_dir is not None:
         env["KOS_CACHE_DIR"] = str(cache_dir)
+    if address:
+        env["KOS_ADDRESS"] = address       # path+query of the kos:// address; data for the app
     if m.runtime == "python":
         exe = os.path.realpath(sys.executable)
         argv = [exe, "-I", "-S", "-B", "-c", _BOOTSTRAP,

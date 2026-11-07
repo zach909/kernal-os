@@ -1,0 +1,545 @@
+"""Firmware control: the OS must be in charge of the machine, or it does not boot.
+
+Some machines carry a second computer next to the CPU that runs before the OS,
+keeps running under it, and can reach memory and the network without the OS
+knowing: Intel's Management Engine (and AMT on top of it), AMD's Platform
+Security Processor, and server BMCs (IPMI). KOS promises that nothing happens
+without your password; code that KOS cannot see or stop breaks that promise.
+So the rule is: **find them, say so, try to switch them off, and if they are
+not provably off, refuse to boot.**
+
+What is real here, and what is not
+----------------------------------
+* **Finding them** is real: PCI ids/classes, the MEI character device, the IPMI
+  DMI record and device nodes, all read from sysfs. The same scan runs in the
+  pre-boot shell (``boot/initramfs/firmware.sh``, before the disk is even
+  unlocked) and again here; ``tests`` runs both against one fake sysfs and
+  insists they agree.
+* **Proving an Intel ME is off** is the one thing software can check: the ME
+  reports its operation mode in PCI config space (HFSTS1, bits 19:16). Mode 3
+  is "disabled" (the HAP / soft-disable state that ``me_cleaner`` or the
+  vendor sets). Anything else, or a register we cannot read, counts as running.
+  The layout follows coreboot/intelmetool's description; it has not been
+  checked against hardware in this repository (the tests use synthetic config
+  space).
+* **Power is the one real lever, for optional chips only.** Thunderbolt and wireless
+  controllers are unbound and put into D3cold through runtime PM; if the kernel then
+  reports ``power_state`` D3cold they count as off (and stop blocking the boot). That is
+  verified, never assumed. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down
+  while the machine runs, and KOS does not try to destroy, erase or overvolt anything.
+* **Switching the ME/PSP/BMC off from the OS is not possible.** The ME, PSP and BMC run
+  on their own processor with their own flash, and the OS cannot stop them.
+  All KOS can do - and does, as "mitigation" - is to cut *its own side*: unbind
+  the driver and forbid rebinding, so nothing on this machine talks to them.
+  That is not "off". The device is left visible on purpose (removing it would
+  make the next scan wrongly say "absent"). Really disabling needs the flash:
+  ``me_cleaner``/HAP, coreboot, or a vendor BIOS switch - an offline job we do
+  not attempt, because a bad write bricks the machine.
+* **Absence cannot be proved.** A BIOS can hide the ME's PCI function. On bare
+  metal x86 with nothing visible, :func:`probe` reports a *caveat* (printed,
+  boot allowed): the OS cannot see what is deliberately hidden from it.
+
+There is no resident checker: the gate is a one-shot look at boot (and at each
+unlock). No daemon, no watchdog, no "check manager" process or chip - a thing
+that watches the OS would be one more thing the OS does not control.
+
+Beyond the ME/PSP/BMC, every other chip that runs its own firmware is reported
+and, under ``enforce``, blocks the boot too (Thunderbolt/USB4, USB-C port
+controller, embedded controller, network, GPU, NVMe, wireless/Bluetooth), as does
+a machine with such chips and no IOMMU. Those are not mitigated: unbinding a
+NIC, GPU or the root disk's controller would break the machine, and the IOMMU
+(``kernel/cmdline.txt``) is what confines them. Inside a VM they are emulated
+and ignored. On real hardware this means almost nothing boots under ``enforce``.
+
+Allow list: ``etc/kos/firmware.allow`` (``boot/firmware.allow`` in the pre-boot image) lists
+``pci VVVV:DDDD`` or ``kind NAME`` entries the owner accepts, for example after reflashing a
+chip with firmware they trust. Allowed chips are still printed (ALLOWED), never hidden. The OS
+does not check that the firmware is what the list claims - it cannot - so the list is the owner
+vouching for the hardware. KOS never uploads firmware to a chip.
+
+Policy comes from the signed kernel command line (``kos.firmware=``):
+``enforce`` (default, also for any unknown value) halts; ``warn`` mitigates,
+alerts and boots anyway. PID 1 ignores the environment; only a development run
+honours ``KOS_DEV_FIRMWARE=warn``.
+"""
+
+from __future__ import annotations
+
+import os
+import struct
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+INTEL, AMD = "0x8086", "0x1022"
+CLASS_MEI = "0x0780"      # PCI "communication controller, other" = Intel MEI/HECI
+CLASS_CRYPTO = "0x1080"   # PCI "encryption controller" = AMD PSP (ccp)
+HFSTS1 = 0x40             # ME host firmware status 1, in the MEI function's config space
+ME_MODE_DISABLED = 3
+# Optional peripherals the OS may power down (PCI runtime PM). Verified, not assumed:
+# they only count as off if the kernel reports power_state D3cold. The ME, PSP, EC,
+# GPU, NIC and the boot NVMe stay powered whenever the machine is on - never in here.
+POWER_OFFABLE = ("thunderbolt", "wireless")
+OVERRIDE = "kos-none"     # a driver name that does not exist: nothing can bind
+
+POLICIES = ("enforce", "warn")
+
+# Other chips that run their own firmware and can act below or beside the OS.
+# Every one is "running": the OS cannot see inside them or prove them benign.
+# (class prefix, kind, name). Skipped inside a VM, where they are emulated.
+FIRMWARE_CLASSES = (
+    ("0x0c0340", "thunderbolt", "Thunderbolt/USB4 controller"),
+    ("0x02", "network", "network controller"),
+    ("0x03", "display", "display/GPU controller"),
+    ("0x0108", "nvme", "NVMe storage controller"),
+    ("0x0d", "wireless", "wireless/Bluetooth controller"),
+)
+
+
+@dataclass
+class Finding:
+    kind: str            # intel-me | amd-psp | bmc-ipmi
+    name: str            # human name
+    where: str           # sysfs path or device node
+    state: str           # "active" or "neutralized"
+    detail: str = ""
+    device: str = ""     # sysfs device directory, relative to the root, for mitigation
+    detached: bool = False   # the OS side was cut by neutralize()
+    pci_id: str = ""     # "vvvv:dddd", for the allow list
+
+    def line(self) -> str:
+        tail = f" - {self.detail}" if self.detail else ""
+        cut = " [OS side detached]" if self.detached else ""
+        return f"{self.name} at {self.where}: {self.state.upper()}{cut}{tail}"
+
+
+@dataclass
+class Verdict:
+    policy: str
+    findings: list[Finding] = field(default_factory=list)
+    actions: list[str] = field(default_factory=list)
+    caveat: str = ""
+
+    @property
+    def blocking(self) -> list[Finding]:
+        return [f for f in self.findings if f.state == "active"]   # "allowed" and "neutralized" do not block
+
+    @property
+    def ok(self) -> bool:
+        """May the machine boot?"""
+        return not self.blocking or self.policy == "warn"
+
+    def reason(self) -> Optional[str]:
+        if self.ok:
+            return None
+        return ("the OS does not have complete control of this machine: "
+                + "; ".join(f.name for f in self.blocking))
+
+    def lines(self) -> list[str]:
+        out = [f.line() for f in self.findings]
+        out += [f"  did: {a}" for a in self.actions]
+        if self.caveat:
+            out.append(f"  note: {self.caveat}")
+        if not self.findings:
+            out.append("no management processor visible to the OS")
+        return out
+
+
+def _read(p: Path) -> str:
+    try:
+        return p.read_text().strip().lower()
+    except OSError:
+        return ""
+
+
+def policy_from_cmdline(cmdline: str) -> str:
+    for word in cmdline.split():
+        if word.startswith("kos.firmware="):
+            value = word.split("=", 1)[1]
+            return value if value in POLICIES else "enforce"
+    return "enforce"
+
+
+def current_policy(root: Path = Path("/")) -> str:
+    if os.getpid() != 1 and os.environ.get("KOS_DEV_FIRMWARE") in POLICIES:
+        return os.environ["KOS_DEV_FIRMWARE"]
+    return policy_from_cmdline(_read(root / "proc/cmdline"))
+
+
+def me_operation_mode(config: Path) -> Optional[int]:
+    """HFSTS1 bits 19:16 from a PCI config-space file; None if unreadable."""
+    try:
+        with open(config, "rb") as f:
+            f.seek(HFSTS1)
+            raw = f.read(4)
+    except OSError:
+        return None
+    if len(raw) != 4:
+        return None
+    return (struct.unpack("<I", raw)[0] >> 16) & 0xF
+
+
+def _in_vm(root: Path) -> bool:
+    return " hypervisor" in _read(root / "proc/cpuinfo")
+
+
+ALLOW_FILE = "etc/kos/firmware.allow"
+
+
+def load_allow(path: Path) -> tuple[set[str], set[str]]:
+    """The owner's allow list: ``pci VVVV:DDDD`` (one device) and ``kind NAME`` (a whole
+    class of chip, e.g. an open-source embedded controller). Unknown lines are ignored,
+    so a typo allows nothing. It lives where only the owner can write it: the signed
+    pre-boot image for the first check, the encrypted root for the second."""
+    pci, kinds = set(), set()
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return pci, kinds
+    for line in text.splitlines():
+        words = line.split("#", 1)[0].split()          # case-sensitive, like the shell scanner: use lowercase hex
+        if len(words) == 2 and words[0] == "pci":
+            pci.add(words[1].replace("0x", ""))
+        elif len(words) == 2 and words[0] == "kind":
+            kinds.add(words[1])
+    return pci, kinds
+
+
+def apply_allow(findings: list[Finding], allow: tuple[set[str], set[str]]) -> None:
+    pci, kinds = allow
+    for f in findings:
+        if f.state == "active" and f.kind not in ("no-iommu", "wrong-machine") and (f.pci_id in pci or f.kind in kinds):
+            f.state = "allowed"
+            f.detail = "on the owner's allow list (" + f.detail + ")"
+
+
+def _pci_findings(root: Path) -> list[Finding]:
+    out = []
+    vm = _in_vm(root)
+    base = root / "sys/bus/pci/devices"
+    try:
+        devices = sorted(base.iterdir())
+    except OSError:
+        return out
+    for dev in devices:
+        vendor, klass = _read(dev / "vendor"), _read(dev / "class")
+        rel = str(dev.relative_to(root))
+        n0 = len(out)
+        if vendor == INTEL and klass.startswith(CLASS_MEI):
+            mode = me_operation_mode(dev / "config")
+            if mode == ME_MODE_DISABLED:
+                out.append(Finding("intel-me", "Intel Management Engine", rel, "neutralized",
+                                   "firmware reports operation mode 'disabled'", rel))
+            else:
+                seen = "unreadable" if mode is None else f"operation mode {mode}"
+                out.append(Finding("intel-me", "Intel Management Engine", rel, "active",
+                                   f"{seen}; it can reach memory and the network (AMT) "
+                                   "below the OS", rel))
+        elif vendor == AMD and klass.startswith(CLASS_CRYPTO):
+            out.append(Finding("amd-psp", "AMD Platform Security Processor", rel, "active",
+                               "cannot be queried or stopped from the OS", rel))
+        elif not vm:
+            for prefix, kind, name in FIRMWARE_CLASSES:
+                if klass.startswith(prefix):
+                    off = kind in POWER_OFFABLE
+                    if off and _read(dev / "power_state") == "d3cold":
+                        out.append(Finding(kind, name, rel, "neutralized",
+                                           "powered off (D3cold)", rel))
+                    else:
+                        out.append(Finding(kind, name, rel, "active",
+                                           "runs its own firmware and can reach memory by DMA",
+                                           rel if off else ""))
+                    break
+        for f in out[n0:]:
+            f.pci_id = f"{vendor[2:]}:{_read(dev / 'device')[2:]}"
+    return out
+
+
+def _other_findings(root: Path) -> list[Finding]:
+    """Firmware-bearing chips that are not PCI functions, plus the check that
+    the IOMMU is on whenever DMA-capable chips exist."""
+    out = []
+    if not _in_vm(root):
+        for pattern, kind, name in (
+                ("sys/class/typec/port*", "typec-port", "USB-C port controller"),
+                ("sys/bus/acpi/devices/PNP0C09*", "embedded-controller", "embedded controller"),
+                ("sys/bus/thunderbolt/devices/domain*", "thunderbolt", "Thunderbolt/USB4 controller")):
+            hit = sorted(root.glob(pattern))
+            if hit:
+                out.append(Finding(kind, name, hit[0].relative_to(root).as_posix(), "active",
+                                   "runs its own firmware; the OS cannot see inside it"))
+    return out
+
+
+def _iommu_finding(root: Path, findings: list[Finding]) -> list[Finding]:
+    dma = {"thunderbolt", "network", "display", "nvme", "wireless", "intel-me", "amd-psp"}
+    if not any(f.kind in dma and f.state in ("active", "allowed") for f in findings):   # allowed chips still do DMA
+        return []
+    try:
+        if any((root / "sys/kernel/iommu_groups").iterdir()):
+            return []
+    except OSError:
+        pass
+    return [Finding("no-iommu", "no IOMMU", "sys/kernel/iommu_groups", "active",
+                    "chips that do DMA are not confined to memory the OS gave them")]
+
+
+def _bmc_findings(root: Path) -> list[Finding]:
+    out = []
+    dmi = root / "sys/firmware/dmi/entries"
+    try:
+        has_dmi = any(p.name.startswith("38-") for p in dmi.iterdir())
+    except OSError:
+        has_dmi = False
+    nodes = sorted(p for pat in ("dev/ipmi*", "dev/ipmi/*") for p in root.glob(pat))
+    nodes += sorted((root / "sys/class/ipmi").glob("ipmi*"))
+    if has_dmi or nodes:
+        where = (nodes[0].relative_to(root).as_posix() if nodes
+                 else "sys/firmware/dmi/entries/38-*")
+        device = ""
+        if nodes and nodes[0].parts[-3:-1] == ("class", "ipmi"):
+            device = f"{nodes[0].relative_to(root).as_posix()}/device"
+        out.append(Finding("bmc-ipmi", "Baseboard management controller (IPMI)", where, "active",
+                           "a separate computer with its own network access", device))
+    return out
+
+
+def machine_rule(root: Path) -> str:
+    """``kos.machine=framework`` on the signed command line: boot only on a Framework
+    laptop (DMI sys_vendor). Default ``any``. The vendor string is what the firmware
+    reports, so this limits mistakes and swapped hardware, not a hostile BIOS."""
+    for word in _read(root / "proc/cmdline").split():
+        if word == "kos.machine=framework":
+            return "framework"
+    return "any"
+
+
+def _machine_findings(root: Path) -> list[Finding]:
+    if machine_rule(root) != "framework":
+        return []
+    vendor = _read(root / "sys/class/dmi/id/sys_vendor")
+    if vendor == "framework":
+        return []
+    return [Finding("wrong-machine", "not a Framework laptop", "sys/class/dmi/id/sys_vendor", "active",
+                    f"this image only boots on Framework hardware; DMI says {vendor or 'nothing'!r}")]
+
+
+def _caveat(root: Path) -> str:
+    cpu = _read(root / "proc/cpuinfo")
+    if not cpu or " hypervisor" in cpu:
+        return ""
+    if "genuineintel" in cpu or "authenticamd" in cpu:
+        return ("this is bare-metal Intel/AMD, which normally contains a management "
+                "processor, but none is visible - it may be hidden by the firmware, and "
+                "the OS cannot prove it is absent")
+    return ""
+
+
+def probe(root: Path = Path("/"), policy: Optional[str] = None,
+          allow_file: Optional[Path] = None) -> Verdict:
+    root = Path(root)
+    v = Verdict(policy or current_policy(root))
+    v.findings = _pci_findings(root) + _bmc_findings(root) + _other_findings(root)
+    apply_allow(v.findings, load_allow(allow_file or root / ALLOW_FILE))
+    v.findings += _machine_findings(root)        # not allow-listable
+    v.findings += _iommu_finding(root, v.findings)
+    if not v.findings:
+        v.caveat = _caveat(root)
+    return v
+
+
+# --- mitigation: cut the OS's side (and power down optional peripherals). The ME/PSP/BMC
+# keep running; only a chip that reads back D3cold is believed off. -------------
+
+def _unbind(root: Path, device: str) -> Optional[str]:
+    dev = root / device
+    drv = dev / "driver"
+    if drv.exists():
+        try:
+            # the kernel's unbind file takes the device's name (its bus address)
+            (drv / "unbind").write_text(os.path.basename(os.path.realpath(dev)) + "\n")
+        except OSError as e:
+            return f"could not unbind {device}: {e.strerror}"
+    try:
+        (dev / "driver_override").write_text(OVERRIDE + "\n")
+    except OSError:
+        pass   # platform/ipmi devices may not offer it; the unbind above is what counts
+    return None
+
+
+def _power_down(root: Path, device: str) -> None:
+    """Ask the kernel to put an unbound PCI function into D3cold. Whether it
+    worked is decided by the next probe reading power_state, not by this."""
+    dev = root / device
+    for name, value in (("d3cold_allowed", "1"), ("power/control", "auto")):
+        try:
+            (dev / name).write_text(value + "\n")
+        except OSError:
+            pass
+
+
+def neutralize(root: Path, verdict: Verdict) -> Verdict:
+    """Detach every active finding from the OS. The ME/PSP/BMC keep running."""
+    root = Path(root)
+    for f in verdict.blocking:
+        if not f.device:
+            continue
+        err = _unbind(root, f.device)
+        if err:
+            verdict.actions.append(err)
+        elif f.kind in POWER_OFFABLE:
+            _power_down(root, f.device)
+            f.detached = True
+            verdict.actions.append(f"unbound {f.name} and asked the kernel to power it down "
+                                   "(counted off only if it then reads D3cold)")
+        else:
+            f.detached = True
+            verdict.actions.append(f"detached the OS from {f.name} (driver unbound, rebinding "
+                                   "forbidden) - it is still running")
+    return verdict
+
+
+def enforce(root: Path = Path("/"), policy: Optional[str] = None, *, mitigate: bool = True) -> Verdict:
+    """Probe, mitigate what is active, and probe again. The second look is what
+    counts: mitigation never turns 'active' into 'neutralized' by itself."""
+    first = probe(root, policy)
+    if mitigate and first.blocking:
+        neutralize(root, first)
+    second = probe(root, first.policy)
+    second.actions = first.actions
+    for f in second.findings:
+        f.detached = any(g.detached and g.where == f.where for g in first.findings)
+    return second
+
+
+# --- what the chips can and cannot see: the protections actually in effect ----------
+
+def protections(root: Path = Path("/")) -> list[tuple[str, str, str]]:
+    """(protection, status, what it does and does not buy you). Read-only and
+    non-blocking: these narrow what a chip we cannot remove can read; none of them
+    stops one that legitimately shares the memory bus (the ME, PSP, a GPU)."""
+    root = Path(root)
+    out = []
+
+    try:
+        groups = any((root / "sys/kernel/iommu_groups").iterdir())
+    except OSError:
+        groups = False
+    out.append(("IOMMU", "on" if groups else "OFF",
+                "DMA-capable chips can only reach memory the OS maps for them"
+                if groups else "DMA-capable chips can read any memory"))
+
+    cpu = _read(root / "proc/cpuinfo")
+    flags = set()
+    for line in cpu.splitlines():
+        if line.startswith("flags"):
+            flags = set(line.split(":", 1)[-1].split())
+            break
+    mem = [f for f in ("tme", "sme", "sev") if f in flags]
+    out.append(("memory encryption", f"CPU supports {'/'.join(mem)}" if mem else "not offered by this CPU",
+                "RAM is ciphertext on the memory bus and in the chips (cold-boot, DRAM probes). The OS "
+                "cannot confirm firmware switched it on, and a chip that reads RAM through the CPU "
+                "still sees plaintext"))
+
+    crypt = []
+    try:
+        crypt = [p for p in (root / "sys/block").glob("dm-*/dm/uuid")
+                 if _read(p).startswith("crypt-luks")]
+    except OSError:
+        pass
+    out.append(("disk encryption (LUKS2)", "on" if crypt else "not seen",
+                "the SSD's own controller only ever handles ciphertext; KOS does not rely on its "
+                "built-in encryption" if crypt else "no unlocked LUKS volume seen"))
+
+    tb = [_read(p) for p in sorted((root / "sys/bus/thunderbolt/devices").glob("domain*/security"))]
+    if tb:
+        weak = [t for t in tb if t in ("", "none")]
+        out.append(("Thunderbolt security", "OFF (none)" if weak else ", ".join(tb),
+                    "devices are authorised before they get PCIe/DMA" if not weak
+                    else "any plugged-in device is connected at once"))
+    out.append(("network", "not checked",
+                "NIC/ME/AMT firmware sees every packet; only end-to-end encryption (TLS, WireGuard) hides "
+                "the contents, never who you talk to"))
+    return out
+
+
+# --- the plan: read-only advice on what it would take to pass the gate ----------------
+
+# kind -> (can it be replaced with open firmware?, what to do). Static knowledge, stated
+# plainly; the OS cannot check any of it on the machine in front of it.
+PLAN = {
+    "intel-me": ("partly", "Open boot firmware (coreboot) plus me_cleaner can strip the ME and set the "
+                 "HAP bit, which this gate then reads as 'disabled'. Offline, with an SPI programmer. "
+                 "Impossible if Intel Boot Guard is fused on, which many OEM boards are."),
+    "amd-psp": ("no", "There is no open replacement. Some boards have a firmware-setup option to "
+                "disable it; the OS cannot verify that, so it stays blocking until you allow-list it."),
+    "bmc-ipmi": ("sometimes", "OpenBMC supports a list of server boards. Otherwise disable or unplug the "
+                 "BMC network port and allow-list the kind yourself."),
+    "embedded-controller": ("sometimes", "Open EC firmware exists for Framework laptops, Chromebooks and "
+                            "System76 machines. Flash it per the vendor's guide, then allow-list "
+                            "'kind embedded-controller'."),
+    "typec-port": ("no", "USB-C port/PD controllers run vendor firmware with no open replacement. "
+                   "Choose hardware without one, or allow-list the kind knowingly."),
+    "thunderbolt": ("no", "Vendor firmware only. Disable Thunderbolt/USB4 in firmware setup; the OS then "
+                    "powers it down (D3cold) and it stops blocking."),
+    "wireless": ("no", "Vendor firmware only. Remove the card or disable it in firmware setup; or let the "
+                 "OS power it down (D3cold), which it verifies."),
+    "network": ("no", "NIC firmware is a vendor blob. Keep it behind the IOMMU and end-to-end encryption, "
+                "and allow-list it knowingly."),
+    "display": ("no", "GPU firmware is a vendor blob. Allow-list knowingly; the IOMMU confines its DMA."),
+    "nvme": ("no", "The controller firmware is inside the drive. LUKS2 means it only handles ciphertext; "
+             "allow-list knowingly."),
+    "no-iommu": ("n/a", "Turn on VT-d / AMD-Vi (IOMMU) in firmware setup. This cannot be allow-listed."),
+    "wrong-machine": ("n/a", "Boot this image on the machine it was built for, or remove kos.machine= "
+                      "from kernel/cmdline.txt."),
+}
+
+
+@dataclass
+class PlanItem:
+    kind: str
+    name: str
+    state: str
+    open_replacement: str
+    advice: str
+
+
+def platform_firmware(root: Path = Path("/")) -> str:
+    root = Path(root)
+    vendor = _read(root / "sys/class/dmi/id/bios_vendor")
+    version = _read(root / "sys/class/dmi/id/bios_version")
+    board = " ".join(x for x in (_read(root / "sys/class/dmi/id/sys_vendor"),
+                                 _read(root / "sys/class/dmi/id/product_name")) if x)
+    if not vendor:
+        return "platform firmware: not reported"
+    kind = ("open (coreboot)" if "coreboot" in vendor else "vendor firmware")
+    return f"platform firmware: {vendor} {version} - {kind}; board: {board or 'unknown'}"
+
+
+def plan(root: Path = Path("/"), verdict: Optional[Verdict] = None) -> list[PlanItem]:
+    """What each chip that blocks (or was accepted) would need. Read-only: nothing here
+    writes to a chip or to the machine."""
+    v = verdict or probe(root)
+    out = []
+    for f in v.findings:
+        replace, advice = PLAN.get(f.kind, ("unknown", "No advice for this kind of chip."))
+        if f.state == "neutralized":
+            advice = "Already believed off: " + f.detail
+        elif f.state == "allowed":
+            advice = "Accepted by your allow list; KOS cannot verify the firmware on it."
+        out.append(PlanItem(f.kind, f.name, f.state, replace, advice))
+    return out
+
+
+def plan_summary(items: list[PlanItem]) -> str:
+    blocking = [i for i in items if i.state == "active"]
+    if not blocking:
+        return "Nothing blocks the boot."
+    stuck = [i for i in blocking if i.open_replacement == "no"]
+    if stuck:
+        return (f"{len(blocking)} chip(s) block the boot; {len(stuck)} of them have no open replacement "
+                "(" + ", ".join(sorted({i.kind for i in stuck})) + "). On this machine the gate passes only if "
+                "you disable them in firmware setup, allow-list them knowingly, or boot with "
+                "kos.firmware=warn.")
+    return (f"{len(blocking)} chip(s) block the boot; each has a route (flash open firmware offline, or "
+            "disable it), then re-run this.")
