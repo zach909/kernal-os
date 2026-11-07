@@ -1,0 +1,87 @@
+pack_time	Clock
+pack_time	Reminders
+pack_time	Sticky Notes
+pack_time	Journal
+pack_time	Habit Tracker
+pack_time	Focus Manager
+pack_calc	Calculator
+pack_calc	Graphing Calculator
+pack_calc	Equation Editor
+pack_calc	Unit Converter
+pack_calc	Finance Calculator
+pack_learn	Reference Library
+pack_learn	KOS Help
+pack_learn	Book Reader
+pack_learn	Flashcards
+pack_health	Health Records
+pack_health	Fitness Tracker
+pack_health	Meditation Timer
+pack_personal	Market Watchlist
+pack_personal	Tickets and Passes
+pack_personal	Budget Tracker
+pack_personal	Personal Information Manager
+pack_personal	Password Generator
+pack_geo	Map Tools
+pack_geo	Route Planner
+pack_geo	Places
+pack_audio	Music Studio
+pack_audio	Sound Synthesizer
+pack_audio	Audio Editor
+pack_audio	Music Library
+pack_audio	Podcast Manager
+pack_audio	News Reader
+pack_media	File Format Converter
+pack_media	3D Model Viewer
+pack_media	Avatar Maker
+pack_media	Animation Maker
+pack_media	Color Tools
+pack_devvc	Version Control
+pack_devvc	Code Review
+pack_devvc	Package Manager
+pack_devvc	Build Planner
+pack_devvc	Config Editor
+pack_devutil	Developer Utilities
+pack_devutil	Log Viewer
+pack_devutil	Debug Helper
+pack_devutil	Scheduled Task Planner
+pack_devutil	Website Analytics
+pack_ml	Machine Learning Lab
+pack_biz1	CRM
+pack_biz1	Sales Management
+pack_biz1	Support Desk
+pack_biz1	Advertising Campaign Manager
+pack_biz2	Accounting
+pack_biz2	Invoicing
+pack_biz2	Inventory Management
+pack_biz2	Procurement
+pack_biz2	Human Resources
+pack_biz2	ERP
+pack_games	Chess
+pack_games	Casual Games
+pack_games	Game Library
+pack_os	Device Settings
+pack_os	Battery and Power
+pack_os	Storage and Disk Management
+pack_os	Network and Wireless
+pack_os	Printer Management
+pack_os	Process and Resource Monitor
+pack_os	System Information and Diagnostics
+pack_os	Software Updates
+pack_os	Firewall Management
+pack_os	Credential Manager
+pack_os	Device Pairing
+pack_os	Window and Desktop Management
+pack_hw	Camera and Photo Booth
+pack_hw	Screen Capture and Recording
+pack_hw	Voice and Speech
+pack_hw	Audio and Video Playback
+pack_hw	Calls and Conferencing
+pack_hw	Remote Access and Screen Sharing
+pack_hw	Spatial Tracking and Calibration
+pack_hw	Immersive and Mixed Reality
+pack_hw	Payments and Digital Keys
+pack_hw	Navigation and Traffic
+pack_hw	Weather
+pack_hw	Cloud and Device Synchronization
+pack_hw	Wireless Sharing and Streaming
+pack_hw	Accessibility Services

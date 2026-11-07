@@ -477,8 +477,11 @@ class Menu(Screen):
             if 0 <= i < len(self.entries): return self.entries[i][1]()
 
 
-def run(host: Host, root: Screen, quit_keys=("ctrl-q",)) -> None:
-    """The screen-stack loop. Esc at the root exits the app."""
+def run(host: Host, root: Screen, quit_keys=("ctrl-q",), agent=None) -> None:
+    """The screen-stack loop. Esc at the root exits the app.
+
+    `agent`, if given, is a function that makes the app's built-in assistant; Ctrl-N opens it from any
+    screen (kos/office/agent.py - imported only when used)."""
     stack = [root]
 
     def draw():
@@ -517,6 +520,8 @@ def run(host: Host, root: Screen, quit_keys=("ctrl-q",)) -> None:
             k = ev["key"]
             if k in quit_keys:
                 host.exit(0); return
+            if k == "ctrl-n" and agent and not getattr(stack[-1], "is_agent", False):
+                apply(("push", agent())); draw(); continue
             try:
                 act = stack[-1].key(k)
             except Exception as e:          # a bug in one screen must not lose the user's session
