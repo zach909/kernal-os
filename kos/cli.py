@@ -76,6 +76,13 @@ def _authority(paths: Paths) -> tuple[Authority, TTYPrompter]:
     return Authority(paths, prompter), prompter
 
 
+def _view(paths: Paths, what: str) -> None:
+    """Looking at what is installed, open, logged or owed needs the password too: the audit log and
+    the activity feed show what you did and which apps you run. Refused before anything is printed."""
+    authority, _ = _authority(paths)
+    authority.authorize("state.view", what).close()
+
+
 def _new_password(prompter: TTYPrompter) -> bytes:
     for _ in range(3):
         a = prompter.password("New password: ")
@@ -177,6 +184,7 @@ def cmd_remove(args, paths: Paths) -> int:
 
 def cmd_list(args, paths: Paths) -> int:
     from .system import list_apps
+    _view(paths, "apps")
     apps = AppStore(paths).installed()
     if not apps:
         print("no apps installed")
@@ -286,6 +294,7 @@ def cmd_go(args, paths: Paths) -> int:
 
 def cmd_ps(args, paths: Paths) -> int:
     from .registry import Registry
+    _view(paths, "open apps")
     insts = Registry(paths).list()
     if not insts:
         print("no apps open")
@@ -502,6 +511,7 @@ def cmd_explore(args, paths: Paths) -> int:
 
 def cmd_activity(args, paths: Paths) -> int:
     from .activity import build_feed, render_feed
+    _view(paths, "activity")
     print(render_feed(build_feed(paths, limit=args.n)))
     return 0
 
@@ -768,6 +778,7 @@ def cmd_cell(args, paths: Paths) -> int:
     from .cells import CellManager, CellSpec
     mgr = CellManager(paths)
     if args.cell_cmd == "list":
+        _view(paths, "cells")
         for c in mgr.cells():
             state = "running" if c["running"] else "dead"
             print(f"{c['name']:16} cid={c['cid']:<4} cpus={c['cpus']} {c['memory_mb']}M {state}")
@@ -838,6 +849,7 @@ def cmd_audit(args, paths: Paths) -> int:
     log = AuditLog(paths)
     if args.verify:
         return _audit_verify(log, paths)
+    _view(paths, "audit log")
     for e in log.tail(args.n):
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
         # targets can hold names that came from disks and zips: print them escaped
@@ -898,6 +910,7 @@ def cmd_admin(args, paths: Paths) -> int:
 
 def cmd_owed(args, paths: Paths) -> int:
     from .requires import Ledger
+    _view(paths, "owed work")
     owed = Ledger(paths).owed()
     if not owed:
         print("nothing is owed")
