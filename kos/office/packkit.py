@@ -22,6 +22,8 @@ class PackEntry:
     graphical: bool = False
     owns: list = field(default_factory=list)
     uses: list = field(default_factory=list)
+    services: list = field(default_factory=list)   # OS service groups the app asks for (kos/servicespec.py)
+    system: bool = False         # may ask the OS to open apps ('system' permission); only the Terminal does
     pack: str = ""               # set by packs.entries()
 
     def __post_init__(self):
@@ -29,10 +31,13 @@ class PackEntry:
             self.name = re.sub(r"[^a-z0-9]+", "-", self.title.lower()).strip("-")
 
 
-def app(title, make, scope="full", note="", *, name="", network=False, graphical=False, owns=(), uses=()) -> PackEntry:
-    """make(host, entry) -> a ui.Screen. `host` is the app's vault/screen (ui.Host)."""
+def app(title, make, scope="full", note="", *, name="", network=False, graphical=False, owns=(), uses=(),
+        services=(), system=False) -> PackEntry:
+    """make(host, entry) -> a ui.Screen. `host` is the app's vault/screen (ui.Host). `services` are the OS
+    service groups the app asks for ('audit', 'files', ...): each becomes a 'service:GROUP' permission."""
     assert scope in ("full", "partial"), scope
-    return PackEntry(title, "pack", scope, note, name, {"make": make}, network, graphical, list(owns), list(uses))
+    return PackEntry(title, "pack", scope, note, name, {"make": make}, network, graphical, list(owns), list(uses),
+                     list(services), system)
 
 
 def none(title, note, name="") -> PackEntry:

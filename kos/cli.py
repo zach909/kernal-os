@@ -152,21 +152,6 @@ def cmd_update(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_view(args, paths: Paths) -> int:
-    """Show a file. Viewing files is an action like any other: password first."""
-    from .protocol import clean_text
-    path = os.path.realpath(args.file)
-    authority, _ = _authority(paths)
-    authority.authorize("file.view", path).close()
-    with open(path, "rb") as f:
-        data = f.read(4 << 20)
-    text = data.decode("utf-8", errors="replace")
-    # strip terminal escapes so a file can't take over your terminal
-    for line in text.splitlines():
-        print(clean_text(line.replace("\t", "    "), 10_000))
-    return 0
-
-
 def cmd_remove(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
     AppStore(paths).remove(args.name, authority)
@@ -381,10 +366,12 @@ def cmd_boot(args, paths: Paths) -> int:
 
 
 def cmd_desktop(args, paths: Paths) -> int:
-    """`kos desktop install`: pack, scan, install and permit the two apps the
-    desktop is made of. Same gates as any other app: each install is scanned
-    first and asks for the password; permitting asks once more."""
+    """`kos desktop install`: pack, scan, install and permit the apps the desktop is made of - the taskbar,
+    the App Library - and the OS's own apps (kos/sysapps.py: audit log, firewall, files, ...). The two desktop
+    apps are installed like any other (scanned, then a password each); the OS's own apps are installed together
+    under one password, every one of them scanned first. Permitting asks once more."""
     import tempfile
+    from . import sysapps
     from .desktop import SYSTEM_APPS
     from .permit import PermitStore
 
@@ -400,105 +387,20 @@ def cmd_desktop(args, paths: Paths) -> int:
             pack(src / name, kapp)
             m = store.install(kapp, authority)
             print(f"installed {m.name} {m.version}")
+        todo = [e for e in sysapps.entries() if e.name not in have]
+        if todo:
+            files = [sysapps.build_one(e, Path(tmp)) for e in todo]
+            ms = store.install_bundle(files, authority, f"{len(files)} apps")
+            print(f"installed {len(ms)} of the OS's own apps: {', '.join(m.name for m in ms)}")
     permits = PermitStore(paths)
-    need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
+    names = [*SYSTEM_APPS, *(e.name for e in sysapps.entries())]
+    need = [n for n in names if not permits.is_permitted(n)]
     if need:
-        with authority.authorize("app.permit", " ".join(need)):
+        with authority.authorize("app.permit", f"{len(need)} apps"):
             for n in need:
-                permits.grant(n)
+                permits.grant(n, KApp.from_file(paths.apps / f"{n}.kapp").manifest.permissions)
         print(f"permitted: {', '.join(need)}")
     print("desktop ready: kos boot desktop   (or just say: desktop)")
-    return 0
-
-
-def _print_text(data: bytes, clean_text) -> None:
-    text = data.decode("utf-8", errors="replace")
-    for line in text.splitlines():
-        print(clean_text(line.replace("\t", "    "), 10_000))
-
-
-def _resolve_mixed(path: str):
-    """Walk a path that may cross from the real disk into a zip and, once
-    inside, into further nested zips - e.g. ``apps/hello.kapp/manifest.json``.
-    ``VFS.cd`` already treats a zip entry as just another directory, so this
-    is a plain walk down the real, absolute path one component at a time.
-    Returns (VFS positioned at the parent, final component name)."""
-    from .vfs import VFS
-
-    parts = [p for p in os.path.abspath(path).split(os.sep) if p]
-    if not parts:
-        raise KAppError("no path given")
-    vfs = VFS("/")
-    for part in parts[:-1]:
-        vfs.cd(part)
-    return vfs, parts[-1]
-
-
-def cmd_ls(args, paths: Paths) -> int:
-    from .protocol import escape_text
-    vfs, last = _resolve_mixed(args.path)
-    vfs.cd(last)
-    for e in vfs.list():
-        tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
-        print(f"{escape_text(e.name)}{tag}")
-    return 0
-
-
-def cmd_cat(args, paths: Paths) -> int:
-    """View a file - including one living inside a zip, without extracting it."""
-    from .protocol import clean_text
-    authority, _ = _authority(paths)
-    authority.authorize("file.view", os.path.abspath(args.path)).close()
-    vfs, last = _resolve_mixed(args.path)
-    _print_text(vfs.read_bytes(last), clean_text)
-    return 0
-
-
-def cmd_explore(args, paths: Paths) -> int:
-    """An interactive shell for walking real directories and zip files as one
-    tree: `cd something.kapp` steps straight into the archive. Browsing
-    (`cd`/`ls`) needs no password; `cat` does, same as `kos view`."""
-    from .protocol import clean_text, escape_text
-    from .vfs import VFS
-
-    vfs = VFS(args.start)
-    print(f"kos explore - {vfs.pwd()}  (cd, ls, cat FILE, up, exit)")
-    while True:
-        try:
-            line = input(f"{vfs.pwd()}> ").strip()
-        except EOFError:
-            print()
-            return 0
-        if not line:
-            continue
-        cmd, _, rest = line.partition(" ")
-        rest = rest.strip()
-        try:
-            if cmd in ("exit", "quit"):
-                return 0
-            elif cmd == "pwd":
-                print(vfs.pwd())
-            elif cmd == "ls":
-                for e in vfs.list():
-                    tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
-                    print(f"{escape_text(e.name)}{tag}")
-            elif cmd in ("cd", "up") and (cmd == "up" or not rest):
-                vfs.up()
-            elif cmd == "cd":
-                vfs.cd(rest)
-            elif cmd == "cat" and rest:
-                authority, _ = _authority(paths)
-                authority.authorize("file.view", f"{vfs.pwd()}/{rest}").close()
-                _print_text(vfs.read_bytes(rest), clean_text)
-            else:
-                print("commands: cd NAME | cd .. | ls | cat FILE | pwd | exit")
-        except VFSError as e:
-            print(f"error: {e}")
-
-
-def cmd_activity(args, paths: Paths) -> int:
-    from .activity import build_feed, render_feed
-    print(render_feed(build_feed(paths, limit=args.n)))
     return 0
 
 
@@ -625,50 +527,6 @@ def cmd_permit(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_grant(args, paths: Paths) -> int:
-    """`kos grant APP space:NAME [--level read|write]` lets an app that *uses* a shared folder in.
-    Everyone holding a grant of at least the level asked for may do it - that is the whole rule."""
-    from .permissions import LEVELS, Permissions
-    if args.list or not args.app:
-        entries = Permissions(paths).list("space:")
-        if not entries:
-            print("no shared-folder access granted yet")
-        for e in sorted(entries, key=lambda e: (e["resource"], e["app"])):
-            print(f"{e['resource']:24} {e['app']:24} {e['level']}")
-        return 0
-    if not args.resource or not args.resource.startswith("space:"):
-        raise KAppError("usage: kos grant APP space:NAME [--level read|write]   |   kos grant --list")
-    if args.level not in ("read", "write"):
-        raise KAppError("--level must be read or write (only the app that creates a space owns it)")
-    authority, _ = _authority(paths)
-    with authority.authorize("space.revoke" if args.revoke else "space.grant", f"{args.app}:{args.resource}"):
-        if args.revoke:
-            n = Permissions(paths).revoke(args.app, args.resource)
-            print(f"revoked {args.app} from {args.resource}" if n else "nothing to revoke")
-        else:
-            if Permissions(paths).get(args.app, args.resource) and \
-                    Permissions(paths).get(args.app, args.resource)["level"] == "own":
-                raise KAppError(f"{args.app} owns {args.resource}")
-            Permissions(paths).grant(args.app, args.resource, args.level)
-            print(f"{args.app} may now {args.level} {args.resource}")
-    return 0
-
-
-def cmd_spaces(args, paths: Paths) -> int:
-    """Shared folders: who created each one and who else is let in."""
-    from .permissions import Permissions
-    entries = Permissions(paths).list("space:")
-    names = sorted({e["resource"] for e in entries})
-    if not names:
-        print("no shared folders yet (an app with 'owns:NAME' creates one the first time it uses it)")
-    for r in names:
-        owner = next((e["app"] for e in entries if e["resource"] == r and e["level"] == "own"), "(none)")
-        others = ", ".join(f"{e['app']}({e['level']})" for e in entries if e["resource"] == r and e["level"] != "own") or "nobody else"
-        n = len(list((paths.state / "spaces" / r[6:]).glob("*"))) if (paths.state / "spaces" / r[6:]).is_dir() else 0
-        print(f"{r[6:]:20} owner {owner:20} items {n:<4} access: {others}")
-    return 0
-
-
 def cmd_dirs(args, paths: Paths) -> int:
     """Where an app's stuff lives: cache (wiped), data (kept), run (live state)."""
     from .appdirs import AppDirs
@@ -697,157 +555,36 @@ def cmd_aios(args, paths: Paths) -> int:
 
 
 def cmd_scan(args, paths: Paths) -> int:
-    """`kos scan file PATH` checks one file or zip right now, no password
-    needed (it's read-only, like `kos list`). `kos scan watch DIR...` is
-    different: starting it needs the password, the same as starting a
-    kernel cell, because from that point on it keeps running and acting -
-    scanning every file written under those directories - until you stop
-    it."""
-    from .scan import scan_file
+    """`kos scan watch DIR...` scans every file written under those directories until you stop it. Starting it
+    needs the password, the same as starting a kernel cell, because from that point on it keeps running and
+    acting. `kos scan file` is the Scanner app now (see launchmap.py)."""
+    if args.scan_cmd == "file":
+        return _launcher("scan")(args, paths)
+    from .watch import ScanHit, run_watch
+    for d in args.dirs:
+        if not os.path.isdir(d):
+            raise KAppError(f"not a directory: {d}")
+    authority, prompter = _authority(paths)
+    authority.authorize("scan.watch", ", ".join(args.dirs)).close()
+    prompter.close()
+    print(f"watching {', '.join(args.dirs)} - every file written here is scanned. Ctrl-C to stop.")
 
-    if args.scan_cmd == "watch":
-        from .watch import ScanHit, run_watch
-        for d in args.dirs:
-            if not os.path.isdir(d):
-                raise KAppError(f"not a directory: {d}")
-        authority, prompter = _authority(paths)
-        authority.authorize("scan.watch", ", ".join(args.dirs)).close()
-        prompter.close()
-        print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
-              "Ctrl-C to stop.")
+    def on_hit(hit: "ScanHit") -> None:
+        print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
 
-        def on_hit(hit: "ScanHit") -> None:
-            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
+    def on_scan(path: str) -> None:
+        print(f"scanned: {path}")
 
-        def on_scan(path: str) -> None:
-            print(f"scanned: {path}")
-
-        try:
-            run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
-        except KeyboardInterrupt:
-            print("\nstopped")
-        return 0
-
-    result = scan_file(Path(args.path))
-    print(f"{args.path}: {result.summary()}")
-    for f in result.findings:
-        print(f"  [{f.severity}] {f.rule} in {f.path}: {f.note}")
-    return 0 if result.clean else 3
-
-
-def cmd_optimize(args, paths: Paths) -> int:
-    from .optimize import optimize
-    authority, _ = _authority(paths)
-    report = optimize(paths, authority)
-    print(report.summary())
-    return 0
-
-
-def cmd_cell(args, paths: Paths) -> int:
-    from .cells import CellManager, CellSpec
-    mgr = CellManager(paths)
-    if args.cell_cmd == "list":
-        for c in mgr.cells():
-            state = "running" if c["running"] else "dead"
-            print(f"{c['name']:16} cid={c['cid']:<4} cpus={c['cpus']} {c['memory_mb']}M {state}")
-        return 0
-    authority, _ = _authority(paths)
-    if args.cell_cmd == "start":
-        spec = CellSpec(name=args.name, kernel=args.kernel, initrd=args.initrd,
-                        memory_mb=args.memory, cpus=[int(c) for c in args.cpus.split(",")])
-        rec = mgr.start(spec, authority)
-        print(f"cell {rec['name']} started: its own kernel on cores {rec['cpus']}, "
-              f"vsock cid {rec['cid']}")
-    else:
-        mgr.stop(args.name, authority)
-        print(f"cell {args.name} stopped")
+    try:
+        run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
+    except KeyboardInterrupt:
+        print("\nstopped")
     return 0
 
 
 def cmd_usb(args, paths: Paths) -> int:
     from . import usb
     return usb.cmd_usb(args, paths)
-
-
-def cmd_doctor(args, paths: Paths) -> int:
-    r = report()
-    ok = lambda b: "yes" if b else "NO"
-    print(f"Landlock ABI          : {r['landlock_abi'] or 'NOT AVAILABLE (apps will refuse to run)'}")
-    print(f"seccomp filter (apps) : {ok(r['seccomp_filter'])}" if r["seccomp_filter"]
-          else "seccomp filter (apps) : not built for this CPU architecture (Landlock + namespaces still apply)")
-    print(f"user namespaces       : {ok(r['user_namespaces'])}")
-    print(f"KVM (kernel cells)    : {ok(r['kvm'])}")
-    print(f"vhost-vsock (cells)   : {ok(r['vhost_vsock'])}")
-    print(f"framebuffer /dev/fb0  : {ok(r['framebuffer'])}")
-    print(f"evdev /dev/input      : {ok(r['evdev'])}")
-    from . import firmware
-    fw = firmware.probe()
-    running = ", ".join(f.name for f in fw.blocking)
-    print(f"firmware control      : {'NO - ' + running + ' running' if running else 'yes'}")
-    print(f"password configured   : {ok(PasswordStore(paths).exists())}")
-    return 0
-
-
-def cmd_firmware(args, paths: Paths) -> int:
-    """Read-only: what management processors are visible and what the boot
-    gate would do. Needs no password and changes nothing."""
-    from . import firmware
-    v = firmware.probe()
-    print(f"policy: kos.firmware={v.policy}")
-    print("\n".join(v.lines()))
-    print("boot: " + ("allowed" if v.ok else "REFUSED - " + (v.reason() or "")))
-    if getattr(args, "fw_cmd", None) == "plan":
-        print("\n" + firmware.platform_firmware())
-        items = firmware.plan(verdict=v)
-        for i in items:
-            print(f"\n- {i.name} [{i.state}] open replacement: {i.open_replacement}\n    {i.advice}")
-        print("\n" + firmware.plan_summary(items))
-        print("\nThis plan is read-only. KOS never writes to a chip; flashing is an offline job.")
-        return 0 if v.ok else 1
-    print("\nwhat the chips we cannot remove can still see:")
-    for name, status, note in firmware.protections():
-        print(f"  {name:24} {status}\n      {note}")
-    return 0 if v.ok else 1
-
-
-def cmd_audit(args, paths: Paths) -> int:
-    import time
-    from .auth import AuditLog
-    from .protocol import escape_text
-    log = AuditLog(paths)
-    if args.verify:
-        return _audit_verify(log, paths)
-    for e in log.tail(args.n):
-        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
-        # targets can hold names that came from disks and zips: print them escaped
-        print(f"{t}  {escape_text(e['outcome']):13} {escape_text(e['action']):15} {escape_text(e['target'])}")
-    return 0
-
-
-def cmd_security(args, paths: Paths) -> int:
-    """`kos security`: every check KOS can run on itself without your password."""
-    from .secure import FAIL, render, run_checks
-    checks = run_checks(paths)
-    print(render(checks))
-    return 3 if any(c.level == FAIL for c in checks) else 0
-
-
-def _audit_verify(log, paths: Paths) -> int:
-    """`kos audit --verify`: check the hash chain, and with the password every anchor."""
-    from .auth import AUDIT_KEY_LABEL
-    authority, _ = _authority(paths)
-    with authority.authorize("audit.verify") as grant:
-        rep = log.verify(grant.key(AUDIT_KEY_LABEL))
-    print(f"{rep.entries} line(s): {rep.chained} chained, {rep.anchored} anchored to your password, "
-          f"{rep.legacy} older unprotected")
-    if rep.trimmed:
-        print("note: older lines were trimmed by 'kos optimize'; the chain is checked from the first one left")
-    if not rep.ok:
-        print(f"TAMPERED at line {rep.bad_line}: {rep.problem}")
-        return 3
-    print("intact: no line was edited, deleted or reordered, and every anchor matches your password")
-    print("(a log cut short at the very end cannot be detected - nothing else remembers its length)")
-    return 0
 
 
 def cmd_admin(args, paths: Paths) -> int:
@@ -872,26 +609,6 @@ def cmd_admin(args, paths: Paths) -> int:
     print(kb.status())
     if lease.weak:
         eprint("WARNING: KOS_DEV_ADMIN_WEAK=1 - not on the KOS kernel; keyboard is not exclusive.")
-    return 0
-
-
-def cmd_owed(args, paths: Paths) -> int:
-    from .requires import Ledger
-    owed = Ledger(paths).owed()
-    if not owed:
-        print("nothing is owed")
-    for e in owed:
-        print(f"{e['target']}  ({e['trigger']}) still owes: {', '.join(e['pending'])}")
-    return 0
-
-
-def cmd_settle(args, paths: Paths) -> int:
-    """Do what earlier writes still owe: the security scan and the disk optimize."""
-    from .admin import settle
-    authority, prompter = _authority(paths)
-    for line in settle(paths, authority):
-        print(line)
-    prompter.close()
     return 0
 
 
@@ -959,66 +676,6 @@ def cmd_backup(args, paths: Paths) -> int:
         print(f"restored {item.id} -> {report.summary()}")
         return 0
     raise KAppError(f"unknown backup action {action!r}")
-def cmd_convert(args, paths: Paths) -> int:
-    """Convert a Debian .deb into a .kapp. The package is analysed and scanned
-    first (a bad or unconvertible one is refused before any password prompt);
-    then the password is needed to write the result. Nothing is installed."""
-    from .debconv import MAX_DEB, DebError, convert
-    src, out = Path(args.file), Path(args.output)
-    if os.path.lexists(out):
-        raise KAppError(f"{out} already exists; refusing to overwrite it")
-    with open(src, "rb") as f:
-        data = f.read(MAX_DEB + 1)
-    try:
-        kapp, report = convert(data, args.exe)
-    except DebError as e:
-        raise KAppError(str(e)) from None
-    authority, prompter = _authority(paths)
-    authority.authorize("app.convert", report.kapp_name).close()
-    prompter.close()
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "wb") as f:
-        f.write(kapp)
-    print(report.summary())
-    print(f"wrote {out}. Next: kos install {out}   (scans again, asks for the password, seals)")
-    return 0
-
-
-def cmd_skills(args, paths: Paths) -> int:
-    """Make agent skills from the installed apps and the commands. One password
-    (``skill.make``) verifies every app's seal. Printing writes nothing; with
-    --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
-    from .skillmaker import collect_apps, command_inventory, make_skills
-    authority, prompter = _authority(paths)
-    manifests, skipped = collect_apps(paths, authority)
-    prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests)
-    for line in skipped + refused:
-        print(line, file=sys.stderr)
-    if not args.out:
-        for rel, text in files.items():
-            print(f"=== {rel}\n{text}")
-        return 0
-    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
-    out = Path(os.path.abspath(args.out))
-    if not out.is_dir() or out.is_symlink():
-        raise KAppError(f"{out} must be an existing directory (not a symlink)")
-    kb = AdminKeyboard(paths)
-    lease = kb.require_booted()          # refuse before any password prompt
-    devices = open_admin_devices(lease)
-    try:
-        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
-        wauth = Authority(paths, wprompter)
-        for rel, text in files.items():
-            target = out / rel
-            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
-            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
-    finally:
-        if devices is not None:
-            devices.close()
-    return 0
-
-
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -1236,16 +893,37 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _launcher(command: str):
+    """The command line's whole job for a command that is an app now: run that app (kos/launchmap.py).
+    The app is installed with `kos desktop install`; until it is, say so instead of doing the work here."""
+    from .launchmap import app_for
+
+    def go(args, paths: Paths) -> int:
+        name = app_for(command)
+        if not (paths.apps / f"{name}.kapp").exists():
+            eprint(f"'{command}' is the app '{name}' now, and it is not installed. "
+                   "Install the OS's own apps with: kos desktop install")
+            return 66
+        extra = [v for k, v in sorted(vars(args).items()) if k != "cmd" and v not in (None, False, [], "")]
+        if extra:
+            print(f"(opening the app '{name}'; it does not take command-line arguments - "
+                  f"type them there: {' '.join(map(str, extra))[:80]})")
+        return cmd_run(argparse.Namespace(target=[name], cell=None), paths)
+    go.__name__ = f"cmd_{command}"
+    return go
+
+
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
-    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
-    "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
-    "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
-    "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
-    "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
+    "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
+    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot,
+    "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
+    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
+    # the commands that are apps now: the command line only opens the app
+    **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
+                                  "doctor", "firmware", "audit", "security", "owed", "settle", "skills", "convert")}}
+
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -153,7 +153,7 @@ class App:
     # A blocking round trip like the vault: the OS checks the call against servicespec.py, asks the
     # owner for the password in its own prompt where the service needs one, and answers
     # {"ok": bool, "detail": str, "data": {..}}. Events that arrive meanwhile are kept for events().
-    def service(self, name: str, **args) -> dict:
+    def service(self, name: str, /, **args) -> dict:       # positional-only: services have arguments called 'name'
         self._seq += 1
         self.send({"cmd": "service", "id": self._seq, "name": name, "args": args})
         while True:

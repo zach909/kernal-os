@@ -1,8 +1,13 @@
-"""pack_os: OS-management titles. Apps are sandboxed and cannot read or change system state, so none are built."""
+"""pack_os: OS-management titles.
+
+A sandboxed app cannot read or change system state by itself. Five of these are built anyway, because the
+OS now answers an app's *questions* (kos/servicespec.py): the app formats what it is told and the OS asks the
+owner's password, in its own prompt, for every one. The rest cannot be built and say why."""
 
 from __future__ import annotations
 
-from .packkit import none
+from .packkit import app, none
+from .pack_system import make_activity, make_disk, make_firewall, make_packages, make_system
 
 ENTRIES: list = [
     none("Device Settings",
@@ -11,27 +16,31 @@ ENTRIES: list = [
     none("Battery and Power",
          "Not an app: a sandboxed app cannot read the battery or change power state, and the OS has no power "
          "management yet. No `kos` command covers it; nothing in KOS reads battery or sets sleep."),
-    none("Storage and Disk Management",
-         "Not an app: apps cannot see or change disks. Partly covered by OS commands: `kos ls` lists "
-         "directories, `kos optimize` reclaims app disk space, `kos usb list` lists USB disks."),
+    app("Storage and Disk Management", make_disk, "partial",
+        "Shows what earlier writes still owe and does it: the security scan, then the disk optimize (recompress apps, "
+        "prune dead state, trim the audit log). Replaces `kos owed`, `settle`, `optimize`. It cannot see or partition disks; "
+        "`kos usb list` still lists USB disks.", name="disk-care", services=["maintenance"]),
     none("Network and Wireless",
          "Not an app: apps run in an empty network namespace and cannot configure networks. KOS has no "
-         "network or Wi-Fi manager and no firewall yet (a README gap); nothing covers it."),
+         "network or Wi-Fi manager; connection rules are the Firewall Management app. Nothing manages networks or Wi-Fi."),
     none("Printer Management",
          "Not an app: apps cannot reach printers or drivers, and KOS has no printing support. No `kos` "
          "command or other app covers it; nothing in KOS talks to a printer."),
-    none("Process and Resource Monitor",
-         "Not an app: sandboxed apps cannot see processes. Partly covered by the OS: `kos ps` lists apps "
-         "opened with `kos open`, and `kos activity` shows them with recent password decisions."),
-    none("System Information and Diagnostics",
-         "Not an app: apps cannot inspect the host. Covered in part by OS commands: `kos doctor` reports "
-         "kernel security features, `kos security` checks KOS itself, `kos firmware` lists chips."),
-    none("Software Updates",
-         "Not an app: apps cannot replace themselves or the OS. `kos update` updates installed apps only "
-         "(newer version, scanned first, downgrades refused). There is no OS update mechanism."),
-    none("Firewall Management",
-         "Not an app yet: there is no firewall. README lists this as an open Rule 3 gap: an app has all "
-         "hosts or none, and OS traffic is not blocked or logged. A firewall app would need OS support."),
+    app("Process and Resource Monitor", make_activity, "partial",
+        "One feed of the apps KOS has open and the recent password decisions. Replaces `kos activity`. It sees only what "
+        "KOS started, not other processes, and shows no CPU or memory figures.", name="activity", services=["activity"]),
+    app("System Information and Diagnostics", make_system, "partial",
+        "Which kernel protections this machine has, whether this is the KOS kernel, firmware control and the firmware "
+        "plan. Replaces `kos doctor` and `kos firmware`. It reports only what KOS checks; it is not a hardware inventory.",
+        name="system-info", services=["system"]),
+    app("Software Updates", make_packages, "partial",
+        "Installed apps with their run permits: install, update, remove, permit and revoke. Each scans first, then asks "
+        "your password. Replaces `kos install`, `update`, `remove`, `permit`, `list`. Apps only: there is no OS update, and "
+        "`kos update all` is not here.", name="software-updates", services=["packages"]),
+    app("Firewall Management", make_firewall, "partial",
+        "Rules that let one app make one kind of connection to one typed-out address and port; everything else is blocked "
+        "by the KOS kernel. The OS's own connections and connections from outside the sandbox are not covered yet, and a "
+        "change reaches an app the next time it is opened.", name="firewall", services=["firewall"]),
     none("Credential Manager",
          "Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto "
          "library, which is an open owner decision (README). No `kos` command covers it."),

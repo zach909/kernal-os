@@ -128,6 +128,31 @@ class TestTheSchema(unittest.TestCase):
                             "args": {"path": "/etc/hostname", "limit": 65_536}})
 
 
+class TestServicesWithArgumentsCalledNameAndHost(unittest.TestCase):
+    """Services have arguments called 'name' and 'host'. The calling functions must not choke on them."""
+
+    def test_the_sdk_the_hosts_and_the_suite_helper_pass_such_arguments_through(self):
+        from kos.office.ui import AppHost, FakeHost
+        sent = []
+
+        class FakeApp:
+            vault_error = ""
+
+            def service(self, name, /, **args):
+                sent.append((name, args))
+                return {"ok": True, "detail": "", "data": {}}
+        AppHost(FakeApp()).call("packages.remove", name="hello")
+        AppHost(FakeApp()).call("firewall.allow", app="web", host="1.2.3.4", port=80)
+        self.assertEqual(sent, [("packages.remove", {"name": "hello"}),
+                                ("firewall.allow", {"app": "web", "host": "1.2.3.4", "port": 80})])
+        h = FakeHost([], services=lambda n, a: {"ok": True, "data": {}})
+        h.call("cells.stop", name="c1")
+        self.assertEqual(h.service_calls, [("cells.stop", {"name": "c1"})])
+        import inspect
+        from kos.sdk import App
+        self.assertIs(inspect.signature(App.service).parameters["name"].kind, inspect.Parameter.POSITIONAL_ONLY)
+
+
 class TestManifestPermission(unittest.TestCase):
     def manifest(self, perms, **extra):
         d = {"name": "x", "version": "1", "runtime": "python", "entry": "app:main", "permissions": perms, **extra}

@@ -62,6 +62,7 @@ ACTIONS: dict[str, str] = {
     "space.grant": "give an app access to a shared folder",
     "space.revoke": "take an app's access to a shared folder away",
     "app.update.all": "update all apps",
+    "app.install.all": "install the OS's own apps",
     "scan.watch": "start virus scan watcher",
     "disk.optimize": "optimize disk space",
     "cell.start": "start kernel cell",
