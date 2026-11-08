@@ -26,6 +26,8 @@ OS -> app
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
+    {"cmd": "service", "id": N, "ok": bool, "detail": str, "data": {..}}
+                                                       (answer to a service call; see servicespec.py)
     {"cmd": "quit"}
 
 app -> OS
@@ -44,6 +46,11 @@ app -> OS
     {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
                                          durable storage: the app's private data ('storage' permission) or a
                                          shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
+    {"cmd": "service", "id": N, "name": "audit.tail", "args": {..}}
+                                         ask the OS for one of the functions in servicespec.SPECS (the audit log, the
+                                         security check, the firewall, ...). Needs the manifest permission
+                                         ``service:GROUP``; the password, where one is needed, is typed in the OS's
+                                         own prompt. Every argument is checked against the spec; none is trusted.
     {"cmd": "exit", "code": int}
 
 ``request`` is how an app does anything beyond drawing: it *asks*. The OS only
@@ -61,6 +68,7 @@ import socket
 from typing import Any
 
 from .address import AddressError, parse as parse_address
+from .servicespec import SPECS, SpecError
 
 MAX_LINE = 1 << 20
 MAX_LINES = 500
@@ -207,6 +215,18 @@ def _vault(msg: dict) -> dict:
     return out
 
 
+def _service(msg: dict) -> dict:
+    name, ident = msg.get("name"), _int(msg.get("id"), 0, 2**31)
+    spec = SPECS.get(name) if isinstance(name, str) else None
+    if spec is None:
+        raise ProtocolError("service.name is not a service")
+    try:
+        args = spec.check(msg.get("args", {}))
+    except SpecError as e:
+        raise ProtocolError(f"service.args: {e}") from None
+    return {"cmd": "service", "id": ident, "name": name, "args": args}
+
+
 def validate_app_message(msg: Any, mode: str) -> dict:
     if not isinstance(msg, dict) or not isinstance(msg.get("cmd"), str):
         raise ProtocolError("message must be an object with a 'cmd'")
@@ -232,6 +252,8 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return _request(msg)
     if cmd == "vault":
         return _vault(msg)
+    if cmd == "service":
+        return _service(msg)
     if cmd == "exit":
         return {"cmd": "exit", "code": _int(msg.get("code", 0), 0, 255)}
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")

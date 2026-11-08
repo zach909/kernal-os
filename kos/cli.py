@@ -251,7 +251,8 @@ def cmd_run(args, paths: Paths) -> int:
         bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
+                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            services=_services_for(paths, name, app.manifest.permissions))
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -308,7 +309,8 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
-                        extensions=_extensions_for(paths, inst.name), **session_kwargs)
+                        extensions=_extensions_for(paths, inst.name),
+                        services=_services_for(paths, inst.name, perms), **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:
@@ -532,6 +534,14 @@ def _extensions_for(paths: Paths, name: str) -> dict:
     """What extensions (or mods) the owner switched on for this app: told to it after hello."""
     from .extensions import Extensions
     return Extensions(paths).payload(name)
+
+
+def _services_for(paths: Paths, name: str, permissions):
+    """The ServiceHost for an app whose manifest asked for 'service:GROUP' permissions, else None."""
+    from .kapp import SERVICE_PERM_RE
+    from .services import ServiceHost
+    groups = {m.group(1) for m in (SERVICE_PERM_RE.match(str(p)) for p in permissions) if m}
+    return ServiceHost(paths, name, frozenset(groups)) if groups else None
 
 
 def _vault_for(paths: Paths, name: str, permissions):

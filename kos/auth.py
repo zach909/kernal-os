@@ -79,6 +79,16 @@ ACTIONS: dict[str, str] = {
     "app.extend": "switch on an extension for an app",
     "app.mod": "let a mod modify a system app",
     "app.unextend": "switch off an extension or mod",
+    # what the system apps ask for (kos/services.py): each shows or changes private state
+    "audit.read": "view the authorization log",
+    "activity.read": "view recent activity",
+    "security.check": "run the security check",
+    "system.read": "read system information",
+    "firewall.read": "view the firewall",
+    "firewall.change": "change the firewall",
+    "cell.list": "list kernel cells",
+    "app.list": "list installed apps and their permissions",
+    "space.list": "list who may use which shared folder",
 }
 
 

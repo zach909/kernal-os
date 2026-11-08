@@ -30,6 +30,10 @@ class Host:
     def exit(self, code: int = 0) -> None: raise NotImplementedError
     def present(self, canvas) -> None: raise NotImplementedError
 
+    def call(self, name: str, **args) -> dict:
+        """Ask the OS for one of its functions. Returns {'ok', 'detail', 'data'}; never raises."""
+        return {"ok": False, "detail": "this host has no OS services", "data": {}}
+
 
 class AppHost(Host):
     def __init__(self, app):
@@ -54,13 +58,19 @@ class AppHost(Host):
     def delete(self, key, space=None): return self.app.vault_delete(key, space)
     def space_names(self): return [s["space"] for s in self.app.vault_spaces() if isinstance(s.get("space"), str)]
     def exit(self, code=0): self.app.exit(code)
+    def call(self, name, **args):
+        r = self.app.service(name, **args)
+        return {"ok": bool(r.get("ok")), "detail": str(r.get("detail", "")), "data": r.get("data") or {}}
 
 
 class FakeHost(Host):
     """Scripted host for tests: feed keys, read back the last screen."""
 
-    def __init__(self, keys: list | str = (), width: int = 80, height: int = 22, data=None, mode: str = "tui", storage=None):
+    def __init__(self, keys: list | str = (), width: int = 80, height: int = 22, data=None, mode: str = "tui", storage=None,
+                 services=None):
         self.width, self.height, self.mode = width, height, mode
+        self.services = services            # a services.ServiceHost + authority pair, or a fake: fn(name, args) -> reply
+        self.service_calls: list = []
         self.storage = storage              # a real kos.spaces.AppStorage: shared spaces are then truly enforced
         self.spaces: dict = {}              # without storage, spaces are plain in-memory dicts
         self.data: dict = dict(data or {})
@@ -136,6 +146,13 @@ class FakeHost(Host):
             return [s["space"] for s in self.storage.visible_spaces()]
         return sorted(self.spaces)
     def exit(self, code=0): self.exited = code
+
+    def call(self, name, **args):
+        self.service_calls.append((name, args))
+        if self.services is None:
+            return {"ok": False, "detail": "this app has no 'service:' permission in its manifest", "data": {}}
+        r = self.services(name, args)
+        return {"ok": bool(r.get("ok")), "detail": str(r.get("detail", "")), "data": r.get("data") or {}}
 
     @property
     def text(self) -> str:

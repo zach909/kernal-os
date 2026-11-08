@@ -35,6 +35,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import servicespec
+
 MANIFEST = "manifest.json"
 MAX_ARCHIVE = 512 << 20
 MAX_ENTRIES = 4096
@@ -46,6 +48,7 @@ RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
 PERMISSIONS = {"network", "system", "storage"}
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
+SERVICE_PERM_RE = re.compile(r"^service:([a-z]+)$")      # ask the OS for one group of functions (servicespec.py)
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
                   "kind", "extends"}
 
@@ -101,9 +104,13 @@ class Manifest:
             raise KAppError(f"modes must be a non-empty subset of {sorted(MODES)}")
         perms = tuple(d.get("permissions", []))
         for perm in perms:
-            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)):
+            m = SERVICE_PERM_RE.match(str(perm))
+            if m and m.group(1) not in servicespec.GROUPS:
+                raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
+            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)) and not m:
                 raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
-                                "'owns:NAME' (create a shared folder) or 'uses:NAME' (look for one)")
+                                "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
+                                "or 'service:GROUP' (ask the OS for a group of functions)")
         desc = d.get("description", "")
         if not isinstance(desc, str) or len(desc) > 200:
             raise KAppError("description must be a string of at most 200 characters")
@@ -125,9 +132,10 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
-            if "system" in perms:
-                # The power to open and close apps must never ride in on an add-on.
-                raise KAppError(f"a {kind} cannot ask for the 'system' permission")
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
+                # The power to open and close apps, or to ask the OS for its own state, must never
+                # ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
                    modes=modes, permissions=perms, description=desc, kind=kind, extends=extends)
 

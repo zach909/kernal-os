@@ -40,10 +40,15 @@
 #define PORT 9000
 
 static int failures;
+static int have_bpf = 1;	/* does this kernel have bpf() at all? (a hardened config may not) */
 
 static void check(int cond, const char *name)
 {
+	int e = errno;			/* what the call under test left behind, for a failing line */
+
 	printf("%s - %s\n", cond ? "ok" : "not ok", name);
+	if (!cond)
+		printf("# errno was %d (%s)\n", e, strerror(e));
 	fflush(stdout);
 	if (!cond)
 		failures++;
@@ -209,7 +214,10 @@ static int c_kernel_interfaces(void)
 	memset(&b, 0, sizeof(b));
 	memset(&p, 0, sizeof(p));
 	p.size = sizeof(p);
-	check(refused(syscall(SYS_bpf, BPF_MAP_CREATE, &b, sizeof(b)), EPERM), "an app cannot call bpf()");
+	if (have_bpf)
+		check(refused(syscall(SYS_bpf, BPF_MAP_CREATE, &b, sizeof(b)), EPERM), "an app cannot call bpf()");
+	else
+		check(refused(syscall(SYS_bpf, BPF_MAP_CREATE, &b, sizeof(b)), ENOSYS), "bpf() does not exist in this kernel: nothing to deny");
 	check(refused(syscall(SYS_perf_event_open, &p, 0, -1, -1, 0), EPERM), "an app cannot call perf_event_open()");
 	check(refused(ptrace(PTRACE_TRACEME, 0, 0, 0), EPERM), "an app cannot ptrace-traceme");
 	return failures;
@@ -223,7 +231,11 @@ static int c_bpf_perf_control(void)
 	memset(&b, 0, sizeof(b));
 	memset(&p, 0, sizeof(p));
 	p.size = sizeof(p);
-	check(!refused(syscall(SYS_bpf, BPF_MAP_CREATE, &b, sizeof(b)), EPERM), "control: the core's bpf() is not refused by the LSM");
+	long rc = syscall(SYS_bpf, BPF_MAP_CREATE, &b, sizeof(b));
+
+	if (!have_bpf)				/* main() probed: no bpf() here, so ENOSYS is the right answer */
+		rc = -1, errno = ENOSYS;
+	check(!refused(rc, EPERM), "control: the core's bpf() is not refused by the LSM");
 	check(!refused(syscall(SYS_perf_event_open, &p, 0, -1, -1, 0), EPERM), "control: the core's perf_event_open() is not refused by the LSM");
 	return failures;
 }
@@ -349,6 +361,14 @@ int main(int argc, char **argv)
 	mount("tmpfs", "/tmp", "tmpfs", 0, NULL);
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
+	{
+		union bpf_attr probe;
+
+		memset(&probe, 0, sizeof(probe));
+		errno = 0;
+		have_bpf = !(syscall(SYS_bpf, BPF_MAP_CREATE, &probe, sizeof(probe)) < 0 && errno == ENOSYS);
+		printf("# bpf() %s in this kernel\n", have_bpf ? "exists" : "does not exist");
+	}
 	printf("# KOS LSM boot test\n");
 	check(slurp(SFS "status", buf, sizeof(buf)) > 0 && has(buf, "core=unclaimed"), "the module is up and the core is unclaimed");
 
@@ -434,7 +454,10 @@ int main(int argc, char **argv)
 		check(has(buf, "allow app=8 connect tcp 127.0.0.1 9000"), "log: app 8's allowed connect is recorded");
 		check(has(buf, "deny app=8 connect tcp 127.0.0.1 9001"), "log: app 8's denied connect is recorded");
 		check(has(buf, "deny app=7 open device 5:1"), "log: the denied tty open is recorded");
-		check(has(buf, "deny app=7 bpf"), "log: the denied bpf call is recorded");
+		if (have_bpf)
+			check(has(buf, "deny app=7 bpf"), "log: the denied bpf call is recorded");
+		else
+			printf("ok - log: no bpf() in this kernel, so no bpf denial to record\n");
 		check(slurp(SFS "log", buf, sizeof(buf)) == 0, "reading the log drains it");
 	}
 
