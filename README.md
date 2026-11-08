@@ -13,7 +13,7 @@ sandboxed apps, malware scanner, multilingual command shell, Python OS.
 
 ## Rules
 
-These four rules govern every change to KOS. A change that breaks one is wrong.
+These five rules govern every change to KOS. A change that breaks one is wrong.
 
 1. **Everything needs verification.**
    - In the OS: every action goes through `Authority.authorize(action, target)`
@@ -55,6 +55,18 @@ These four rules govern every change to KOS. A change that breaks one is wrong.
    <- OS <- kernel <- hardware. Apps never touch the kernel or hardware; only
    the OS does. Every channel between separate parties is encrypted and
    authenticated.
+
+5. **No APIs between apps.** Apps never get a direct way to call each other
+   (no app-to-app endpoints, sockets or message types). Two apps that need to
+   work together do it one of two ways, and the OS is in the middle of both:
+   - **A shared folder** ("space"): the owner app declares `owns:NAME`, a
+     partner declares `uses:NAME`, and the user lets it in with
+     `kos grant APP space:NAME`. The permission store alone decides who may
+     read or write.
+   - **Commands**: the app sends a command through the protocol (`request` for
+     system functions) and the OS checks, permissions and logs it.
+   If neither can do the job (for example live data between two machines), that
+   is a gap to report in the table below, never a reason to add an API.
 
 Agent skills for AI agents working on this repo live in `.claude/skills/`:
 `kos-rules` (these rules as a checklist) and one per layer of the pipeline -

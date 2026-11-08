@@ -2,7 +2,7 @@
 
 **Status: design only. Nothing in this document is implemented.** No code, action,
 protocol message or test exists for any of it. This file says what the mesh would have
-to be to obey the four rules in the README, where the original sketch conflicts with
+to be to obey the rules in the README, where the original sketch conflicts with
 them, and what the owner must decide before any code is written. Per the README gaps
 table, it must not be described as a feature until it is built and tested.
 

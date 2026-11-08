@@ -1,13 +1,13 @@
 ---
 name: kos-rules
-description: The rules every change to kernal-os (KOS) must follow - everything needs verification, everything is an app, every connection is blocked by default and encrypted, and the graphics -> clicks -> app commands -> kernel -> hardware pipeline is encrypted. Use before adding or changing any command, app, protocol message, device, sandbox, network, firewall or browser code in this repo, and before calling such a change done.
+description: The rules every change to kernal-os (KOS) must follow - everything needs verification, everything is an app, every connection is blocked by default and encrypted, the graphics -> clicks -> app commands -> kernel -> hardware pipeline is encrypted, and apps have no APIs to each other (shared folders with permissions, or OS commands). Use before adding or changing any command, app, protocol message, device, sandbox, network, firewall or browser code in this repo, or when two apps need to work together, and before calling such a change done.
 ---
 
 # KOS rules
 
-**This does:** sets the four rules every change to KOS must follow
+**This does:** sets the rules every change to KOS must follow
 (verification, everything is an app, connections blocked and encrypted, the
-pipeline encrypted).
+pipeline encrypted, no APIs between apps).
 
 **So the AI:** reads the README rules first, applies the checklist at the
 bottom to its change, runs the tests against a baseline, and reports what is
@@ -41,26 +41,21 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    no encrypted-to-plain redirect. The browser tells the user on every page
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
-
-## Soft rules (a strong default, not a hard rule)
-
-- **No APIs between apps. Use permissions with a shared folder, or commands.**
-  When two apps need to work together, do not give one a direct way to call the
-  other (no app-to-app endpoints or message types). Pick one of two routes:
-  1. **Shared folder** ("space", `kos/spaces.py`): the owner app says
-     `owns:NAME` in its manifest and creates it; a partner says `uses:NAME`;
-     the user lets it in with `kos grant APP space:NAME --level read|write`.
-     The permission store (`<state>/permissions/grants.json`) alone decides who
-     may read or write.
-  2. **Commands**: the app sends a command through the protocol
-     (`kos/protocol.py`, `request` for system functions) and the OS handles it,
-     checked, permissioned and logged. Apps still never talk to each other
-     directly; the OS is always in the middle.
-  Check `kos spaces`, the README "Shared folders" section and the
-  `kos-command-protocol` skill before inventing another channel.
-- Break this only with a reason you can state, and say in your report that you
-  did. If the shared folder cannot do the job (for example live data between
-  two machines), say that is the gap rather than quietly adding an API.
+6. **No APIs between apps.** Never give one app a direct way to call another
+   (no app-to-app endpoints, sockets or message types). Two apps that need to
+   work together use one of two routes, with the OS in the middle of both:
+   1. **Shared folder** ("space", `kos/spaces.py`): the owner app says
+      `owns:NAME` in its manifest and creates it; a partner says `uses:NAME`;
+      the user lets it in with `kos grant APP space:NAME --level read|write`.
+      The permission store (`<state>/permissions/grants.json`) alone decides
+      who may read or write.
+   2. **Commands**: the app sends a command through the protocol
+      (`kos/protocol.py`, `request` for system functions) and the OS checks,
+      permissions and logs it.
+   If neither can do the job (for example live data between two machines),
+   report it as a gap in the README table. Do not add an API. Check
+   `kos spaces`, the README "Shared folders" section and `kos-command-protocol`
+   first.
 
 ## The pipeline (what each layer may do)
 
@@ -108,6 +103,8 @@ hostile-input test.
       logged; nothing opens a plain-text connection.
 - [ ] New app-facing message has schema validation and a test that hostile
       input is rejected.
+- [ ] Apps that cooperate do it through a shared folder or OS commands; no
+      new app-to-app endpoint, socket or message type.
 - [ ] Tests added for the rule you touched (a refusal test, not just a happy
       path).
 - [ ] Ran `python3 -m unittest discover -s tests`. The whole suite should pass.
