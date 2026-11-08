@@ -71,6 +71,16 @@ Honest list, so nobody assumes these are covered:
 | Connections blocked | The AI is the first connection the OS makes on an app's behalf and it follows the rule: no endpoint configured means refused and logged (`net.ai` `blocked`), one endpoint only, password per ask, no redirects. Two honest limits: a model on this computer is reached over plain `http://` to a literal loopback address (the bytes never leave the machine, but it is not encrypted, and the rule as written says no plain text); and the API key sits in `<state>/ai.json` (mode 0600, refused if wider) with no cipher beyond the LUKS2 disk, because the standard library has none. The `ask` call blocks the session for up to 30 s. There is still no firewall for anything else. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
 | Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
 | Everything is an app | Asking for "everything an app" is **not** met: this change added the AI as an app (`examples/ai`) and the browser's `ask`, and made the core smaller to ship, but did not move any existing built-in out of the OS. `kos ai set|show|clear` is OS code (it holds the endpoint and key, which an app must never see). `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
+| Everything is an app | `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
+| Modding layers | `kos/overlay.py` merges mod files over a base in an owner-chosen load order (see `docs/MODDING.md`). Nothing reads files through it yet, the CLI's base is empty because KOS has no core file set, and the writable `user` layer is memory only. Most of the wider "modding-centric OS" list (Wasm sandbox, hot-swap with state serialization, watchdog rollback, input hooks, driver processes) is **not built**; that doc says which items and why. |
+| Programs | `ask:ACTION` permissions only cover the four `request` actions that touch the backup vault and the app list (`apps`, `backup`, `backup_add`, `backup_remove`). `open`, `close` and `focus` stay inside `system`, which is still all-or-nothing (and all of them at once): a program that opens other apps holds the whole `system` permission. `network` is still one yes/no per program. Programs of one app get separate data folders and share only through `owns:`/`uses:` spaces, but nothing stops you permitting every program of an app, which gives that set of programs the union of their powers. The old single-app `examples/backup` (one program, `system`) still ships and is still the one the older tests cover. `kos install FOLDER` asks the password once per program. Only ordinary apps can be programs, not extensions or mods yet. Not tested: a graphical-mode run of the split backup programs (they have a text page only). |
+| Org blueprint | `docs/ORG_BLUEPRINT.md` maps the "organization-centric OS" blueprint to KOS. Only the parts that fit inside one sandboxed app exist: Semantic Graph and Rule Router (`kos/office/pack_org.py`). The semantic object kernel, graph file system, matrix workspaces, state snapshots, data bus, structured pipes, component apps and the kernel event router are **not built** (they need the kernel, a window manager or cross-app access). Both apps keep data in clear, bounded, and their hash chains are not signatures. |
+| Search box | The Ctrl-N box and the App Library's `/` search (`kos/office/finder.py`) only *show*: a command hit is the line to type, never a run, and an app hit is a `request` the OS still asks your password for. File search covers only what the app can already read (its own vault plus the shared folders it was granted), at most 200 items and 20,000 characters each per place, and never keys that look like credentials (`llm`, `api_key`, `token`, `password`, ...), the agent's chat history or exports. That filter is a **name pattern, not a classifier**: a secret stored under an ordinary key name (say `note-7`) would be searchable by that same app. The App Library has no files of its own, so it searches apps and commands only, and its "Ask the assistant" row opens the `ai-assistant` app but cannot hand it your question. The command list is a generated table (`python3 -m kos.office.cmdindex --write`); a test fails if it drifts from `kos help`. Not tested: the graphical-mode drawing of the Ctrl-N box. |
+| Local mesh | Design only, no code: `docs/MESH.md`. No pairing, peer transport, proximity sensing, camera or tether sharing exists, and the design conflicts with the firmware gate (radios are unbound at boot) and needs the same encryption dependency decision as the pipeline row above. |
+
+A section-by-section comparison with a "formally verified microkernel"
+hardening blueprint (what exists, what is only a kernel option, what cannot be
+met on Linux, and what the blueprint overclaims) is in `docs/BLUEPRINT.md`.
 
 ## How it works
 
@@ -113,9 +123,48 @@ power on
 | Security check | `kos security` (`kos/secure.py`): one read-only check, no password, nothing changed, nothing running in the background. Kernel protections, private folders and secrets, audit-chain integrity, every installed app rescanned and compared with what was installed, permissions nothing uses any more or that were never pinned, owed work, crash leftovers. Exit code 3 if anything failed. |
 | Firmware control (no ME, PSP or BMC in charge) | `kos/firmware.py`, `boot/initramfs/firmware.sh`: before the disk is unlocked, and again in `kos-init`, KOS looks for management processors that run below the OS - **Intel ME/AMT, AMD PSP, server BMCs (IPMI)**, and every other chip with its own firmware (Thunderbolt/USB4, USB-C port controller, embedded controller, network, GPU, NVMe, wireless), plus a missing IOMMU. If one is running it alerts, cuts the OS's side of it (unbinds the driver, forbids rebinding) and **refuses to boot**. Only an Intel ME whose own status register says *disabled* is believed off. `kos.firmware=warn` on the signed kernel command line boots anyway. **This cannot switch them off** - see the limits in `docs/ARCHITECTURE.md`; almost no real hardware will boot under the default policy (VMs will). There is no resident checker: it runs once at boot and at each unlock. An owner-written allow list (`boot/firmware.allow`, `/etc/kos/firmware.allow`) accepts chips whose firmware you replaced yourself; KOS never flashes anything. `kos firmware` also lists which protections (IOMMU, memory encryption, LUKS2, Thunderbolt security) narrow what the remaining chips can see. |
 | Open apps like websites | `kos/address.py`: `kos go kos://web/example.com/news` opens the app `web` and tells it the path, the way a browser opens a site. `run` and `open` take addresses too; an app can ask for one with a `request`. Addresses are checked strictly (no other schemes, `..`, `%`, `#`, whitespace or control characters) and the path is *data for the app*, never a file name or a command. |
+| Mod file overlay | `kos/overlay.py`, `kos overlay`: mods ship files under `overlay/`; the OS merges them over a read-only base at read time, last in the load order wins, `X.kos-delete` hides a file, writes are copy-on-write in memory, `core/` is protected. Order changes need the password (`overlay.order`). |
 | Extensions and mods, still apps | `kos/extensions.py`: two kinds of app, both ordinary sealed, scanned, permitted `.kapp`s. An **extension** adds to an ordinary app, like a browser extension (bookmarks for `web`). A **mod** modifies a system app (pins and a new accent for the taskbar, a shelf for the App Library). They are *data*, not code injected into another app: the host's zip and seal are never touched, and the OS hands the host the validated entries after `hello`. Nothing happens until you switch one on with `kos extend NAME` (password; a mod is a separate `app.mod` action); the switch pins the exact build you approved, so an updated or tampered add-on stops contributing until you approve it again. |
 | Every app action passes gui, app, kernel | `kos/layers.py`: opening, running, closing, switching to and extending an app all go through one door, `layers.traverse`, which sends the request through the **graphical button clicker** (is there a button for it?), then **app commands** (is it permitted?), then **kernel commands** (the password, the seal, the sandbox), in that order. A layer that says no stops the rest, so an unpermitted app is refused before any password is asked. Every layer's `pass` or `refused` is in `kos audit`. A test fails if any other code asks for the password to use an app. |
+| Apps made of programs | `kos/kapp.py` (`find_programs`, `pack_tree`), `apps/backup/`: an app is a folder with **no manifest**, so it has no permissions; each sub-folder with a `manifest.json` is a **program**, packed into its own `.kapp` with its own permissions, and programs nest (`mail.compose.attach`). A program's id is its folder path joined with dots (`backup.add`); a plain app name cannot contain a dot, so a program can never pass for another app. Nothing is inherited, up or down the tree, and each program is installed, permitted and sealed on its own. See [Apps made of programs](#apps-made-of-programs). |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
+
+## Apps made of programs
+
+An app can be split into tiny pieces so that no piece has complete control. The **app is a folder
+with no `manifest.json`**; every folder inside it that has one is a **program**, and the program,
+not the app, holds the permissions:
+
+```
+apps/backup/                    the app: no manifest, so no permissions; it cannot hold code
+    list/manifest.json          backup.list    permissions: ask:backup
+    add/manifest.json           backup.add     permissions: ask:backup_add
+    remove/manifest.json        backup.remove  permissions: ask:backup, ask:backup_remove
+        confirm/manifest.json   (a program of a program would be backup.remove.confirm)
+```
+
+```
+kos pack apps/backup -o dist/backup     # one .kapp per program; -o is a folder
+kos install dist/backup                 # every program, each with its own password
+kos permit backup.list                  # one program at a time
+kos permit backup                       # refused: "an app made of programs has no permission of its own"
+run backup.list                         # kos://backup.list opens it too (kos://backup/list is the app backup, path /list)
+```
+
+* **Where the requirements live:** a program's `manifest.json` (name, modes, permissions) sits in its own
+  folder. Its `name` must be exactly its folder path with dots (`apps/backup/add/` is `backup.add`), or
+  packing is refused, so a program cannot take another program's or app's name. Up to four levels.
+* **A program's zip holds only its own folder.** The folders of its sub-programs are left out. Plain
+  resource folders (`assets/`) stay in.
+* **Permissions are per program.** `kos permit` records what *that* program's manifest asked for; an
+  update that asks for more is refused until you permit again. Permitting one program permits no
+  other. Beyond `network` and the shared-folder permissions, a program may ask the OS for single
+  things with `ask:ACTION`: the OS gives it a bridge that answers only those and refuses the rest
+  (audited as `bridge.ask`) before any password prompt. `system` is every request and stays for apps
+  like the taskbar; an extension or a mod cannot hold `system` or any `ask:`.
+* **Programs do not share anything by name.** Each has its own cache, data and run folders
+  (`kos dirs backup.list`). They meet only in shared folders (`owns:` / `uses:`), which still need a
+  grant for each program.
 
 ## Install as a Debian package
 
@@ -186,7 +235,8 @@ anything that needs two *people* or two *machines* to share live data - every ap
 
 ```
 kos setup                  choose your password
-kos install app.kapp       install (kept zipped, sealed)
+kos install app.kapp       install (kept zipped, sealed); a folder installs every .kapp in it
+kos pack APPDIR -o FOLDER  an app made of programs: one .kapp per program (see below)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list
 run [graphical|cmd] NAME   run in the foreground: text page, graphical, or raw command stream
@@ -332,6 +382,31 @@ other language is still a command - understood, scanned, logged - and says
 it has no runtime. `kos line --explain` shows how each line was understood.
 Honest limits: it is a verb lexicon, not language understanding; the verb comes
 first; each code line is its own app, so variables do not persist.
+
+## One search box
+
+Press **Ctrl-N** in any suite app (or **/** in the App Library). One line, no modes to pick, and the box
+decides what you meant:
+
+```
+find> bac                         Commands:  kos backup  - deduplicated backups: add | list | restore | remove
+                                  Assistant: Ask the assistant: bac
+find> how do I back up?           Assistant: Ask the assistant: how do I back up?   (first: it reads like a question)
+                                  Commands:  kos backup ...
+find> quarterly                   Files:     note-1  - the quarterly report is due on friday
+find> (empty, Enter)              Talk to the assistant
+```
+
+* **Commands** come from `kos help`. Choosing one shows what it does and the exact line to type. KOS never runs
+  a command for you and never takes your password from an app: if the command needs it, the shell asks.
+* **Files** means only what this app can already read: its own data and the shared folders you granted it
+  (`kos spaces`). Nothing new is opened and there is no new permission. Credential-looking keys and the
+  assistant's own history are never indexed.
+* **Assistant** opens this app's built-in agent with your words already sent. With no model connected it
+  answers from local tools and says so.
+* The **App Library** adds installed apps to the same list (Enter asks the OS to open one, with your password in
+  the OS's own prompt). Text from app descriptions and files is untrusted and stripped of control characters
+  before it is drawn.
 
 ## The desktop is made of apps
 

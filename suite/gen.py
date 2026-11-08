@@ -20,8 +20,15 @@ sys.path.insert(0, str(ROOT))
 
 from kos.kapp import pack  # noqa: E402
 from kos.office.catalog import CATALOG  # noqa: E402
+from kos.office.packs import entries as pack_entries  # noqa: E402
 
-LAUNCHER = 'from kos.office.launch import entry\n\n\ndef main():\n    entry({name!r})\n'
+
+def every():
+    """The 149 core products, then the pack products."""
+    return list(CATALOG) + pack_entries()
+
+
+LAUNCHER = 'from kos.office.launch import entry\n\n\ndef main():\n    entry({name!r}{pack})\n'
 
 
 def manifest(e) -> dict:
@@ -35,14 +42,14 @@ def manifest(e) -> dict:
 def build(out: Path) -> list:
     out.mkdir(parents=True, exist_ok=True)
     made = []
-    for e in CATALOG:
+    for e in every():
         if e.scope == "none":
             continue
         with tempfile.TemporaryDirectory() as td:
             d = Path(td) / e.name
             d.mkdir()
             (d / "manifest.json").write_text(json.dumps(manifest(e), indent=2))
-            (d / "app.py").write_text(LAUNCHER.format(name=e.name))
+            (d / "app.py").write_text(LAUNCHER.format(name=e.name, pack=(f', {e.pack!r}' if getattr(e, 'pack', '') else '')))
             pack(d, out / f"{e.name}.kapp")
         made.append(e.name)
     return made
@@ -70,13 +77,25 @@ def catalog_md() -> str:
         net = " (network)" if e.network else ""
         sh = ", ".join([f"owns `{x}`" for x in e.owns] + [f"uses `{x}`" for x in e.uses]) or "-"
         lines.append(f"| {e.title} | {app}{net} | {e.scope} | {sh} | {e.note.replace('|', '/') or '-'} |")
+    packs = pack_entries()
+    pc = {"full": 0, "partial": 0, "none": 0}
+    for e in packs:
+        pc[e.scope] += 1
+    lines += ["", "## Extra products (packs)", "",
+              "Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Every app here also has the built-in agent (Ctrl-N). "
+              "`docs/CAPABILITIES.md` maps every capability that was asked for to the app, OS command or reason that covers it.", "",
+              f"**{len(packs)} products: {pc['full']} full, {pc['partial']} partial, {pc['none']} not built.**", "",
+              "| Product | App | Scope | What it is / what it is not |", "|---|---|---|---|"]
+    for e in packs:
+        app = f"`{e.name}`" if e.scope != "none" else "-"
+        lines.append(f"| {e.title} | {app}{' (network)' if e.network else ''} | {e.scope} | {e.note.replace('|', '/') or '-'} |")
     return "\n".join(lines) + "\n"
 
 
 def main(argv: list) -> int:
     cmd = argv[1] if len(argv) > 1 else "list"
     if cmd == "list":
-        for e in CATALOG:
+        for e in every():
             print(f"{e.scope:<8} {e.name if e.scope != 'none' else '-':<36} {e.title}")
         return 0
     if cmd == "build" and len(argv) > 2:

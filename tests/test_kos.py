@@ -3487,8 +3487,6 @@ class TestUninstalledAppIsRefusedAtTheFirstLayer(Env):
 import fcntl as _fcntl  # noqa: E402
 
 
-@unittest.skipUnless(hasattr(_fcntl, "F_ADD_SEALS"),
-                     "this Python has no fcntl.F_ADD_SEALS, which launching a sealed app needs")
 class TestAddOnsInARealSandbox(DesktopSessionEnv):
     """Real sandboxed processes, real command channel, real overlay: the whole path of a mod's
     data into the taskbar and of a pinned entry back out through gui -> app -> kernel."""
@@ -3583,8 +3581,6 @@ class TestAddOnsInARealSandbox(DesktopSessionEnv):
         self.assertIn("ADDRESS=[/news/today?n=3]", self.output())
 
 
-@unittest.skipUnless(hasattr(_fcntl, "F_ADD_SEALS"),
-                     "this Python has no fcntl.F_ADD_SEALS, which launching a sealed app needs")
 class TestRealBrokerCarriesTheAddress(Env):
     """`kos open kos://APP/path`: the real forked broker starts the real sandboxed app, which is told
     the path. (The same line that `kos go` and an app's open-address request end in.)"""

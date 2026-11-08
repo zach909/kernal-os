@@ -29,14 +29,6 @@ from .address import check_launch
 from .kapp import KApp
 from .sandbox import SandboxPolicy
 
-# Linux memfd sealing constants. Python only exposes these from 3.14; without
-# this fallback no app can launch on 3.13 or older (the values are kernel ABI
-# and do not change).
-F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
-F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = (
-    getattr(fcntl, "F_SEAL_SEAL", 0x1), getattr(fcntl, "F_SEAL_SHRINK", 0x2),
-    getattr(fcntl, "F_SEAL_GROW", 0x4), getattr(fcntl, "F_SEAL_WRITE", 0x8))
-
 SDK_DIR = str(Path(__file__).resolve().parent.parent)
 
 # memfd sealing constants. Linux kernel ABI (include/uapi/linux/fcntl.h), stable
@@ -55,12 +47,6 @@ sys.path[:0] = [sdk, kapp]
 mod, _, fn = entry.partition(":")
 sys.exit(getattr(importlib.import_module(mod), fn or "main")())
 """
-
-
-# Some Python builds omit these from fcntl; the values are fixed Linux ABI (linux/fcntl.h).
-F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1033)
-F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = (getattr(fcntl, n, v) for n, v in
-    (("F_SEAL_SEAL", 1), ("F_SEAL_SHRINK", 2), ("F_SEAL_GROW", 4), ("F_SEAL_WRITE", 8)))
 
 
 def sealed_memfd(label: str, data: bytes) -> int:

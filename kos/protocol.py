@@ -65,6 +65,7 @@ import socket
 from typing import Any
 
 from .address import AddressError, parse as parse_address
+from .kapp import ID_PATTERN, ID_RE
 
 MAX_LINE = 1 << 20
 MAX_LINES = 500
@@ -72,8 +73,8 @@ MAX_LINE_CHARS = 1000
 MAX_OPS = 5000
 MAX_COORD = 16384
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-_APP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-_INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}-[0-9a-f]{6}$")
+_APP_NAME_RE = ID_RE
+_INSTANCE_RE = re.compile(rf"^{ID_PATTERN}-[0-9a-f]{{6}}\Z")
 REQUEST_MODES = ("tui", "graphical", "cmd")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 

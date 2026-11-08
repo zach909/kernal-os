@@ -42,6 +42,21 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
 
+## Soft rules (a strong default, not a hard rule)
+
+- **No APIs between apps; permissions and a shared folder instead.** When two
+  apps need to work together, do not give one a way to call the other (no
+  app-to-app commands, endpoints or message types). Let them share through a
+  shared folder ("space", `kos/spaces.py`): the owner app says `owns:NAME` in
+  its manifest and creates it; a partner says `uses:NAME`; the user lets it in
+  with `kos grant APP space:NAME --level read|write`. The permission store
+  (`<state>/permissions/grants.json`) is the only thing that decides who may
+  read or write. Check `kos spaces` and the README "Shared folders" section
+  before inventing another channel.
+- Break this only with a reason you can state, and say in your report that you
+  did. If the shared folder cannot do the job (for example live data between
+  two machines), say that is the gap rather than quietly adding an API.
+
 ## The pipeline (what each layer may do)
 
 ```

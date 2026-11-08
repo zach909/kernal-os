@@ -612,7 +612,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 from test_kos import Env, PW  # noqa: E402
 
 
-@unittest.skipUnless(hasattr(__import__("fcntl"), "F_ADD_SEALS"), "needs memfd sealing (fcntl.F_ADD_SEALS)")
 class TestSuiteInTheRealSandbox(Env):
     """A suite app launched exactly like any app: sealed zip, Landlock sandbox, real Session."""
 
