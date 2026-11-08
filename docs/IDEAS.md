@@ -9,6 +9,7 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **Local device mesh.** Paired KOS machines, encrypted peer links, handoff, then camera and tether sharing. Design and four open owner decisions are in `docs/MESH.md`; no code yet. Blocked on a crypto dependency and the firmware-gate question.
 - **Backup follow-ups.** Encrypt blob bodies with a password-derived key
   instead of relying on LUKS2 + 0700 (needs a streaming AEAD; stdlib has none,
   so this wants the Rust port first). Restore a whole folder/snapshot in one
