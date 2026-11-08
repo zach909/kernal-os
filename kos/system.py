@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import backup, cache
+from . import ai, backup, cache
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
@@ -171,6 +171,45 @@ class SystemBridge:
     ``None`` means every action (the ``system`` permission). A request outside it is refused
     before anything happens - no password is asked - and goes in the audit log."""
 
+    def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
+                 permissions=None):
+        self.paths = paths
+        self._spawner = spawner
+        self.app = app
+        # None = the original behaviour (system actions only). The 'ai' permission is separate:
+        # an app that may ask the AI gets no power to open, close or back up anything.
+        self.permissions = frozenset(permissions) if permissions is not None else frozenset({"system"})
+
+    def _ask(self, req: dict, authority: Authority) -> None:
+        """One question to the AI. Order matters: permission, then is there an endpoint at all
+        (blocked by default), then the password naming what leaves, then the connection."""
+        def refuse(detail: str) -> None:
+            self._answer(False, [], detail=detail)
+        if "ai" not in self.permissions:
+            return refuse("this app does not have the 'ai' permission")
+        try:
+            question, context, source = ai.prepare(req["text"], req.get("context", ""), req.get("source", ""))
+            ep = ai.load(self.paths)
+        except ai.AIError as e:
+            ai.log(self.paths, self.app or "?", "-", "blocked")
+            return refuse(str(e))
+        sent = len(question) + len(context) + len(source)
+        target = f"{self.app or '?'}: send {sent} characters to {ep.host}"
+        try:
+            authority.authorize("ai.ask", target).close()
+        except (AuthorizationDenied, AuthError) as e:
+            return refuse(str(e))
+        try:
+            lines = ai.send(ep, question, context, source)
+        except ai.AIError as e:
+            ai.log(self.paths, self.app or "?", ep.host, "failed")
+            return refuse(str(e))
+        ai.log(self.paths, self.app or "?", ep.host, "allowed")
+        self._answer(True, lines, model=ep.model)
+
+    def _answer(self, ok: bool, lines: list, *, detail: str = "", model: str = "") -> None:
+        self._reply({"cmd": "answer", "ok": ok, "lines": lines, "model": clean_text(model, 100),
+                     "detail": clean_text(detail, 300)})
     def __init__(self, paths: Paths, spawner: Callable = spawn, allowed: Optional[frozenset] = None,
                  who: str = ""):
         self.paths = paths
@@ -181,6 +220,14 @@ class SystemBridge:
     def handle(self, req: dict, reply: Callable[[dict], None],
                authority: Authority) -> Optional[tuple[str, str]]:
         action = req["action"]
+        self._reply = reply
+        if action == "ask":
+            self._ask(req, authority)
+            return None
+        if "system" not in self.permissions:
+            reply({"cmd": "result", "action": action, "ok": False,
+                   "detail": "this app does not have the 'system' permission"})
+            return None
 
         def result(ok: bool, detail: str, **extra) -> None:
             reply({"cmd": "result", "action": action, "ok": ok,

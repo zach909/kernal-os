@@ -50,6 +50,7 @@ ID_RE = re.compile(rf"^{ID_PATTERN}\Z")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
+PERMISSIONS = {"network", "system", "storage", "ai"}
 PERMISSIONS = {"network", "system", "storage"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
@@ -153,6 +154,10 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
+            for power in ("system", "ai"):
+                # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
+                if power in perms:
+                    raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
             if "system" in perms or any(str(p).startswith(ASK_PREFIX) for p in perms):
                 # The power to open and close apps, or to ask the OS for anything, must never
                 # ride in on an add-on.

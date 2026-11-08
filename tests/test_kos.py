@@ -734,7 +734,8 @@ class TestHostileInput(Env):
                 ("kos audit", lambda: kcli.cmd_audit(types.SimpleNamespace(n=10, verify=False), self.paths)),
                 ("kos activity", lambda: print(render_feed(build_feed(self.paths))))):
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), \
+                    _mock.patch.object(kcli, "_authority", lambda p: (self.authority(PW), None)):
                 call()
             self.assertNotIn("\x1b", out.getvalue(), label)
             self.assertIn("\\x1b[2J", out.getvalue(), label)
@@ -1188,8 +1189,11 @@ class TestLang(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, redirect_stdout(buf):
             old = os.environ.get("KOS_ROOT")
             os.environ["KOS_ROOT"] = d
-            try:
-                code = kcli.main(["do", "lista"])
+            PasswordStore(Paths(Path(d))).create(PW.encode(), KdfParams.fresh(n=2**10), throttle_base=0)
+            try:    # `list` now needs the password, typed at the OS prompt
+                with _mock.patch.object(kcli, "_authority", lambda p: (Authority(
+                        Paths(Path(d)), ScriptedPrompter([PW]), Throttle(Paths(Path(d)), base=0)), None)):
+                    code = kcli.main(["do", "lista"])
             finally:
                 os.environ.pop("KOS_ROOT", None) if old is None else os.environ.update(KOS_ROOT=old)
         self.assertEqual(code, 0)
@@ -3402,9 +3406,11 @@ class TestHostApps(unittest.TestCase):
 class TestAddressAndExtendCommands(AddOnEnv):
     """The command line, end to end where no terminal is needed."""
 
-    def main(self, *argv):
+    def main(self, *argv, typed=()):
+        """Run the CLI. ``typed`` are the passwords typed at the prompt (none = a prompt would fail)."""
         out, err = io.StringIO(), io.StringIO()
         with _mock.patch.dict(os.environ, {"KOS_ROOT": str(self.paths.root)}), \
+                _mock.patch.object(kcli, "_authority", lambda p: (self.authority(*typed), None)), \
                 _contextlib.redirect_stdout(out), _contextlib.redirect_stderr(err):
             code = kcli.main(list(argv))
         return code, out.getvalue(), err.getvalue()
@@ -3443,7 +3449,7 @@ class TestAddressAndExtendCommands(AddOnEnv):
         code, out, _ = self.main("extend", "--list")
         self.assertIn("ext-hello", out)
         self.assertIn("extend:hello", out)
-        code, out, _ = self.main("list")
+        code, out, _ = self.main("list", typed=(PW,))
         self.assertIn("[extension of hello]", out)
         self.assertEqual(sum("[" in l for l in out.splitlines()), 1)      # hello itself has no tag
         code, _, err = self.main("extend")
@@ -3629,3 +3635,36 @@ class TestRealBrokerCarriesTheAddress(Env):
                 if not registry._file(inst_id).exists():
                     break
                 _time.sleep(0.1)
+
+
+class TestStateNeedsThePassword(Env):
+    """Rule 1: looking at what is installed, open, logged or owed is an action too."""
+
+    COMMANDS = (["list"], ["ps"], ["activity"], ["audit"], ["owed"], ["cell", "list"])
+
+    def run_cli(self, argv, *typed):
+        out, err = io.StringIO(), io.StringIO()
+        with _mock.patch.dict(os.environ, {"KOS_ROOT": str(self.paths.root)}), \
+                _mock.patch.object(kcli, "_authority", lambda p: (self.authority(*typed), None)), \
+                _contextlib.redirect_stdout(out), _contextlib.redirect_stderr(err):
+            code = kcli.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_wrong_password_prints_nothing_for_every_one_of_them(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        for argv in self.COMMANDS:
+            code, out, err = self.run_cli(argv, "no", "no", "no")
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("denied", err, argv)
+
+    def test_the_right_password_shows_it_and_the_look_is_in_the_audit_log(self):
+        AppStore(self.paths).install(self.kapp, self.authority(PW))
+        code, out, _ = self.run_cli(["list"], PW)
+        self.assertEqual(code, 0)
+        self.assertIn("hello", out)
+        self.assertIn(("state.view", "granted"),
+                      [(e["action"], e["outcome"]) for e in Authority(self.paths, None).audit.entries()])
+
+    def test_cancelling_the_prompt_shows_nothing(self):
+        code, out, _ = self.run_cli(["audit"], None)
+        self.assertEqual((code, out), (2, ""))

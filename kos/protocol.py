@@ -23,6 +23,7 @@ OS -> app
                        sent once after hello, only if an extension (for an ordinary app) or a mod (for a
                        system app) was switched on for *this* app with `kos extend`. Data, never code:
                        what to do with it is up to the app. See extensions.py.
+    {"cmd": "answer", "ok": bool, "lines": [str], "model": str, "detail": str}              (answer to request ask)
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
@@ -41,6 +42,9 @@ app -> OS
                                          the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
+    {"cmd": "request", "action": "ask", "text": str, "context": str?, "source": str?}
+                                         ask the AI (needs the 'ai' permission; the OS asks for the
+                                         password and says what leaves the computer). The answer is text.
     {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
                                          durable storage: the app's private data ('storage' permission) or a
                                          shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
@@ -164,6 +168,21 @@ def _request(msg: dict) -> dict:
         if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
             raise ProtocolError("request.id must be an open instance id")
         return {"cmd": "request", "action": action, "id": ident}
+    if action == "ask":
+        from . import ai
+        extra = set(msg) - {"cmd", "action", "text", "context", "source"}
+        if extra:
+            raise ProtocolError(f"request.ask has no field {sorted(extra)[0]!r}")
+        for k in ("context", "source"):
+            if k in msg and not isinstance(msg[k], str):
+                raise ProtocolError(f"request.{k} must be text")
+        if not isinstance(msg.get("text"), str):
+            raise ProtocolError("request.text must be text")
+        if len(msg["text"]) > ai.MAX_QUESTION or len(msg.get("context", "")) > ai.MAX_CONTEXT:
+            raise ProtocolError("request.ask is too long")
+        return {"cmd": "request", "action": "ask", "text": clean_text(msg["text"], ai.MAX_QUESTION),
+                "context": clean_text(msg.get("context", ""), ai.MAX_CONTEXT),
+                "source": clean_text(msg.get("source", ""), ai.MAX_SOURCE)}
     if action == "backup":
         return {"cmd": "request", "action": "backup"}
     if action == "backup_add":
