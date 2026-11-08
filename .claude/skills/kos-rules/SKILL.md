@@ -44,15 +44,20 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
 
 ## Soft rules (a strong default, not a hard rule)
 
-- **No APIs between apps; permissions and a shared folder instead.** When two
-  apps need to work together, do not give one a way to call the other (no
-  app-to-app commands, endpoints or message types). Let them share through a
-  shared folder ("space", `kos/spaces.py`): the owner app says `owns:NAME` in
-  its manifest and creates it; a partner says `uses:NAME`; the user lets it in
-  with `kos grant APP space:NAME --level read|write`. The permission store
-  (`<state>/permissions/grants.json`) is the only thing that decides who may
-  read or write. Check `kos spaces` and the README "Shared folders" section
-  before inventing another channel.
+- **No APIs between apps. Use permissions with a shared folder, or commands.**
+  When two apps need to work together, do not give one a direct way to call the
+  other (no app-to-app endpoints or message types). Pick one of two routes:
+  1. **Shared folder** ("space", `kos/spaces.py`): the owner app says
+     `owns:NAME` in its manifest and creates it; a partner says `uses:NAME`;
+     the user lets it in with `kos grant APP space:NAME --level read|write`.
+     The permission store (`<state>/permissions/grants.json`) alone decides who
+     may read or write.
+  2. **Commands**: the app sends a command through the protocol
+     (`kos/protocol.py`, `request` for system functions) and the OS handles it,
+     checked, permissioned and logged. Apps still never talk to each other
+     directly; the OS is always in the middle.
+  Check `kos spaces`, the README "Shared folders" section and the
+  `kos-command-protocol` skill before inventing another channel.
 - Break this only with a reason you can state, and say in your report that you
   did. If the shared folder cannot do the job (for example live data between
   two machines), say that is the gap rather than quietly adding an API.
