@@ -90,3 +90,16 @@ pack_neuro	Signal Lab
 pack_neuro	Neural Data Manager
 pack_neuro	Neural Interface Devices
 pack_neuro	Assistive and Clinical Control
+pack_org	Semantic Graph
+pack_org	Rule Router
+pack_org	Semantic Object Kernel
+pack_org	Workflow Engine Isolation
+pack_org	Workspace Resource Scheduler
+pack_org	Native Graph File System
+pack_org	Matrix Workspaces and Layouts
+pack_org	Deep State Snapshots
+pack_org	Universal Data Bus
+pack_org	Structured Terminal Pipelines
+pack_org	Atomic Component Applications
+pack_org	Kernel Event Router
+pack_org	Declarative System Configuration

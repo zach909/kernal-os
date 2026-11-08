@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .auth import Authority, Grant
-from .kapp import MAX_ARCHIVE, NAME_RE, KApp, KAppError, Manifest, compute_seal
+from .kapp import ID_RE, MAX_ARCHIVE, KApp, KAppError, Manifest, compute_seal
 from .paths import Paths, atomic_write
 from .scan import ScanResult, scan_bytes
 
@@ -58,7 +58,7 @@ class AppStore:
         self.paths = paths
 
     def _files(self, name: str) -> tuple[Path, Path]:
-        if not NAME_RE.match(name):
+        if not ID_RE.match(name):
             raise KAppError(f"invalid app name {name!r}")
         return self.paths.apps / f"{name}.kapp", self.paths.apps / f"{name}.seal"
 

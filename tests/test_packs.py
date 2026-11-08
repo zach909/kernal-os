@@ -27,7 +27,7 @@ def make(e, host):
 
 class TestPackList(unittest.TestCase):
     def test_every_requested_title_is_built_or_explained_in_the_right_pack(self):
-        self.assertEqual(len(REQ), 92)
+        self.assertEqual(len(REQ), 105)
         self.assertEqual(sorted((e.pack, e.title) for e in ENTRIES), sorted((g, t) for g, t in REQ))
 
     def test_names_are_unique_and_do_not_clash_with_the_core_catalogue(self):
