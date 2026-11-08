@@ -34,6 +34,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import firewall
 from .auth import AuditLog
 from .kapp import KApp, KAppError
 from .permit import PermitStore
@@ -103,13 +104,15 @@ def _kernel(paths, get_authority, req: Request, p: Passage) -> str:
             ("app.open" if req.verb == "open" else "app.run")
         with authority.authorize(action, req.target) as grant:
             app = store.load_verified(req.target, grant)
+            fw_key = grant.key(firewall.KEY_LABEL)       # to check the firewall's rules are the owner's
         PermitStore(paths).check_declared(req.target, app.manifest.permissions)
         if req.sandbox_prompt:
             policy = authorize_app_action(req.target, app, req.mode, authority, authority.prompter)
         else:
             policy = SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+        firewall.prepare_launch(paths, req.target, policy, fw_key)     # app id + kernel rules, before the fork
         p.app, p.policy = app, policy
-        return "password, seal and sandbox"
+        return "password, seal, sandbox and the KOS kernel"
     if req.verb == "extend":
         action = "app.mod" if p.row["kind"] == "mod" else "app.extend"
         with authority.authorize(action, req.target) as grant:

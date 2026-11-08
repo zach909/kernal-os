@@ -255,6 +255,8 @@ def cmd_run(args, paths: Paths) -> int:
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
+        if policy.on_exit is not None:
+            policy.on_exit()
     print(f"{name} exited ({code})")
     return code
 

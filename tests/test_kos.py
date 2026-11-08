@@ -3166,6 +3166,9 @@ class TestLayers(AddOnEnv):
         for f in sorted((REPO / "kos").rglob("*.py")):
             if f.name in ("layers.py", "auth.py", "store.py"):
                 continue
+            if f.relative_to(REPO).as_posix() == "kos/office/pack_tour.py":
+                continue    # quiz text that names actions as multiple-choice answers; it runs in the app sandbox,
+                            # where there is no Authority to call (see test_pack_tour for what it may say)
             for n, line in enumerate(f.read_text().splitlines(), 1):
                 if pattern.search(line):
                     offenders.append(f"{f.relative_to(REPO)}:{n}: {line.strip()}")
