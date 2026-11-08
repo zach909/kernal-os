@@ -81,6 +81,7 @@ ACTIONS: dict[str, str] = {
     "app.unextend": "switch off an extension or mod",
     "assistant.config": "change the assistant",
     "assistant.ask": "let an app use the assistant",
+    "sysinfo.read": "let an app read facts about this computer",
 }
 
 

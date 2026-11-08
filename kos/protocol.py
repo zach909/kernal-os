@@ -26,6 +26,8 @@ OS -> app
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "assistant", "ok": true, "text": str} | {"cmd": "assistant", "ok": false,
                           "error": "not-configured"|"refused"|"unreachable"|"bad-reply"}   (answer to request assistant)
+    {"cmd": "sysinfo", "ok": true, "data": {..}} | {"cmd": "sysinfo", "ok": false,
+                          "error": "refused"|"unavailable"}   (answer to request sysinfo)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
     {"cmd": "quit"}
@@ -49,6 +51,10 @@ app -> OS
                                          NOT 'system'; the OS asks the password once per app instance and makes
                                          the connection itself - the app gets no network). At most 20 messages,
                                          24000 characters. Anything else is refused.
+    {"cmd": "request", "action": "sysinfo", "topic": one of SYSINFO_TOPICS}
+                                         read-only facts about this computer, read by the OS (needs the narrow
+                                         'sysinfo' permission, NOT 'system'; password once per app instance,
+                                         audited). Any other key or topic is refused.
     {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
                                          durable storage: the app's private data ('storage' permission) or a
                                          shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
@@ -175,6 +181,16 @@ def _assistant(msg: dict) -> dict:
     return {"cmd": "request", "action": "assistant", "system": system, "messages": out}
 
 
+SYSINFO_TOPICS = ("os", "sandbox", "memory", "load", "storage", "battery", "apps")   # == sysinfo.TOPICS
+
+
+def _sysinfo(msg: dict) -> dict:
+    topic = msg.get("topic")
+    if set(msg) != {"cmd", "action", "topic"} or type(topic) is not str or topic not in SYSINFO_TOPICS:
+        raise ProtocolError("request.sysinfo takes only a topic: " + ", ".join(SYSINFO_TOPICS))
+    return {"cmd": "request", "action": "sysinfo", "topic": topic}
+
+
 def _request(msg: dict) -> dict:
     action = msg.get("action")
     if action == "apps":
@@ -203,6 +219,8 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": action, "id": ident}
     if action == "assistant":
         return _assistant(msg)
+    if action == "sysinfo":
+        return _sysinfo(msg)
     if action == "backup":
         return {"cmd": "request", "action": "backup"}
     if action == "backup_add":

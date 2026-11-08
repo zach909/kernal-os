@@ -170,7 +170,7 @@ Shared folders: an app that **owns** one creates it (and its permission); an app
 
 Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Every app here also has the built-in agent (Ctrl-N). `docs/CAPABILITIES.md` maps every capability that was asked for to the app, OS command or reason that covers it.
 
-**92 products: 16 full, 48 partial, 28 not built.**
+**92 products: 16 full, 52 partial, 24 not built.**
 
 | Product | App | Scope | What it is / what it is not |
 |---|---|---|---|
@@ -236,12 +236,12 @@ Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Eve
 | Casual Games | `casual-games` | full | 2048, Minesweeper, Sudoku and Tic-Tac-Toe, turn-based with best scores saved. No timers, so no speed scores; Minesweeper keeps win/loss counts but does not resume a half-played board. |
 | Game Library | `game-library` | partial | A register of games with play-time totals. It cannot launch games or other apps and does not read any game's own play-time. |
 | Device Settings | - | none | Not an app: sandboxed apps cannot read or change device or system settings, and the OS has no settings layer yet. Nothing covers it today; `kos passwd` changes only your password. |
-| Battery and Power | - | none | Not an app: a sandboxed app cannot read the battery or change power state, and the OS has no power management yet. No `kos` command covers it; nothing in KOS reads battery or sets sleep. |
-| Storage and Disk Management | - | none | Not an app: apps cannot see or change disks. Partly covered by OS commands: `kos ls` lists directories, `kos optimize` reclaims app disk space, `kos usb list` lists USB disks. |
+| Battery and Power | `battery-and-power` | partial | Shows battery level and charging state if there is one; 'no battery found' is normal on servers and VMs. Read-only: it cannot change power settings. The OS reads the data after your password. |
+| Storage and Disk Management | `storage-and-disk` | partial | Shows free and total space and each app's own data as a bar chart. Read-only: it cannot delete, partition or format. The OS reads the sizes after your password. `kos optimize` reclaims space. |
 | Network and Wireless | - | none | Not an app: apps run in an empty network namespace and cannot configure networks. KOS has no network or Wi-Fi manager and no firewall yet (a README gap); nothing covers it. |
 | Printer Management | - | none | Not an app: apps cannot reach printers or drivers, and KOS has no printing support. No `kos` command or other app covers it; nothing in KOS talks to a printer. |
-| Process and Resource Monitor | - | none | Not an app: sandboxed apps cannot see processes. Partly covered by the OS: `kos ps` lists apps opened with `kos open`, and `kos activity` shows them with recent password decisions. |
-| System Information and Diagnostics | - | none | Not an app: apps cannot inspect the host. Covered in part by OS commands: `kos doctor` reports kernel security features, `kos security` checks KOS itself, `kos firmware` lists chips. |
+| Process and Resource Monitor | `process-monitor` | partial | Shows KOS apps opened with `kos open`, memory and load; refresh with r. It can NOT see or manage other processes. The OS reads the facts after your password. `kos ps` lists the same apps. |
+| System Information and Diagnostics | `system-information` | partial | Shows kernel, Python and KOS versions, memory, load and sandbox checks with OK / NOT OK verdicts, like `kos doctor`. Read-only; the OS reads the facts after your password. No host name or user names. |
 | Software Updates | - | none | Not an app: apps cannot replace themselves or the OS. `kos update` updates installed apps only (newer version, scanned first, downgrades refused). There is no OS update mechanism. |
 | Firewall Management | - | none | Not an app yet: there is no firewall. README lists this as an open Rule 3 gap: an app has all hosts or none, and OS traffic is not blocked or logged. A firewall app would need OS support. |
 | Credential Manager | - | none | Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto library, which is an open owner decision (README). No `kos` command covers it. |

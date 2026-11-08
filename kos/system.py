@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import assistant, backup, cache
+from . import assistant, backup, cache, sysinfo
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
@@ -154,18 +154,63 @@ class SystemBridge:
     target - ``("instance", id)`` - when the request moves the desktop."""
 
     def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
-                 system: bool = True, assistant: bool = False, opener=None):
+                 system: bool = True, assistant: bool = False, opener=None,
+                 sysinfo: bool = False):
         self.paths = paths
         self._spawner = spawner
         self.app = app or "app"
         self.system = system             # manifest 'system' permission (set by the OS)
         self.assistant = assistant       # manifest 'assistant' permission: ONLY the assistant request
+        self.sysinfo = sysinfo           # manifest 'sysinfo' permission: ONLY the sysinfo request
         self._opener = opener            # tests only; the real one is assistant.make_opener()
         # The assistant grant lasts for this app instance (this session) only. It is bound to the
         # endpoint it was given for: switching the backend asks again. A refusal is remembered too,
         # so an app cannot nag the owner with password prompts.
         self._granted: Optional[tuple] = None
         self._refused: Optional[tuple] = None
+        # sysinfo: ONE grant per app instance covers every topic (all of them are the same kind of
+        # non-identifying read-only fact, and 4 prompts for one screen would only train the owner to
+        # type the password without reading). A refusal is remembered for the session too.
+        self._si_granted = False
+        self._si_refused = False
+
+    def _sysinfo(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
+        topic = req.get("topic")
+        topic = topic if isinstance(topic, str) and topic in sysinfo.TOPICS else "-"   # never audit app text
+
+        def fail(code: str) -> None:
+            reply({"cmd": "sysinfo", "ok": False, "error": code})
+
+        def audit(outcome: str) -> bool:
+            try:
+                authority.audit.record("sysinfo.read", f"{self.app} {topic}", outcome)   # target: never the data
+                return True
+            except OSError:
+                return False                 # cannot log it, so it does not happen
+
+        if not self.sysinfo or topic == "-":
+            audit("refused")
+            return fail("refused")
+        if self._si_refused:
+            audit("refused")
+            return fail("refused")
+        if not self._si_granted:
+            try:
+                authority.authorize("sysinfo.read", f"{self.app} (any topic)").close()   # audits itself
+            except (AuthorizationDenied, AuthError):
+                self._si_refused = True
+                return fail("refused")
+            except OSError:                  # the audit record could not be written: nothing happens
+                return fail("refused")
+            self._si_granted = True
+        if not audit("allowed"):
+            return fail("refused")
+        try:
+            data = sysinfo.read(topic, paths=self.paths)
+        except Exception:
+            audit("failed:unavailable")
+            return fail("unavailable")
+        reply({"cmd": "sysinfo", "ok": True, "data": data})
 
     def _assistant(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
         def fail(code: str) -> None:
@@ -216,6 +261,9 @@ class SystemBridge:
         action = req["action"]
         if action == "assistant":
             self._assistant(req, reply, authority)
+            return None
+        if action == "sysinfo":
+            self._sysinfo(req, reply, authority)
             return None
 
         def result(ok: bool, detail: str, **extra) -> None:

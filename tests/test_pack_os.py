@@ -18,11 +18,20 @@ class TestPackOs(unittest.TestCase):
         self.assertEqual(len(TITLES), 12)
         self.assertEqual([e.title for e in ENTRIES], TITLES)
 
-    def test_every_entry_is_none(self):
-        for e in ENTRIES: self.assertEqual(e.scope, "none", e.title)
+    def test_four_are_real_read_only_apps_and_eight_stay_none(self):
+        real = {"Battery and Power", "Storage and Disk Management", "Process and Resource Monitor",
+                "System Information and Diagnostics"}
+        for e in ENTRIES:
+            if e.title in real:
+                self.assertEqual(e.scope, "partial", e.title)
+                self.assertEqual(e.perms, ("sysinfo",), e.title)
+                self.assertIn("password", e.note, e.title)
+            else:
+                self.assertEqual(e.scope, "none", e.title)
+        self.assertEqual(sum(e.scope == "none" for e in ENTRIES), 8)
 
     def test_note_length(self):
-        for e in ENTRIES: self.assertTrue(60 <= len(e.note) <= 300, (e.title, len(e.note)))
+        for e in ENTRIES: self.assertTrue(60 <= len(e.note) <= 320, (e.title, len(e.note)))
 
     def test_every_named_command_exists(self):
         for e in ENTRIES:

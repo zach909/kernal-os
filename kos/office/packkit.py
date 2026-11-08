@@ -22,6 +22,7 @@ class PackEntry:
     graphical: bool = False
     owns: list = field(default_factory=list)
     uses: list = field(default_factory=list)
+    perms: tuple = ()            # extra narrow manifest permissions, e.g. ("sysinfo",)
     pack: str = ""               # set by packs.entries()
 
     def __post_init__(self):
@@ -29,10 +30,11 @@ class PackEntry:
             self.name = re.sub(r"[^a-z0-9]+", "-", self.title.lower()).strip("-")
 
 
-def app(title, make, scope="full", note="", *, name="", network=False, graphical=False, owns=(), uses=()) -> PackEntry:
+def app(title, make, scope="full", note="", *, name="", network=False, graphical=False, owns=(), uses=(), perms=()) -> PackEntry:
     """make(host, entry) -> a ui.Screen. `host` is the app's vault/screen (ui.Host)."""
     assert scope in ("full", "partial"), scope
-    return PackEntry(title, "pack", scope, note, name, {"make": make}, network, graphical, list(owns), list(uses))
+    return PackEntry(title, "pack", scope, note, name, {"make": make}, network, graphical, list(owns), list(uses),
+                     perms=tuple(perms))
 
 
 def none(title, note, name="") -> PackEntry:

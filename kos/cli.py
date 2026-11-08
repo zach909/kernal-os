@@ -219,13 +219,14 @@ def _lazy_authority(paths: Paths):
 
 
 def _bridge_for(paths: Paths, name: str, perms, system: bool | None = None):
-    """The OS's side of an app's ``request`` commands, or None. ``system`` and ``assistant`` are
-    separate: an app with only ``assistant`` can ask for the assistant and nothing else."""
+    """The OS's side of an app's ``request`` commands, or None. ``system``, ``assistant`` and
+    ``sysinfo`` are separate: each narrow permission unlocks only its own request."""
     system = "system" in perms if system is None else system
     assistant = "assistant" in perms
-    if not (system or assistant):
+    sysinfo = "sysinfo" in perms
+    if not (system or assistant or sysinfo):
         return None
-    return SystemBridge(paths, app=name, system=system, assistant=assistant)
+    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo)
 
 
 def cmd_run(args, paths: Paths) -> int:

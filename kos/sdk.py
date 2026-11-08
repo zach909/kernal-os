@@ -219,6 +219,28 @@ class App:
                 return (False, "unreachable")
             self._queue.append(ev)
 
+    # Facts about this computer (needs the 'sysinfo' permission - NOT 'system'). The OS reads them,
+    # asks the owner's password once per app instance and audits it. Returns (True, data dict) or
+    # (False, short reason: refused / unavailable / unreachable).
+    def sysinfo(self, topic: str) -> tuple:
+        try:
+            self.send({"cmd": "request", "action": "sysinfo", "topic": topic})
+        except OSError:
+            return (False, "unreachable")
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return (False, "unreachable")
+            if ev.get("cmd") == "sysinfo":
+                if ev.get("ok") is True and isinstance(ev.get("data"), dict):
+                    return (True, ev["data"])
+                err = ev.get("error")
+                return (False, err if isinstance(err, str) else "refused")
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return (False, "unreachable")
+            self._queue.append(ev)
+
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch
         didn't provide one. It is wiped the moment this app's process ends -
