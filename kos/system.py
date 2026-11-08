@@ -32,7 +32,7 @@ from . import backup, cache
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
-from .auth import AuthError, Authority, AuthorizationDenied
+from .auth import AuditLog, AuthError, Authority, AuthorizationDenied
 from .broker import spawn
 from .kapp import KApp, KAppError
 from .permit import PermitError, PermitStore
@@ -63,15 +63,17 @@ def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
 def _row(paths: Paths, a, permits: PermitStore) -> dict:
     """One App Library row. The description comes from the stored zip's manifest and is
     display-only (nothing runs from this read; the seal is verified at launch)."""
-    desc, modes, kind, extends = "", ["tui"], "app", ""
+    desc, modes, kind, extends, perms = "", ["tui"], "app", "", []
     try:
         m = KApp.from_file(paths.apps / f"{a.name}.kapp").manifest
         desc, modes, kind, extends = m.description, list(m.modes), m.kind, m.extends
+        perms = list(m.permissions)
     except (KAppError, OSError):
         pass
     return {"name": a.name, "version": a.version,
             "description": clean_text(desc, 200), "modes": modes,
-            "permitted": permits.is_permitted(a.name), "kind": kind, "extends": extends}
+            "permitted": permits.is_permitted(a.name), "kind": kind, "extends": extends,
+            "permissions": perms}
 
 
 def list_apps(paths: Paths) -> list[dict]:
@@ -126,7 +128,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
     inst = Instance(id=inst_id, name=name, mode=mode, broker_pid=0,
                     sock_path=str(run_dir / f"{inst_id}.sock"),
                     log_path=str(run_dir / f"{inst_id}.log"), started=time.time(),
-                    system="system" in app.manifest.permissions, address=address)
+                    system="system" in app.manifest.permissions,
+                    asks=list(app.manifest.asks), address=address)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
@@ -149,13 +152,31 @@ def close_instance(paths: Paths, authority: Authority, instance_id: str) -> Inst
     return inst
 
 
+def bridge_for(paths: Paths, name: str, permissions, spawner: Callable = spawn) -> Optional["SystemBridge"]:
+    """The bridge a program gets, from its own manifest permissions and nothing else: every request
+    for ``system``, only the named ones for ``ask:ACTION``, none at all for neither. Whatever the
+    app it belongs to, or its sibling programs, may do plays no part."""
+    perms = tuple(permissions)
+    if "system" in perms:
+        return SystemBridge(paths, spawner, who=name)
+    asks = frozenset(p[len("ask:"):] for p in perms if p.startswith("ask:"))
+    return SystemBridge(paths, spawner, allowed=asks, who=name) if asks else None
+
+
 class SystemBridge:
     """Answers one app's ``request`` commands. ``handle`` returns a switch
-    target - ``("instance", id)`` - when the request moves the desktop."""
+    target - ``("instance", id)`` - when the request moves the desktop.
 
-    def __init__(self, paths: Paths, spawner: Callable = spawn):
+    ``allowed`` is the set of request actions this program's manifest names (``ask:ACTION``);
+    ``None`` means every action (the ``system`` permission). A request outside it is refused
+    before anything happens - no password is asked - and goes in the audit log."""
+
+    def __init__(self, paths: Paths, spawner: Callable = spawn, allowed: Optional[frozenset] = None,
+                 who: str = ""):
         self.paths = paths
         self._spawner = spawner
+        self.allowed = allowed
+        self.who = who
 
     def handle(self, req: dict, reply: Callable[[dict], None],
                authority: Authority) -> Optional[tuple[str, str]]:
@@ -165,6 +186,11 @@ class SystemBridge:
             reply({"cmd": "result", "action": action, "ok": ok,
                    "detail": clean_text(detail, 300), **extra})
 
+        if self.allowed is not None and action not in self.allowed:
+            AuditLog(self.paths).record("bridge.ask", f"{self.who}:{action}", "refused")
+            result(False, f"{self.who or 'this program'} has no permission to ask for {action} "
+                          f"(its manifest would need ask:{action})")
+            return None
         try:
             if action == "apps":
                 reply({"cmd": "apps", "installed": list_apps(self.paths),

@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from .kapp import NAME_RE, KAppError
+from .kapp import ID_RE, KAppError
 from .paths import Paths
 from .permissions import Permissions
 
@@ -39,7 +39,7 @@ class PermitStore:
         self.perms = Permissions(paths)
 
     def _check(self, name: str) -> None:
-        if not NAME_RE.match(name):
+        if not ID_RE.match(name):
             raise KAppError(f"invalid app name {name!r}")
 
     def _migrate_legacy(self, name: str) -> None:

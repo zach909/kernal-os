@@ -3,7 +3,8 @@
     kos setup                       choose your password (first boot)
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
-    kos install APP.kapp            install (the zip is stored as-is, sealed)
+    kos pack APPDIR -o FOLDER       an app made of programs: one .kapp per program, each with only its own permissions
+    kos install APP.kapp            install (the zip is stored as-is, sealed); a folder installs every .kapp in it
     kos update APP.kapp             update to a newer version (no downgrades)
     kos view FILE                   view a file (password first)
     kos remove NAME
@@ -59,14 +60,14 @@ from .backup import BackupError, VaultTamperedError
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
-from .kapp import KApp, KAppError, pack
+from .kapp import MANIFEST, KApp, KAppError, has_program_below, pack, pack_tree
 from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .sandbox import SandboxError, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
-from .system import SystemBridge, close_instance, open_background
+from .system import SystemBridge, bridge_for, close_instance, open_background
 from .vfs import VFSError
 
 
@@ -122,15 +123,35 @@ def cmd_passwd(args, paths: Paths) -> int:
 
 
 def cmd_pack(args, paths: Paths) -> int:
-    m = pack(Path(args.dir), Path(args.output))
-    print(f"packed {m.name} {m.version} -> {args.output}")
+    src = Path(args.dir)
+    if (src / MANIFEST).is_file() and not has_program_below(src):
+        m = pack(src, Path(args.output))
+        print(f"packed {m.name} {m.version} -> {args.output}")
+        return 0
+    # An app made of programs (a folder with no manifest, or a program with sub-programs):
+    # one .kapp per program in the folder OUTPUT, each with only its own permissions.
+    out = Path(args.output)
+    if out.suffix == ".kapp":
+        raise KAppError(f"{src} is made of programs: give -o a folder, one .kapp is written per program")
+    for m in pack_tree(src, out):
+        perms = ", ".join(m.permissions) or "none"
+        print(f"packed {m.name} {m.version} -> {out / (m.name + '.kapp')}   permissions: {perms}")
+    if not (src / MANIFEST).is_file():
+        print(f"{src.name} itself is not a program and has no permissions; install and permit each program")
     return 0
 
 
 def cmd_install(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
-    m = AppStore(paths).install(Path(args.file), authority)
-    print(f"installed {m.name} {m.version} (modes: {', '.join(m.modes)}) - kept zipped, sealed")
+    src = Path(args.file)
+    # A folder of programs (what `kos pack` wrote): each one is installed on its own, scanned and
+    # sealed on its own, and asks for the password on its own.
+    files = sorted(src.glob("*.kapp")) if src.is_dir() else [src]
+    if not files:
+        raise KAppError(f"no .kapp files in {src}")
+    for f in files:
+        m = AppStore(paths).install(f, authority)
+        print(f"installed {m.name} {m.version} (modes: {', '.join(m.modes)}) - kept zipped, sealed")
     return 0
 
 
@@ -183,6 +204,8 @@ def cmd_list(args, paths: Paths) -> int:
     for a in apps:
         row = kinds.get(a.name, {})
         tag = f"  [{row['kind']} of {row['extends']}]" if row.get("kind", "app") != "app" else ""
+        if "." in a.name:       # a program: show what IT may do, which is all that matters
+            tag += f"  [program of {a.name.rpartition('.')[0]}; permissions: {', '.join(row.get('permissions', [])) or 'none'}]"
         print(f"{a.name:20} {a.version:10} sha256:{a.sha256[:16]}{tag}")
     return 0
 
@@ -248,7 +271,7 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        bridge = bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
@@ -297,7 +320,8 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    # what the bridge allows was recorded by the OS at open time, from the verified manifest
+    bridge = bridge_for(paths, inst.name, ["system"] if inst.system else [f"ask:{a}" for a in inst.asks])
     perms = ()
     try:
         perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
@@ -582,6 +606,17 @@ def cmd_extend(args, paths: Paths) -> int:
     return 0
 
 
+def _refuse_group(paths: Paths, name: str) -> None:
+    """An app made of programs has no permissions, so there is nothing to permit on it: say which
+    programs it is made of instead of failing with "no such file"."""
+    if (paths.apps / f"{name}.kapp").exists():
+        return
+    parts = sorted(a.name for a in AppStore(paths).installed() if a.name.startswith(name + "."))
+    if parts:
+        raise KAppError(f"{name} is an app made of programs and has no permission of its own. "
+                        f"Permit a program: {', '.join(parts)}")
+
+
 def cmd_permit(args, paths: Paths) -> int:
     """A permit is separate from the password: it's your standing decision
     that an app may run at all. It never skips the password - `run`/`open`
@@ -598,6 +633,8 @@ def cmd_permit(args, paths: Paths) -> int:
         return 0
     if not args.name:
         raise KAppError("usage: kos permit NAME | kos permit --revoke NAME | kos permit --list")
+    if not args.revoke:
+        _refuse_group(paths, args.name)       # before any password: there is nothing to approve
     authority, _ = _authority(paths)
     action = "app.revoke" if args.revoke else "app.permit"
     with authority.authorize(action, args.name):
@@ -1085,10 +1122,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
     s = sub.add_parser("passwd", help="change your password")
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
-    s = sub.add_parser("pack", help="build a .kapp from a directory")
+    s = sub.add_parser("pack", help="build a .kapp from a directory; an app made of programs: -o FOLDER gets one .kapp per program")
     s.add_argument("dir")
     s.add_argument("-o", "--output", required=True)
-    s = sub.add_parser("install", help="install a .kapp")
+    s = sub.add_parser("install", help="install a .kapp, or every .kapp in a folder (each asks for the password)")
     s.add_argument("file")
     s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
     s.add_argument("file", help="a .kapp path, or the literal word 'all'")
