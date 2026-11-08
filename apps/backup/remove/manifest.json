@@ -1,0 +1,9 @@
+{
+  "name": "backup.remove",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["ask:backup", "ask:backup_remove"],
+  "description": "Forgets one backed-up item. It can ask for the list (to pick one) and to remove."
+}

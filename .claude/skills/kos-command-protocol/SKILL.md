@@ -24,8 +24,13 @@ app -> OS   screen, frame, log, request, exit
 `request` is how an app does anything beyond drawing: `apps`, `open`, `focus`,
 `close`. The OS honours it only if **all** of these are true:
 
-1. the app's manifest has the `system` permission (set from the *verified*
-   manifest into the instance record at open time, never from the app);
+1. the program's manifest has the `system` permission (every request) or
+   `ask:ACTION` for that one request (`ASK_ACTIONS` in `kos/kapp.py`), set from
+   the *verified* manifest into the instance record at open time (`system`,
+   `asks`), never from the app. `SystemBridge(allowed=...)` refuses the rest
+   before any password and audits it as `bridge.ask`. Permissions belong to a
+   *program* (`backup.add`), never to the app folder that holds it, and are
+   never inherited from or by a sibling;
 2. the app was permitted to run (`kos permit`);
 3. for anything that starts or stops something, the owner types the password
    in the OS's own overlay.
@@ -40,7 +45,8 @@ Names must match the same regexes the store uses.
 
 1. Add the shape to the docstring and to `validate_app_message`
    (request handling is inside it), with bounds.
-2. Decide the privilege: which manifest permission, which `Authority` action
+2. Decide the privilege: which manifest permission (a new askable action goes in
+   `ASK_ACTIONS`; actions that touch other apps stay inside `system`), which `Authority` action
    (add it to `ACTIONS` in `kos/auth.py`), and where the password is asked.
 3. Handle it in the OS (`session.py` `_on_request`, `system.py`), not in the app.
 4. Tests: accepted shape, every rejection, and that an app without the
