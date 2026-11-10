@@ -151,6 +151,7 @@ def fetch(paths: Paths, who: str, url: object, method: object = "GET", headers: 
     try:
         conn = http.client.HTTPSConnection(host, port, timeout=10.0, context=ctx)   # no proxy: http.client never reads one
         conn.request(method, target, body=data, headers=hdrs)
+        sock = conn.sock                            # http.client drops conn.sock for a close-delimited reply
         resp = conn.getresponse()
         if 300 <= resp.status < 400:
             code = "redirect"
@@ -165,7 +166,7 @@ def fetch(paths: Paths, who: str, url: object, method: object = "GET", headers: 
                     if left <= 0:
                         code = "unreachable"
                         break
-                    conn.sock.settimeout(min(10.0, left))
+                    sock.settimeout(min(10.0, left))
                     chunk = resp.read(min(65536, MAX_REPLY + 1 - len(buf)))
                     if not chunk:
                         break

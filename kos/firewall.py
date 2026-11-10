@@ -73,7 +73,9 @@ def parse_host(host: object) -> Optional[str]:
     if h == "localhost":
         return h
     try:
-        return str(ipaddress.ip_address(h)) if str(ipaddress.ip_address(h)) == h else None   # canonical form only
+        ip = ipaddress.ip_address(h)
+        # canonical spelling only; 0.0.0.0 / :: are never a host (0.0.0.0 reaches this computer: a loopback bypass)
+        return str(ip) if str(ip) == h and not ip.is_unspecified else None
     except ValueError:
         pass
     return h if _DNS_RE.fullmatch(h) else None

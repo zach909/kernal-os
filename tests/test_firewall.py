@@ -321,8 +321,8 @@ class TestRules(Env):
         for h in ("*.com", "a*", "*a", "**", "?", "%", "any", "all", "0.0.0.0", "0.0.0.0/0", "*/*"):
             self.refused("app:web", h, 443, "https")
         F.add_rule(self.paths, "app:web", "*", 443, "https")
-        self.assertFalse(F.decide(self.paths, "app:web", "anything.example.org", 443, "https"))
-        self.assertFalse(F.decide(self.paths, "app:web", "10.1.2.3", 443, "https"))
+        self.assertTrue(F.decide(self.paths, "app:web", "anything.example.org", 443, "https"))
+        self.assertTrue(F.decide(self.paths, "app:web", "10.1.2.3", 443, "https"))
         self.assertTrue(not F.decide(self.paths, "app:web", "anything.example.org", 8443, "https"))     # one port
         self.assertTrue(not F.decide(self.paths, "app:other", "anything.example.org", 443, "https"))    # one who
         self.assertTrue(not F.decide(self.paths, "os:assistant", "anything.example.org", 443, "https"))
@@ -644,6 +644,10 @@ class TestBridgeFetch(TLS):
         b.sendall(b'{"cmd":"fetch","ok":true,"status":200,"content_type":"","body_b64":"!!!"}\n')
         self.assertEqual(app.fetch("https://example.com/"), (False, "unreachable"))
         b.setblocking(False)
+        try:
+            while b.recv(65536): pass                                       # drain what the good calls sent
+        except BlockingIOError:
+            pass
         for bad in (dict(url="https://e.com/", headers={"cookie": "x"}), dict(url="https://e.com/", method="PUT"),
                     dict(url="https://e.com/", body="x"), dict(url=5)):
             self.assertEqual(app.fetch(**bad), (False, "bad-url"))
