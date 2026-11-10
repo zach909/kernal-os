@@ -184,7 +184,9 @@ def default_read_paths() -> list[str]:
 
 @dataclass
 class SandboxPolicy:
-    allow_network: bool = False
+    # There is deliberately NO network switch here: an app never gets the host network. Its
+    # network namespace is always empty and Landlock (ABI 4+) always refuses TCP connect/bind. An app
+    # that needs the internet asks the OS to fetch for it (netfetch.py), as the firewall allows.
     read_paths: list[str] = field(default_factory=default_read_paths)
     rw_files: list[str] = field(default_factory=lambda: ["/dev/null"])
     # Directories the app may create files in - e.g. its per-run cache,
@@ -200,12 +202,6 @@ class SandboxPolicy:
     seccomp: bool = True
     # Development escape hatch; never set on a real install.
     weak: bool = False
-
-    def __post_init__(self) -> None:
-        if self.allow_network:
-            self.read_paths = self.read_paths + [p for p in (
-                "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/ssl",
-                "/etc/pki", "/etc/ca-certificates") if os.path.exists(p)]
 
     def probe(self) -> int:
         """Called in the parent before launching; refuses if we can't confine."""
@@ -225,9 +221,7 @@ class SandboxPolicy:
             policy._drop_root()
             if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
                 raise SandboxError("no_new_privs failed")
-            flags = CLONE_NEWUSER | CLONE_NEWIPC | CLONE_NEWUTS
-            if not policy.allow_network:
-                flags |= CLONE_NEWNET
+            flags = CLONE_NEWUSER | CLONE_NEWIPC | CLONE_NEWUTS | CLONE_NEWNET
             if _libc.unshare(flags) != 0 and not policy.weak:
                 raise SandboxError(f"unshare failed: {os.strerror(ctypes.get_errno())}")
             os.umask(0o077)
@@ -254,7 +248,7 @@ class SandboxPolicy:
         attr = _RulesetAttr(handled_access_fs=handled)
         size = 8
         if abi >= 4:
-            attr.handled_access_net = 0 if self.allow_network else (NET_BIND_TCP | NET_CONNECT_TCP)
+            attr.handled_access_net = NET_BIND_TCP | NET_CONNECT_TCP
             size = 16
         if abi >= 6:
             attr.scoped = SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL

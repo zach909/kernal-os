@@ -5,7 +5,9 @@ is an entry you can open (arrow keys + Enter, or click with the mouse).
 Type `run` and Enter to view the current page's text. Backspace on an empty
 line goes up (back). Esc exits.
 
-It only gets network access if you allowed it with your password at launch.
+It has NO network of its own. Every page is fetched by the OS for it (request fetch), and only if the
+owner's firewall has a rule `app:web HOST PORT https` (kos firewall allow app:web example.com 443 --proto https);
+otherwise the page is "blocked". Redirects are refused (no silent hop, never encrypted to plain).
 
 Addresses: `kos go kos://web/example.com/news?page=2` opens this browser straight at
 example.com/news?page=2 - an app opened the way a browser opens a website.
@@ -20,10 +22,7 @@ things from you), but the flag is right there in the status line.
 """
 
 import re
-import ssl
-import urllib.error
 import urllib.parse
-import urllib.request
 from html.parser import HTMLParser
 
 from kos.address import AddressError, parse as parse_address
@@ -117,36 +116,26 @@ def check_url(url):
     return url
 
 
-class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
-    """A redirect may not move you from encrypted to plain."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        check_url(urllib.parse.urljoin(req.full_url, newurl))
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+_WHY = {"blocked": "blocked by the firewall: the owner allows a site with `kos firewall allow app:web HOST 443 --proto https`",
+        "refused": "refused: could not verify this site's certificate (or this app has no network permission)",
+        "unreachable": "could not reach the site", "redirect": "refused: the site redirected (redirects are never followed)",
+        "too-big": "refused: the page is too big", "bad-url": "refused: not a plain https:// address"}
 
 
-def _opener():
-    # Certificates and host names are verified (the default context); there is
-    # no way to turn that off from inside the app.
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = True
-    ctx.verify_mode = ssl.CERT_REQUIRED
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),
-                                       _HttpsOnlyRedirects())
-
-
-def fetch(url):
+def fetch(app, url):
+    """Ask the OS for one page. Certificates and host names are verified by the OS; the app cannot
+    turn that off, and there are no redirects. check_url stays as defence in depth."""
     url = check_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": "kos-web/1.0"})
+    ok, got = app.fetch(url, "GET", {"user-agent": "kos-web/1.0"})
+    if not ok:
+        raise ValueError(_WHY.get(got, "could not fetch this page"))
+    raw = got["body"][:MAX_PAGE]
+    m = re.search(r"charset=([A-Za-z0-9_-]{1,30})", got["content_type"])
     try:
-        with _opener().open(req, timeout=15) as r:
-            raw = r.read(MAX_PAGE)
-            body = raw.decode(r.headers.get_content_charset() or "utf-8", "replace")
-            page = Page(r.geturl())
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, ssl.SSLError):
-            raise ValueError(f"refused: could not verify this site's certificate ({e.reason})") from None
-        raise
+        body = raw.decode(m.group(1) if m else "utf-8", "replace")
+    except LookupError:
+        body = raw.decode("utf-8", "replace")
+    page = Page(url)
     page.feed(body)
     page.scan = scan_bytes(raw, label=page.base)
     return page
@@ -176,7 +165,7 @@ def main():
         marks = bookmarks(app.extensions)
         if cmd == "hello" and start_target(app.address):
             try:
-                history.append(fetch(start_target(app.address)))
+                history.append(fetch(app, start_target(app.address)))
             except Exception as e:
                 msg = f"error: {e}"
         if cmd == "key":
@@ -190,17 +179,17 @@ def main():
                 elif typed.strip():
                     target, typed = typed.strip(), ""
                     try:
-                        history.append(fetch(target)); sel, viewing, msg = 0, False, ""
+                        history.append(fetch(app, target)); sel, viewing, msg = 0, False, ""
                     except Exception as e:
                         msg = f"error: {e}"
                 elif page is None and marks:
                     try:
-                        history.append(fetch(marks[min(sel, len(marks) - 1)][1])); sel, msg = 0, ""
+                        history.append(fetch(app, marks[min(sel, len(marks) - 1)][1])); sel, msg = 0, ""
                     except Exception as e:
                         msg = f"error: {e}"
                 elif page and page.links and not viewing:
                     try:
-                        history.append(fetch(page.links[sel][1])); sel, msg = 0, ""
+                        history.append(fetch(app, page.links[sel][1])); sel, msg = 0, ""
                     except Exception as e:
                         msg = f"error: {e}"
             elif k == "backspace":

@@ -25,9 +25,12 @@ OS -> app
                        what to do with it is up to the app. See extensions.py.
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "assistant", "ok": true, "text": str} | {"cmd": "assistant", "ok": false,
-                          "error": "not-configured"|"refused"|"unreachable"|"bad-reply"}   (answer to request assistant)
+                          "error": "not-configured"|"refused"|"blocked"|"unreachable"|"bad-reply"}   (answer to request assistant)
     {"cmd": "sysinfo", "ok": true, "data": {..}} | {"cmd": "sysinfo", "ok": false,
                           "error": "refused"|"unavailable"}   (answer to request sysinfo)
+    {"cmd": "fetch", "ok": true, "status": int, "content_type": str, "body_b64": str} |
+    {"cmd": "fetch", "ok": false, "error": "blocked"|"refused"|"unreachable"|"redirect"|"too-big"|"bad-url"}
+                                                       (answer to request fetch)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
     {"cmd": "quit"}
@@ -55,6 +58,13 @@ app -> OS
                                          read-only facts about this computer, read by the OS (needs the narrow
                                          'sysinfo' permission, NOT 'system'; password once per app instance,
                                          audited). Any other key or topic is refused.
+    {"cmd": "request", "action": "fetch", "url": "https://HOST[:PORT]/path", "method": "GET"|"POST",
+                       "headers": {accept|content-type|authorization|x-api-key|anthropic-version|user-agent: str},
+                       "body": str<=262144}
+                                         one https request made BY THE OS for the app (needs the narrow
+                                         'network' permission, NOT 'system'; the app gets no network). The
+                                         firewall decides first (app:NAME, host, port, https); blocked ->
+                                         error 'blocked' and nothing is connected. No redirects, 4 MiB reply cap.
     {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
                                          durable storage: the app's private data ('storage' permission) or a
                                          shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
@@ -191,6 +201,25 @@ def _sysinfo(msg: dict) -> dict:
     return {"cmd": "request", "action": "sysinfo", "topic": topic}
 
 
+def _fetch(msg: dict) -> dict:
+    from . import netfetch
+    if set(msg) - {"cmd", "action", "url", "method", "headers", "body"}:
+        raise ProtocolError("request.fetch takes only url, method, headers and body")
+    url, method = msg.get("url"), msg.get("method", "GET")
+    if not isinstance(url, str) or not url or len(url) > netfetch.MAX_URL:
+        raise ProtocolError("request.url must be an https URL")
+    if method not in netfetch.METHODS:
+        raise ProtocolError("request.method must be GET or POST")
+    try:
+        headers = netfetch.check_headers(msg.get("headers", {}))
+    except netfetch.FetchError:
+        raise ProtocolError("request.headers: only " + ", ".join(netfetch.HEADER_NAMES) + " with short plain values") from None
+    body = msg.get("body", "")
+    if not isinstance(body, str) or len(body) > netfetch.MAX_BODY or (body and method != "POST"):
+        raise ProtocolError(f"request.body must be text of at most {netfetch.MAX_BODY} characters, and only for POST")
+    return {"cmd": "request", "action": "fetch", "url": url, "method": method, "headers": headers, "body": body}
+
+
 def _request(msg: dict) -> dict:
     action = msg.get("action")
     if action == "apps":
@@ -221,6 +250,8 @@ def _request(msg: dict) -> dict:
         return _assistant(msg)
     if action == "sysinfo":
         return _sysinfo(msg)
+    if action == "fetch":
+        return _fetch(msg)
     if action == "backup":
         return {"cmd": "request", "action": "backup"}
     if action == "backup_add":

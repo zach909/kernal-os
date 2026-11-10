@@ -111,7 +111,7 @@ class ModelSettings(Screen):
         key = ("*" * 6 + c["key"][-4:]) if c.get("key") else "(not set)"
         rows = [f"provider : {c.get('provider', '(none) - local tools only')}", f"model    : {c.get('model', '')}",
                 f"endpoint : {c.get('endpoint') or '(default for provider)'}", f"api key  : {key}"]
-        return ["  Without a model every assistant still works with its local tools.", "  A model needs network permission (asked at launch).", ""] + \
+        return ["  Without a model every assistant still works with its local tools.", "  A model request is made by the OS and only if the firewall has a rule for this app (kos firewall allow).", ""] + \
                [f"{'>' if i == self.nav.sel else ' '} {r}" for i, r in enumerate(rows)] + ["", "  Key is stored in this app's vault in clear text; use a revocable key."]
 
     def key(self, k):
@@ -187,7 +187,7 @@ class Chat(Screen):
             if llm.configured(cfg) and not text.startswith("/"):
                 msgs = [{"role": "user" if w == "you" else "assistant", "content": t} for w, t in self.hist[-20:] if w in ("you", "ai")]
                 ctx = self.system + ("\nNotes the user asked you to remember:\n" + "\n".join(self.mem.values()) if self.mem else "")
-                try: reply = llm.ask(cfg, ctx, msgs)
+                try: reply = llm.ask(self.host, cfg, ctx, msgs)
                 except llm.LLMError as e: reply = f"(model error: {e}) " + self.local(text)
             else:
                 reply = self.local(text)

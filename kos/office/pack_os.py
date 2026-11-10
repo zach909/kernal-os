@@ -184,7 +184,7 @@ ENTRIES: list = [
         name="storage-and-disk", perms=("sysinfo",)),
     none("Network and Wireless",
          "Not an app: apps run in an empty network namespace and cannot configure networks. KOS has no "
-         "network or Wi-Fi manager and no firewall yet (a README gap); nothing covers it."),
+         "network or Wi-Fi manager; `kos firewall` (rules, not an app) decides every connection. Nothing covers it."),
     none("Printer Management",
          "Not an app: apps cannot reach printers or drivers, and KOS has no printing support. No `kos` "
          "command or other app covers it; nothing in KOS talks to a printer."),
@@ -200,8 +200,8 @@ ENTRIES: list = [
          "Not an app: apps cannot replace themselves or the OS. `kos update` updates installed apps only "
          "(newer version, scanned first, downgrades refused). There is no OS update mechanism."),
     none("Firewall Management",
-         "Not an app yet: there is no firewall. README lists this as an open Rule 3 gap: an app has all "
-         "hosts or none, and OS traffic is not blocked or logged. A firewall app would need OS support."),
+         "Not an app: the firewall is `kos firewall` (status, allow, remove, log; the password is needed to change a "
+         "rule). Every connection is blocked until a rule allows it. An app cannot change rules."),
     none("Credential Manager",
          "Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto "
          "library, which is an open owner decision (README). No `kos` command covers it."),

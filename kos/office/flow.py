@@ -85,7 +85,7 @@ def run_flow(flow: dict, inp: str, host=None, cfg: dict | None = None, notes: di
                 c2, r2, _ = tools.transform(cols, rows, 'template "' + arg + '"'); reg = "\n".join(r["text"] for r in r2)
             elif op == "ask":
                 if not llm.configured(cfg): trace.append(f"{n}. ask: skipped (no model configured)"); continue
-                reg = llm.ask(cfg, "Follow the instruction using the text provided.", [{"role": "user", "content": f"{arg}\n\n---\n{reg}"}])
+                reg = llm.ask(host, cfg, "Follow the instruction using the text provided.", [{"role": "user", "content": f"{arg}\n\n---\n{reg}"}])
             elif op == "save":
                 if host: host.put("export-" + re.sub(r"[^a-z0-9._-]", "-", (arg or flow["name"]).lower())[:48] + ".txt", reg)
             else: raise ValueError(f"unknown step '{op}'")

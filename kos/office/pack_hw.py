@@ -21,10 +21,10 @@ ENTRIES: list = [
          "text and pixels. Nothing covers playback today."),
     none("Calls and Conferencing",
          "Needs live audio and video, a network and other machines. Every connection is blocked by default and "
-         "no firewall exists yet. Video Conferencing Tool covers only scheduling, roster, agenda and notes."),
+         "the firewall has no rule for it (and cannot allow a call). Video Conferencing Tool covers only scheduling, roster, agenda and notes."),
     none("Remote Access and Screen Sharing",
          "Needs a network, another machine and reading the screen. Apps cannot read the screen, every connection "
-         "is blocked by default, no firewall exists yet and nothing is encrypted yet. Nothing covers it."),
+         "is blocked by default (the firewall allows only verified https fetches) and nothing is encrypted yet. Nothing covers it."),
     none("Spatial Tracking and Calibration",
          "Needs motion, position or depth sensors and calibration of real devices. Apps never open devices and "
          "the command protocol carries only text and pixels. Nothing covers it today."),
@@ -36,13 +36,13 @@ ENTRIES: list = [
          "KOS does not have (nothing is encrypted yet). KOS will not fake one, so none is built."),
     none("Navigation and Traffic",
          "Needs a location sensor, map data and live traffic over a network. Apps get no sensors, every "
-         "connection is blocked by default and no firewall exists yet. Nothing covers it today."),
+         "connection is blocked by default and an app has no live map feed to fetch. Nothing covers it today."),
     none("Weather",
-         "Needs a network and live weather data. Every connection is blocked by default and no firewall exists "
-         "yet, so an app cannot fetch forecasts. Nothing covers it today."),
+         "Needs a network and live weather data. Every connection is blocked by default until a firewall rule allows it; no "
+         "weather app is built, so nothing covers it today."),
     none("Cloud and Device Synchronization",
-         "Needs a network, a remote service and other machines; every connection is blocked by default, no "
-         "firewall exists yet and nothing is encrypted yet. `kos backup` keeps local copies only, not sync."),
+         "Needs a network, a remote service and other machines; every connection is blocked by default, the "
+         "firewall allows only verified https fetches and nothing is encrypted yet. `kos backup` keeps local copies only, not sync."),
     none("Wireless Sharing and Streaming",
          "Needs radio hardware (Wi-Fi, Bluetooth), a network and other devices. Apps never open devices and "
          "every connection is blocked by default. Nothing covers it today."),

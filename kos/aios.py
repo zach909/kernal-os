@@ -11,6 +11,9 @@ KOS carries a request to the NeuroClaw engine on this computer (``POST /api/ai-o
 no password of its own. NeuroClaw's own tool gate, Computer Access switches and approval queue decide
 what happens next, exactly as they do for chat.
 
+The connection is ``os:aios`` -> the engine's host:port, ``loopback``, and the firewall decides first
+(firewall.py): without a rule nothing is connected and the error names the command that allows it.
+
 Nothing here starts at boot or runs in the background, in keeping with the rest of KOS: the engine is
 asked, once, when you ask. The engine address must be this computer (loopback); anything else is refused.
 Standard library only.
@@ -25,6 +28,9 @@ import re
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
+
+from . import assistant, firewall
+from .paths import Paths
 
 LAYERS: dict[str, str] = {
     "gui": "graphical button clicker",
@@ -68,7 +74,23 @@ def clean_request(words: list[str] | str) -> str:
     return text
 
 
-def _call(url: str, method: str, body: dict | None = None, opener=urllib.request.urlopen) -> dict:
+def _gate(url: str, paths: Paths) -> None:
+    """Ask the firewall about this engine connection; refuse (nothing connected) if no rule allows it."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    try:
+        port = parts.port or 80
+    except ValueError:
+        raise AiosError("the AI OS engine address has a bad port") from None
+    if not firewall.decide(paths, "os:aios", host, port, "loopback"):
+        raise AiosError("the firewall blocks the AI OS engine. Allow it with: "
+                        f"kos firewall allow os:aios {host} {port} --proto loopback")
+
+
+def _call(url: str, method: str, body: dict | None = None, opener=None, *, paths: Paths) -> dict:
+    _gate(url, paths)
+    if opener is None:
+        opener = assistant.make_opener().open     # no proxy from the environment, no redirects
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
@@ -85,15 +107,16 @@ def _call(url: str, method: str, body: dict | None = None, opener=urllib.request
                         "Start NeuroClaw first.")
 
 
-def status(opener=urllib.request.urlopen, env: dict | None = None) -> dict:
+def status(opener=None, env: dict | None = None, *, paths: Paths) -> dict:
     """What the engine offers. No password: it only lists the four layers."""
-    return _call(engine_url(env) + "/api/ai-os/layer", "GET", opener=opener)
+    return _call(engine_url(env) + "/api/ai-os/layer", "GET", opener=opener, paths=paths)
 
 
 def run_layer(layer: str, words: list[str] | str,
-              opener=urllib.request.urlopen, env: dict | None = None) -> dict:
+              opener=None, env: dict | None = None, *, paths: Paths) -> dict:
     """Hand one request to the engine. Returns the engine's outcome."""
     if layer not in LAYERS:
         raise AiosError(f"AI OS has four layers: {', '.join(LAYERS)}")
     request = clean_request(words)
-    return _call(engine_url(env) + "/api/ai-os/layer", "POST", {"layer": layer, "request": request}, opener=opener)
+    return _call(engine_url(env) + "/api/ai-os/layer", "POST", {"layer": layer, "request": request},
+                 opener=opener, paths=paths)

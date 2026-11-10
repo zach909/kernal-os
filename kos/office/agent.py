@@ -16,8 +16,8 @@ backend with ``kos assistant`` (off / a model on this computer / an API) and the
 OS asks the password once per app instance. The model sees only the chat history
 and what you ``/remember`` - never this app's data (``_docs`` is for the local
 tools only). When the OS says no, or nothing is configured, the agent says so in
-one line and answers from its local tools. Apps that declared ``network`` keep the
-older direct model path (``Chat``), untouched.
+one line and answers from its local tools. Apps that declared ``network`` (OS-brokered https, only as the firewall allows) keep the
+older model path (``Chat``) which now goes through ``host.fetch`` (OS-brokered, firewalled).
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ _SKIP = ("agent-", "export-")          # its own keys, and exported files (not t
 _MAX_SYSTEM, _MAX_CONTENT, _MAX_MSGS, _MAX_TOTAL = 2000, 4000, 20, 24000   # = protocol.py's limits
 _NOTICE = {"not-configured": "No assistant is set up (the owner chooses one with `kos assistant`), so I'm using my local tools.",
            "refused": "The OS did not allow the assistant just now, so I'm using my local tools.",
+           "blocked": "The firewall blocks the assistant; the owner allows it with `kos firewall allow os:assistant HOST PORT --proto https|loopback`, so I'm using my local tools.",
            "unreachable": "The assistant could not be reached, so I'm using my local tools.",
            "bad-reply": "The assistant sent an unusable reply, so I'm using my local tools."}
 _MAX_KEYS, _MAX_CHARS = 200, 20000     # bounded: a big vault must not make the agent slow
@@ -62,7 +63,8 @@ class AssistantInfo(Screen):
                 "    kos assistant status", "    kos assistant set local --endpoint URL --model NAME   (a model on this computer)",
                 "    kos assistant set api --provider anthropic|openai --model NAME   (someone else's model)",
                 "    kos assistant use off|local|api", "",
-                "  This app has no network: the OS makes the connection, asks your password",
+                "  This app has no network: the OS makes the connection (only if the firewall has a",
+                "  rule for it: `kos assistant set` adds it), asks your password",
                 "  once per time this app is opened, and logs it. The model sees only this",
                 "  chat and what you /remember - never this app's data."]
 

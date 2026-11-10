@@ -1,20 +1,18 @@
 """Mail: a message store with a real delivery pipeline (aliases, rules, quotas,
-bounces, relay queue), an RFC 5322/mbox exporter, a client and a server console.
+bounces, local queue), an RFC 5322/mbox exporter, a client and a server console.
 
-What this is NOT: it opens no sockets. KOS apps have no network by default and
-a mail server needs a listening port, so this is the mail *system* (store,
-routing, administration) without SMTP/IMAP on the wire. Outbound mail to
-other domains waits in the relay queue and is sent by `relay` only if an SMTP
-relay is configured and the app was given network access. The client and the
-server are separate apps with separate vaults and do not exchange mail with
-each other (see docs/IDEAS.md: shared spaces)."""
+What this is NOT: it opens no sockets and sends nothing over a network. A mail server needs a
+listening port and SMTP is a raw, unencrypted-by-default protocol that cannot be brokered through the
+OS's verified-https fetch (netfetch.py) or the firewall, so there is NO network send: mail for other
+domains waits in the local queue and stays there. The mail *system* (store, routing, aliases, rules,
+quotas, bounces, mbox export) is local. The client and the server are separate apps with separate vaults
+and do not exchange mail with each other (see docs/IDEAS.md: shared spaces)."""
 
 from __future__ import annotations
 
 import email.message
 import email.utils
 import re
-import smtplib
 
 from .records import Data, Field, RecordForm, RecordList, Spec
 from .ui import (Confirm, Editor, ListNav, Menu, Message, Prompt, Screen, Store, TextInput, TextView,
@@ -75,7 +73,7 @@ class MailStore:
         dom = rcpt.split("@")[-1]
         if dom not in self.domains():
             self.queue.append({**msg, "rcpt": rcpt, "state": "queued", "tries": 0}); self.st.save("queue", self.queue)
-            return f"{rcpt}: queued for relay"
+            return f"{rcpt}: queued locally (no network send)"
         u = self.user(rcpt)
         if not u:
             self.bounce(msg, rcpt, "550 no such user"); return f"{rcpt}: bounced (no such user)"
@@ -100,22 +98,10 @@ class MailStore:
                           "body": f"Your message to {rcpt} could not be delivered.\n{why}\n", "id": msg["id"] + "b", "date": now_stamp()}, s, force=True)
 
     def relay(self) -> list:
-        host = self.cfg.get("relay", "")
-        if not host: return ["no SMTP relay configured (mail settings: relay host:port)"]
-        out = []
-        try:
-            h, _, p = host.partition(":")
-            with smtplib.SMTP(h, int(p or 25), timeout=15) as s:
-                for q in self.queue:
-                    if q["state"] != "queued": continue
-                    try:
-                        s.sendmail(addr_of(q["from"]), [q["rcpt"]], to_rfc822(q)); q["state"] = "sent"; out.append(f"sent to {q['rcpt']}")
-                    except (smtplib.SMTPException, OSError) as e:
-                        q["tries"] += 1; q["state"] = "failed" if q["tries"] >= 3 else "queued"; out.append(f"{q['rcpt']}: {e}")
-        except (smtplib.SMTPException, OSError) as e:
-            out.append(f"cannot reach relay: {type(e).__name__} (does this app have network access?)")
-        self.st.save("queue", self.queue)
-        return out or ["queue is empty"]
+        """There is no network send. The queue is kept (and shown) but nothing leaves this computer."""
+        queued = sum(1 for q in self.queue if q.get("state") == "queued")
+        return [f"no network send: {queued} message(s) stay in the local queue.",
+                "KOS cannot send SMTP (it cannot be made encrypted and verified through the firewall)."]
 
 
 def to_rfc822(m: dict) -> str:
@@ -226,9 +212,9 @@ class MailAdmin(Menu):
         self.host, self.ms = host, MailStore(host)
         entries = [("Mailboxes", lambda: ("push", RecordList(self.ms.users))), ("Aliases", lambda: ("push", RecordList(self.ms.aliases))),
                    ("Routing rules", lambda: ("push", RecordList(self.ms.rules))), ("Relay queue", self.queue), ("Send a test message", self.test),
-                   ("Settings (domain, relay)", self.settings), ("Server log", lambda: ("push", TextView("Log", self.ms.log[::-1] or ["empty"]))),
+                   ("Settings (domain)", self.settings), ("Server log", lambda: ("push", TextView("Log", self.ms.log[::-1] or ["empty"]))),
                    ("Export all mail as mbox", self.export), ("Statistics", self.stats)]
-        super().__init__(title, entries, ["  Local mail system: store, routing, quotas, relay queue. No SMTP/IMAP sockets."])
+        super().__init__(title, entries, ["  Local mail system: store, routing, quotas, local queue. No network send, no SMTP/IMAP."])
 
     def queue(self):
         q = self.ms.queue
@@ -242,7 +228,7 @@ class MailAdmin(Menu):
         return ("push", TextView("Delivery result", res))
 
     def settings(self):
-        return ("push", Prompt("Settings", "domain relayhost:port (relay optional):", f"{self.ms.cfg['domain']} {self.ms.cfg.get('relay', '')}".strip(), self.set_cfg))
+        return ("push", Prompt("Settings", "domain:", self.ms.cfg["domain"], self.set_cfg))
 
     def set_cfg(self, v):
         p = v.split()
@@ -254,4 +240,4 @@ class MailAdmin(Menu):
 
     def stats(self):
         rows = [[u["addr"], len(self.ms.box(u["addr"].lower())), u.get("quota", "")] for u in self.ms.users.items]
-        return ("push", TextView("Statistics", table(rows, ["mailbox", "messages", "quota"]) + ["", f"relay queue: {len(self.ms.queue)}"]))
+        return ("push", TextView("Statistics", table(rows, ["mailbox", "messages", "quota"]) + ["", f"local queue: {len(self.ms.queue)}"]))

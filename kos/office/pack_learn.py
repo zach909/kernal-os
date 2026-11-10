@@ -317,7 +317,7 @@ LEAVES = {
     "owed": ("An earlier write still owes a security scan and a disk optimize, which blocks the next write.", "See what is owed, then settle it.", "kos settle"),
     "admin": ("Writing needs the elevated administrator keyboard.", "Check its status, then boot it.", "kos admin status"),
     "input": ("Devices stay off until booted with the password.", "Answer y to Boot mouse? or Boot keyboard? at launch. Ctrl-C always quits.", "kos run NAME"),
-    "network": ("An app has no network unless its manifest asks and you allow it at launch. There is no firewall yet.", "Look at the app's permissions and folders.", "kos dirs NAME"),
+    "network": ("An app has no network of its own. The OS fetches for it over verified https only if its manifest asks AND a firewall rule allows that host (kos firewall).", "Look at the app's permissions and folders.", "kos dirs NAME"),
     "grant": ("An app is let into a shared folder only after you grant it.", "See owners and access, then grant it.", "kos spaces"),
     "boot": ("The boot gate refuses when a management processor (ME, PSP, BMC) is running.", "Read the status and the advice. kos.firmware=warn on the kernel command line boots anyway.", "kos firmware plan"),
     "safe": ("You want to know whether the system is intact.", "Run the read-only check, then verify the audit log.", "kos security"),

@@ -83,8 +83,9 @@ class TestTourFacts(unittest.TestCase):
             for w in ("firewall", "encrypt", "hardware", "camera", "microphone"):
                 if w in right_and_why.lower():
                     self.assertRegex(right_and_why, neg, right_and_why)
-        for _, q in QS:   # the right answer never says yes to "is it encrypted / is there a firewall"
-            if re.search(r"firewall|encrypted", q[0], re.I) and q[0].lower().startswith(("does", "is ")):
+        # a firewall now exists (kos firewall), so only "is it encrypted" must still be answered No
+        for _, q in QS:   # the right answer never says yes to "is it encrypted"
+            if re.search(r"encrypted", q[0], re.I) and q[0].lower().startswith(("does", "is ")):
                 self.assertTrue(q[1].startswith("No"), q[0])
 
 

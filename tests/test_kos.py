@@ -2185,35 +2185,34 @@ class TestWebBrowserRules(unittest.TestCase):
             with self.assertRaises(ValueError, msg=u):
                 self.web.check_url(u)
 
-    def test_redirect_to_http_is_refused(self):
-        import urllib.request
-        h = self.web._HttpsOnlyRedirects()
-        req = urllib.request.Request("https://example.com/")
-        with self.assertRaises(ValueError):
-            h.redirect_request(req, None, 302, "Found", {}, "http://example.com/")
+    class _App:
+        """Stands in for the sdk App: the OS (not the app) makes the request."""
+        def __init__(self, reply): self.reply, self.calls = reply, []
+        def fetch(self, url, method="GET", headers=None, body=""):
+            self.calls.append((url, method)); return self.reply
+
+    def test_a_redirect_is_an_error_not_followed(self):
+        # was: the app's own redirect handler refused https->http; now the OS never follows a redirect at all
+        with self.assertRaises(ValueError) as cm:
+            self.web.fetch(self._App((False, "redirect")), "https://example.com/")
+        self.assertIn("redirect", str(cm.exception))
 
     def test_unverifiable_certificate_is_refused(self):
-        import http.server
-        import ssl
-        import subprocess
-        with tempfile.TemporaryDirectory() as d:
-            key, crt = f"{d}/k.pem", f"{d}/c.pem"
-            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                            "-keyout", key, "-out", crt, "-days", "1", "-subj", "/CN=localhost"],
-                           check=True, capture_output=True)
-            srv = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(crt, key)
-            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-            t = threading.Thread(target=srv.serve_forever, daemon=True)
-            t.start()
-            try:
-                with self.assertRaises(ValueError) as cm:
-                    self.web.fetch(f"https://localhost:{srv.server_address[1]}/")
-                self.assertIn("certificate", str(cm.exception))
-            finally:
-                srv.shutdown()
-                srv.server_close()
+        # was: the app made a real TLS connection; now the OS does (real TLS is tested in tests/test_firewall.py)
+        with self.assertRaises(ValueError) as cm:
+            self.web.fetch(self._App((False, "refused")), "https://localhost:1/")
+        self.assertIn("certificate", str(cm.exception))
+
+    def test_blocked_by_the_firewall_says_how_to_allow(self):
+        with self.assertRaises(ValueError) as cm:
+            self.web.fetch(self._App((False, "blocked")), "https://example.com/")
+        self.assertIn("kos firewall allow app:web", str(cm.exception))
+
+    def test_a_page_comes_back_through_the_os(self):
+        app = self._App((True, {"status": 200, "content_type": "text/html; charset=utf-8", "body": b"<a href='/x'>x</a>"}))
+        page = self.web.fetch(app, "example.com")
+        self.assertEqual(app.calls, [("https://example.com", "GET")])
+        self.assertTrue(page.links)
 
     def test_every_screen_says_sites_can_see_your_ip(self):
         page = self.web.Page("https://example.com")
@@ -2690,6 +2689,15 @@ class TestDebBuild(unittest.TestCase):
 class TestAiOs(unittest.TestCase):
     """AI OS: KOS hands a request to the NeuroClaw engine on this computer. No password."""
 
+    def setUp(self):
+        # aios.* now go through the firewall (os:aios, loopback); these tests are about the request, so
+        # the one rule they need is present. The firewall itself is tested in tests/test_firewall.py.
+        from kos import firewall
+        self._tmp = tempfile.TemporaryDirectory()
+        self.paths = Paths(Path(self._tmp.name))
+        firewall.add_rule(self.paths, "os:aios", "127.0.0.1", 7861, "loopback")
+        self.addCleanup(self._tmp.cleanup)
+
     class Fake:
         """Stands in for urllib.request.urlopen; records what would have been sent."""
         def __init__(self, reply):
@@ -2703,7 +2711,7 @@ class TestAiOs(unittest.TestCase):
     def test_request_goes_to_engine_with_no_password(self):
         from kos import aios
         fake = self.Fake({"status": "ran", "text": "done"})
-        out = aios.run_layer("gui", ["click", "Save"], opener=fake)
+        out = aios.run_layer("gui", ["click", "Save"], opener=fake, paths=self.paths)
         self.assertEqual(out["text"], "done")
         url, method, data = fake.sent[0]
         self.assertEqual((url, method), ("http://127.0.0.1:7861/api/ai-os/layer", "POST"))
@@ -2715,7 +2723,7 @@ class TestAiOs(unittest.TestCase):
         fake = self.Fake({})
         for layer, words in (("email", ["hi"]), ("gui", []), ("app", ["x" * 601])):
             with self.assertRaises(aios.AiosError):
-                aios.run_layer(layer, words, opener=fake)
+                aios.run_layer(layer, words, opener=fake, paths=self.paths)
         self.assertEqual(fake.sent, [])
 
     def test_engine_must_be_on_this_computer(self):
@@ -2732,7 +2740,7 @@ class TestAiOs(unittest.TestCase):
     def test_status_lists_layers(self):
         from kos import aios
         fake = self.Fake({"layers": [{"id": "gui", "label": "x", "available": True}]})
-        self.assertEqual(aios.status(opener=fake)["layers"][0]["id"], "gui")
+        self.assertEqual(aios.status(opener=fake, paths=self.paths)["layers"][0]["id"], "gui")
         self.assertEqual(fake.sent[0][1], "GET")
 
 

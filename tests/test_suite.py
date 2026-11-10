@@ -503,12 +503,12 @@ class TestMail(unittest.TestCase):
         ms.aliases.add({"alias": "team@kos.local", "targets": "ann@kos.local, bob@kos.local"})
         ms.rules.add({"field": "subject", "contains": "[spam]", "action": "folder", "arg": "spam"})
         r = ms.submit({"from": "ann@kos.local", "to": ["team@kos.local", "zed@kos.local", "far@example.org"], "subject": "hi", "body": "yo"})
-        self.assertEqual(sorted(x.split(":")[1].strip() for x in r), ["bounced (no such user)", "delivered to inbox", "delivered to inbox", "queued for relay"])
+        self.assertEqual(sorted(x.split(":")[1].strip() for x in r), ["bounced (no such user)", "delivered to inbox", "delivered to inbox", "queued locally (no network send)"])
         ms.submit({"from": "ann@kos.local", "to": ["bob@kos.local"], "subject": "[spam] x", "body": "x"})
         self.assertEqual([m["folder"] for m in ms.box("bob@kos.local")], ["inbox", "spam"])
         self.assertIn("mailbox full", ms.submit({"from": "ann@kos.local", "to": ["bob@kos.local"], "subject": "3", "body": "x"})[0])
         self.assertTrue(any("Undelivered" in m["subject"] for m in ms.box("ann@kos.local")))     # NDR reached the sender
-        self.assertIn("no SMTP relay", ms.relay()[0])
+        self.assertIn("no network send", ms.relay()[0])   # the SMTP relay is gone: it cannot be firewalled
         self.assertIn("From: ann@kos.local", mail.to_rfc822(ms.box("bob@kos.local")[0]))
 
     def test_client_compose_flow(self):
@@ -571,8 +571,8 @@ class TestExtras(unittest.TestCase):
         cfg = {"provider": "anthropic", "model": "m", "key": "K"}
         url, headers, body = llm.build_request(cfg, "sys", [{"role": "user", "content": "hi"}])
         self.assertEqual(headers["x-api-key"], "K"); self.assertEqual(json.loads(body)["system"], "sys")
-        with self.assertRaises(llm.LLMError): llm.ask({**cfg, "endpoint": "http://evil.example/x"}, "", [])
-        with self.assertRaises(llm.LLMError): llm.ask({}, "", [])
+        with self.assertRaises(llm.LLMError): llm.ask(FakeHost(), {**cfg, "endpoint": "http://evil.example/x"}, "", [])
+        with self.assertRaises(llm.LLMError): llm.ask(FakeHost(), {}, "", [])
 
     def test_hub_isolates_components(self):
         h = FakeHost(data={})

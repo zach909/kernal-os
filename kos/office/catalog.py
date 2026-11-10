@@ -5,7 +5,7 @@ an honest scope. `scope`:
   none     not built, and why
 
 Every app is single-user and local: KOS apps cannot talk to other apps, other
-machines or the network unless the owner grants network access at launch."""
+machines or the network unless the owner adds a firewall rule; an app never gets a network of its own."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def _assistant(host, e):
     if a.get("tools"): parts.append(("Tools (work without a model)", lambda h: Workbench(h, "Tools", a["tools"])))
     parts.append(("Chat" + (" - connect a model for full answers" if True else ""), lambda h: Chat(h, e.title, sysmsg)))
     parts.append(("Model settings", lambda h: ModelSettings(h)))
-    return extras.Hub(host, e.title, parts, "Works offline with local tools; connect a language model in Model settings (needs network permission) for open-ended answers.", prefixed=False)
+    return extras.Hub(host, e.title, parts, "Works offline with local tools; a language model (Model settings) needs a firewall rule for this app and an https endpoint; without one it stays offline.", prefixed=False)
 
 
 def _persona(host, e):
@@ -210,8 +210,8 @@ CATALOG: list[Entry] = [
  E("Desktop Publishing Tool", "docs", "partial", "Writes Markdown and exports a two-column A4 print layout as HTML (Ctrl-L). No WYSIWYG page designer, fonts or images.", layout=True, template="# Headline\n\nBody text flows into two justified columns when exported.\n"),
  E("Diagram Editor", "diagram", note="Text-defined flow diagrams drawn as boxes and arrows; SVG export."),
  E("Interactive Presentation Builder", "slides", template="# Quick poll\n---\n## Which option?\n? Pick one | Option A | Option B | Option C\n[See the answer](#3)\n---\n# Thanks\n> poll votes are saved; press a/b/c while presenting\n", note="Slides with live polls (votes counted on this device) and branching links."),
- E("Email Client", "mail", "partial", "Local accounts, folders, compose/reply/forward, search, rules and a relay queue. SMTP/IMAP to other servers only via an optional relay with network access; it does not fetch mail from other providers.", network=True, uses=["contacts"]),
- E("Email Server", "mailadmin", "partial", "The mail system without sockets: mailboxes, aliases, routing rules, quotas, bounces, relay queue, mbox export. It does not listen on SMTP/IMAP ports (KOS apps cannot), and does not exchange mail with the Email Client app.", network=True),
+ E("Email Client", "mail", "partial", "Local accounts, folders, compose/reply/forward, search, rules and a local queue. No network send: it cannot speak SMTP/IMAP (not brokerable over the firewall's verified https) and does not fetch mail from other providers.", uses=["contacts"]),
+ E("Email Server", "mailadmin", "partial", "The mail system without sockets: mailboxes, aliases, routing rules, quotas, bounces, local queue, mbox export. No network send; it does not listen on SMTP/IMAP ports (KOS apps cannot), and does not exchange mail with the Email Client app."),
  E("Calendar Manager", "calendar", owns=["calendar"], note="Creates the shared folder `calendar`; the Appointment Scheduler can put bookings on it once you grant write access."), R_("Contact Manager", "contacts", owns=["contacts"], note="Creates the shared folder `contacts`; the Email Client and Appointment Scheduler can look people up in it once you grant them access."),
  E("Appointment Scheduler", "scheduler", uses=["calendar", "contacts"], note="Working hours, slots, double-booking prevention. If granted, offers names from `contacts` and puts bookings on the shared `calendar`. No public booking page."),
  R_("Workplace Planner", "workplace"), R_("Team Management Tool", "team"),
@@ -317,7 +317,7 @@ CATALOG: list[Entry] = [
  E("Form Automation Tool", "flow", sample=SAMPLE_FORM, input=FORM_INPUT, note="Routes form submissions (a table) by rules, e.g. by amount."),
  E("Spreadsheet Automation Tool", "flow", sample=SAMPLE_SHEET_AUTO, input=SHEET_INPUT, note="Repeatable table clean-up pipelines (dedupe, computed columns, sort)."),
  E("Document Automation Tool", "flow", sample=SAMPLE_MERGE_DOC, input=MERGE_INPUT, note="Mail-merge: one document per row from a template."),
- E("Email Automation Tool", "flow", "partial", "Generates personalised email text per row. It does not send; paste into the Email Client.", sample=SAMPLE_MERGE_MAIL, input=MERGE_INPUT),
+ E("Email Automation Tool", "flow", "partial", "Generates personalised email text per row. No network send; it does not send at all - paste into the Email Client (which has no network send either).", sample=SAMPLE_MERGE_MAIL, input=MERGE_INPUT),
  E("Calendar Automation Tool", "wb", "partial", "Expands recurrence rules ('every weekday 09:00 …') into dated events. It does not yet write to the shared `calendar` folder.", tools=["recur"]),
  E("Chatbot Builder", "bot", slots=False, note="Intents with patterns and replies, a test console, unhandled-question log."),
  E("Conversational AI Platform", "bot", "partial", "Intent matching with multi-turn slot filling and analytics. Rule-based; not a generative model.", slots=True),

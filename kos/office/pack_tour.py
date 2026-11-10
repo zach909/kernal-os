@@ -103,12 +103,12 @@ PERMITS = (
     ("Which permission does every suite app in this repo get?", "storage",
      ("network", "system", "camera"),
      "Apps keep their data in their own vault; network is declared only where an app cannot work without it."),
-    ("What does the network permission give an app today?", "Every host and port, and it may listen",
-     ("One host you pick", "Web pages only", "Outgoing connections on port 443 only"),
-     "It is one yes or no at launch. Per-host rules need the firewall, which does not exist yet."),
-    ("When is the network permission decided?", "At launch, with your password",
-     ("When the app first connects", "At install time only", "Never, it is on for everyone"),
-     "Decided at launch (action app.network), not at first use: a known gap."),
+    ("What does the network permission give an app today?", "Only the right to ask the OS to fetch over https, as the firewall allows",
+     ("Every host and port", "A network connection of its own", "Outgoing connections on port 443 only"),
+     "No app ever gets a network. Each host needs a rule you add with kos firewall allow."),
+    ("When is a connection from an app decided?", "At every request, by a firewall rule you typed",
+     ("At launch, for every host", "At install time only", "Never, it is on for everyone"),
+     "No rule, no connection: the attempt is blocked and logged either way."),
 )
 
 SHARED = (
@@ -140,21 +140,21 @@ BLOCKED = (
     ("What does KOS rule 3 say about connections?", "Every connection is blocked until a rule allows it",
      ("Connections are allowed unless reported", "Only the internet is blocked", "Only apps from unknown makers are blocked"),
      "Any pair, any protocol, any port. It is a rule every change must meet."),
-    ("Does KOS have a firewall today?", "No: it is the rule's goal, not built yet",
-     ("Yes, as an app", "Yes, inside the kernel cell", "Yes, but only for websites"),
-     "The only block today is an app's empty network namespace."),
-    ("An app without the network permission connects somewhere. Result?", "Blocked by its empty network namespace",
-     ("Allowed on port 443", "Blocked by a firewall rule", "Allowed but logged"),
-     "No permission, no network at all, for any host or port."),
-    ("Are connections made by the OS itself blocked and logged today?", "No, only apps are covered",
-     ("Yes, all of them", "Yes, but not logged", "Only inbound ones"),
-     "README gap: nothing yet blocks or logs connections made by the OS or from outside the sandbox."),
+    ("Does KOS have a firewall today?", "Yes: kos firewall, every connection is blocked until a rule allows it",
+     ("No, it is not built yet", "Yes, as an app", "Yes, but only for websites"),
+     "It covers KOS apps and the OS's own connections. It is not a packet filter for other programs on the machine."),
+    ("An app without the network permission connects somewhere. Result?", "Blocked, and no network exists inside its sandbox",
+     ("Allowed on port 443", "Allowed but logged", "Allowed if the host is well known"),
+     "No app has a network of its own: even with the permission it can only ask the OS to fetch."),
+    ("Are connections made by the OS itself blocked and logged today?", "Yes: the assistant and AI OS connections need a rule and are logged",
+     ("No, only apps are covered", "Yes, but not logged", "Only inbound ones"),
+     "Each is a rule for os:assistant or os:aios; every allowed and blocked attempt is in the audit log."),
     ("By rule 3, what happens to a plain http:// connection?", "It is refused, never silently upgraded",
      ("It is upgraded to https", "It is allowed once", "It is allowed on local networks"),
-     "That is the rule; since no firewall exists yet, it is not enforced for everything."),
-    ("An app with the network permission can reach:", "Every host and port, and listen for incoming connections",
-     ("Only hosts you listed", "Only the host in its manifest", "Only HTTPS sites"),
-     "The permission is one yes or no. Rules naming one app, host and port are still to be built."),
+     "A rule cannot even be made for plain http to another computer; only loopback (this computer) may be plain."),
+    ("An app with the network permission can reach:", "Only what a firewall rule for that app allows, over verified https",
+     ("Every host and port", "Only the host in its manifest", "Any site on port 443"),
+     "Each rule names one app, one host, one port and one protocol; there is no listening at all."),
 )
 
 DEVICES = (
@@ -362,4 +362,4 @@ def make(host, entry):
 ENTRIES: list = [app(
     "Get to Know KOS", make, "full",
     "A guide to KOS as it is today: ten short quiz games, one per part of the OS, each with a one-line explanation. "
-    "It lists nothing that is not built, and says plainly where something (a firewall, encryption) is not done yet.")]
+    "It lists nothing that is not built, and says plainly where something (encryption, for one) is not done yet.")]

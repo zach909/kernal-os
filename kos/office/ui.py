@@ -33,6 +33,10 @@ class Host:
     def sysinfo(self, topic: str) -> tuple:
         """Ask the OS for read-only facts about this computer. -> (True, dict) or (False, short reason)."""
         return (False, "refused")
+    def fetch(self, url: str, method: str = "GET", headers: Optional[dict] = None, body: str = "") -> tuple:
+        """One https request made by the OS for this app (needs 'network'; the firewall decides first).
+        -> (True, {"status", "content_type", "body": bytes}) or (False, blocked/refused/unreachable/...)."""
+        return (False, "refused")
     def present(self, canvas) -> None: raise NotImplementedError
 
 
@@ -60,6 +64,7 @@ class AppHost(Host):
     def exit(self, code=0): self.app.exit(code)
     def assistant(self, system, messages): return self.app.assistant(system, messages)
     def sysinfo(self, topic): return self.app.sysinfo(topic)
+    def fetch(self, url, method="GET", headers=None, body=""): return self.app.fetch(url, method, headers, body)
 
 
 class FakeHost(Host):
@@ -71,6 +76,8 @@ class FakeHost(Host):
         self.assistant_calls: list = []
         self.sysinfo_fn = None              # tests inject topic -> (ok, data or reason); default: refused
         self.sysinfo_calls: list = []
+        self.fetch_fn = None                # tests inject (url, method, headers, body) -> (ok, dict or reason); default: refused
+        self.fetch_calls: list = []
         self.storage = storage              # a real kos.spaces.AppStorage: shared spaces are then truly enforced
         self.spaces: dict = {}              # without storage, spaces are plain in-memory dicts
         self.data: dict = dict(data or {})
@@ -145,6 +152,9 @@ class FakeHost(Host):
     def assistant(self, system, messages):
         self.assistant_calls.append((system, [dict(m) for m in messages]))
         return self.assistant_fn(system, messages) if self.assistant_fn else (False, "not-configured")
+    def fetch(self, url, method="GET", headers=None, body=""):
+        self.fetch_calls.append((url, method, dict(headers or {}), body))
+        return self.fetch_fn(url, method, headers or {}, body) if self.fetch_fn else (False, "refused")
     def sysinfo(self, topic):
         self.sysinfo_calls.append(topic)
         return self.sysinfo_fn(topic) if self.sysinfo_fn else (False, "refused")

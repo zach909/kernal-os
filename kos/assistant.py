@@ -17,6 +17,9 @@ one connection itself, through the policy below. The policy is code, not configu
   with the default SSL context: certificate AND host name verified, no off switch.
 * no redirects at all (a redirect is an error, so encrypted -> plain cannot happen);
   no proxy from the environment; replies capped at 1 MiB; 60 s in total.
+* the firewall decides first (firewall.py): the connection is ``os:assistant`` -> endpoint host:port
+  (``https`` for api, ``loopback`` for local). No rule, no connection: the app gets ``blocked``. Setting
+  the assistant up (``kos assistant set``) adds the matching rule in the same password-authorised action.
 * errors are short fixed phrases. Never the API key, the request or the server's reply.
 
 Gap (README): the key is stored unencrypted in ``<state>/assistant.json`` (mode 0600)
@@ -36,8 +39,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlsplit
 
+from . import firewall
 from .paths import Paths, atomic_write
 
 KINDS = ("off", "local", "api")
@@ -47,7 +52,7 @@ DEFAULT_ENDPOINTS = {"anthropic": "https://api.anthropic.com/v1/messages",
 MAX_REPLY = 1 << 20
 TIMEOUT = 60.0
 MAX_TOKENS = 1024
-ERRORS = ("not-configured", "refused", "unreachable", "bad-reply")
+ERRORS = ("not-configured", "refused", "blocked", "unreachable", "bad-reply")
 
 # Control characters, C1 and bidi overrides are dropped; newline stays (a reply has paragraphs),
 # tab becomes a space.
@@ -114,6 +119,25 @@ def check_endpoint(kind: str, url: str) -> str:
         if not ((ip.version == 4 and ip.is_loopback) or ip == ipaddress.IPv6Address("::1")):
             raise PolicyError("a local endpoint must be 127.0.0.1, ::1 or localhost on this computer")
     return url
+
+
+def firewall_target(cfg: dict) -> Optional[tuple]:
+    """(host, port, proto) of the endpoint the firewall must allow for this config, or None if there is
+    none (off, incomplete, or an endpoint the policy refuses)."""
+    kind = cfg.get("active")
+    if kind not in ("local", "api"):
+        return None
+    c = cfg.get(kind) or {}
+    url = c.get("endpoint") or (DEFAULT_ENDPOINTS.get(c.get("provider", ""), "") if kind == "api" else "")
+    try:
+        check_endpoint(kind, url)
+        u = urlsplit(url)
+        host, port = (u.hostname or "").lower(), u.port
+    except (PolicyError, ValueError):
+        return None
+    if firewall.parse_host(host) is None:
+        return None
+    return host, (port or 443), ("https" if kind == "api" else "loopback")
 
 
 def _localhost_is_loopback(host: str, port: int) -> bool:
@@ -201,11 +225,17 @@ def parse_response(fmt: str, raw: bytes) -> str:
     return clean_reply(text)
 
 
-def ask(cfg: dict, system: str, messages: list, opener=None) -> str:
-    """One question to the configured model. Raises AssistantError(code) and nothing else."""
+def ask(cfg: dict, system: str, messages: list, opener=None, *, paths: Paths) -> str:
+    """One question to the configured model. Raises AssistantError(code) and nothing else. The firewall
+    (``os:assistant``) is asked first; without a rule nothing is connected (code ``blocked``)."""
     if not isinstance(messages, list) or not messages:
         raise AssistantError("refused")
     url, fmt, headers, data = build_request(cfg, system, messages)
+    tgt = firewall_target(cfg)
+    if tgt is None:
+        raise AssistantError("refused")
+    if not firewall.decide(paths, "os:assistant", tgt[0], tgt[1], tgt[2]):
+        raise AssistantError("blocked")
     p = urlsplit(url)
     if cfg["active"] == "local" and (p.hostname or "").lower() == "localhost" \
             and not _localhost_is_loopback("localhost", p.port):
@@ -296,6 +326,14 @@ def set_api(paths: Paths, provider: str, endpoint: str, model: str, key: str) ->
     save(paths, cfg)
 
 
+def rule_for(kind: str, endpoint: str, provider: str = "") -> tuple:
+    """The firewall rule ``(who, host, port, proto)`` that lets the OS reach this endpoint."""
+    tgt = firewall_target({"active": kind, kind: {"endpoint": endpoint, "provider": provider}})
+    if tgt is None:
+        raise PolicyError("no firewall rule can be made for this endpoint")
+    return ("os:assistant", tgt[0], tgt[1], tgt[2])
+
+
 def use(paths: Paths, kind: str) -> None:
     if kind not in KINDS:
         raise ConfigError("use off, local or api")
@@ -325,7 +363,9 @@ def status(paths: Paths) -> dict:
         host = (u.hostname or "") + (f":{u.port}" if u and u.port else "") if u else ""
     except ValueError:
         host = ""
+    tgt = firewall_target(cfg)
     return {"active": kind, "endpoint_host": host, "model": c.get("model", ""),
+            "firewall_allows": bool(tgt and firewall.allows_now(paths, "os:assistant", *tgt)),
             "provider": c.get("provider", "") if kind == "api" else "",
             "key_set": bool(cfg["api"].get("key"))}
 

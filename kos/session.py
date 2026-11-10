@@ -291,6 +291,9 @@ class Session:
         if self.bridge is None and msg["action"] == "assistant":
             self._send({"cmd": "assistant", "ok": False, "error": "refused"})
             return
+        if self.bridge is None and msg["action"] == "fetch":
+            self._send({"cmd": "fetch", "ok": False, "error": "refused"})
+            return
         if self.bridge is None and msg["action"] == "sysinfo":
             self._send({"cmd": "sysinfo", "ok": False, "error": "refused"})
             return

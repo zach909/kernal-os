@@ -12,7 +12,7 @@ not labels, and one function - :func:`traverse` - is the only door:
             extension or mod, that it is permitted and really is an add-on.
     kernel  kernel commands. The Linux-level truth: the password for exactly this action, the
             seal verified against the zip, the manifest still within what you approved, the
-            network question, and the sandbox the app will be held in. For an app already
+            sandbox (an app never gets the host network), and the sandbox the app will be held in. For an app already
             running, that its process is alive.
 
 A layer that refuses stops everything behind it: an app with no permit is refused by ``app``

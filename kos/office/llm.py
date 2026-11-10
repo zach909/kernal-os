@@ -1,19 +1,19 @@
 """Optional language-model client for the AI apps.
 
-KOS apps have no network unless the manifest asks for it and the owner types
-the password at launch, so every AI app here works WITHOUT a model (local,
-deterministic tools) and gets better when you point it at one. Two wire
-formats are supported: Anthropic Messages and OpenAI-compatible chat.
+An app has NO network. A model request goes through ``host.fetch`` (the OS makes the https request, and
+only if the owner's firewall has a rule ``app:NAME HOST 443 https``); without one the answer is
+``blocked`` and every AI app falls back to its local, deterministic tools. The endpoint must be https
+(plain http and loopback http cannot be fetched; a model on this computer is reached through the OS
+assistant instead: ``kos assistant set local``). Two wire formats are supported: Anthropic Messages and
+OpenAI-compatible chat.
 
-The API key is kept in the app's vault in clear text (see vault.py's gap
-note). Use a key you can revoke. Errors never echo the key.
+The API key is kept in the app's vault in clear text (see vault.py's gap note). Use a key you can
+revoke. Errors never echo the key.
 """
 
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 
 DEFAULTS = {
     "anthropic": {"endpoint": "https://api.anthropic.com/v1/messages", "model": "claude-sonnet-5-5"},
@@ -52,17 +52,23 @@ def parse_response(prov: str, raw: bytes) -> str:
         raise LLMError("unexpected response from the model endpoint") from None
 
 
-def ask(cfg: dict, system: str, messages: list, timeout: float = 60.0) -> str:
+_WHY = {"blocked": "the firewall blocks this app: the owner allows it with `kos firewall allow app:NAME HOST PORT --proto https`",
+        "refused": "this app may not use the network (or the certificate was not verified)",
+        "unreachable": "could not reach the endpoint", "redirect": "the endpoint redirected (refused)",
+        "too-big": "the reply was too big", "bad-url": "the endpoint is not a plain https URL"}
+
+
+def ask(host, cfg: dict, system: str, messages: list) -> str:
     if not configured(cfg):
         raise LLMError("no model configured")
+    if host is None:
+        raise LLMError("no network: this app cannot reach a model here")
     url, headers, data = build_request(cfg, system, messages)
-    if not url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
-        raise LLMError("endpoint must be https (or localhost)")
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return parse_response(cfg["provider"], r.read(4 << 20))
-    except urllib.error.HTTPError as e:
-        raise LLMError(f"endpoint returned HTTP {e.code}") from None
-    except (urllib.error.URLError, OSError, TimeoutError) as e:
-        raise LLMError(f"could not reach the endpoint ({type(e).__name__}) - does this app have network access?") from None
+    if not url.startswith("https://"):
+        raise LLMError("endpoint must be https")
+    ok, got = host.fetch(url, "POST", headers, data.decode())
+    if not ok:
+        raise LLMError(_WHY.get(got, "could not reach the endpoint")) from None
+    if not 200 <= got["status"] < 300:
+        raise LLMError(f"endpoint returned HTTP {got['status']}")
+    return parse_response(cfg["provider"], got["body"])

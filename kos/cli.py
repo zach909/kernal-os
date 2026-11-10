@@ -35,6 +35,7 @@
     kos doctor                      which kernel protections are available
     kos firmware                    management processors (Intel ME, AMD PSP, BMC) and whether the OS may boot
     kos audit                       show the authorization log
+    kos firewall [status|allow|remove|log]  every connection is blocked until a rule allows it
     kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
     kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
     kos backup add PATH...          back up files/folders: scanned, stored once per content (password)
@@ -219,14 +220,15 @@ def _lazy_authority(paths: Paths):
 
 
 def _bridge_for(paths: Paths, name: str, perms, system: bool | None = None):
-    """The OS's side of an app's ``request`` commands, or None. ``system``, ``assistant`` and
-    ``sysinfo`` are separate: each narrow permission unlocks only its own request."""
+    """The OS's side of an app's ``request`` commands, or None. ``system``, ``assistant``,
+    ``sysinfo`` and ``network`` are separate: each narrow permission unlocks only its own request."""
     system = "system" in perms if system is None else system
     assistant = "assistant" in perms
     sysinfo = "sysinfo" in perms
-    if not (system or assistant or sysinfo):
+    network = "network" in perms          # only "may ask the OS to fetch over https as the firewall allows"
+    if not (system or assistant or sysinfo or network):
         return None
-    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo)
+    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo, network=network)
 
 
 def cmd_run(args, paths: Paths) -> int:
@@ -684,15 +686,69 @@ def cmd_aios(args, paths: Paths) -> int:
     """AI OS: `kos aios status` lists the four layers; `kos aios gui|app|kernel|skill WORDS...` runs one
     request on a layer. No password: NeuroClaw's own approvals decide what happens."""
     from . import aios
-    if args.layer == "status":
-        info = aios.status()
-        for l in info.get("layers", []):
-            print(f"{'ok ' if l.get('available') else 'no '} {l['id']:7} {l['label']}" + (f" ({l['reason']})" if l.get("reason") else ""))
-        return 0
-    out = aios.run_layer(args.layer, args.words)
+    try:
+        if args.layer == "status":
+            info = aios.status(paths=paths)
+            for l in info.get("layers", []):
+                print(f"{'ok ' if l.get('available') else 'no '} {l['id']:7} {l['label']}" + (f" ({l['reason']})" if l.get("reason") else ""))
+            return 0
+        out = aios.run_layer(args.layer, args.words, paths=paths)
+    except aios.AiosError as e:
+        eprint(f"error: {e}")
+        return 1
     print(out.get("text", ""))
     status = out.get("status")
     return 0 if status == "ran" else 4 if status == "held" else 1
+
+
+def cmd_firewall(args, paths: Paths) -> int:
+    """`kos firewall`: every connection is blocked until a rule allows it (README Rule 3). `status` and
+    `log` need no password; `allow` and `remove` do, and the prompt shows the exact rule. There is no
+    command (and no code) that turns the default off."""
+    import time
+    from . import firewall as F
+    from .auth import AuditLog
+    from .protocol import escape_text
+    op = args.op
+    if op == "status":
+        rules = F.load(paths)
+        print("firewall : ON, default DENY (every connection is blocked unless a rule allows it)")
+        print(f"rules    : {len(rules)} of {F.MAX_RULES}")
+        for r in rules:
+            wild = r["host"] == F.WILDCARD
+            line = "  " + escape_text(F.describe(r))
+            print(f"\x1b[1;31m{line}   <-- WILDCARD\x1b[0m" if wild else line)
+        if not rules:
+            print("  (none: nothing is allowed. `kos firewall allow WHO HOST PORT --proto https|loopback`)")
+        return 0
+    if op == "log":
+        n = max(1, min(args.n, 1000))
+        rows = [e for e in AuditLog(paths).tail(5000) if e.get("action") == "firewall.connect"][-n:]
+        for e in rows:
+            t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
+            print(f"{t}  {escape_text(e['outcome']):8} {escape_text(e['target'])}")
+        return 0
+    try:
+        try:
+            port = int(args.port) if args.port.isascii() and args.port.isdigit() else -1
+        except ValueError:
+            port = -1
+        if op == "allow":
+            rule = F.check_rule(args.who, args.host, port, args.proto)      # refuse a bad rule before any password
+            authority, _ = _authority(paths)
+            with authority.authorize("firewall.change", "allow " + F.describe(rule)):
+                F.add_rule(paths, rule["who"], rule["host"], rule["port"], rule["proto"])
+            print("allowed: " + escape_text(F.describe(rule)))
+        else:
+            who, host, port = F.check_key(args.who, args.host, port)     # refuse a bad key before any password
+            authority, _ = _authority(paths)
+            with authority.authorize("firewall.change", f"remove {who} {host}:{port}"):
+                gone = F.remove_rule(paths, args.who, host, port)
+            print(f"removed {gone} rule(s)")
+    except F.FirewallError as e:
+        eprint(f"refused: {e}")
+        return 2
+    return 0
 
 
 def cmd_assistant(args, paths: Paths) -> int:
@@ -700,6 +756,7 @@ def cmd_assistant(args, paths: Paths) -> int:
     is (no password, never the key); `use`, `set` and `test` need your password. The OS makes the
     connection - apps get no network for it. The API key is typed at a hidden prompt, never in argv."""
     from . import assistant as A
+    from . import firewall as F
     op = args.op
     if op == "status":
         s = A.status(paths)
@@ -710,13 +767,19 @@ def cmd_assistant(args, paths: Paths) -> int:
         if s["provider"]:
             print(f"provider  : {s['provider']}")
         print(f"api key   : {'set' if s['key_set'] else 'not set'}")
+        if s["active"] != "off":
+            print("firewall  : " + ("allows it" if s["firewall_allows"] else
+                                    "BLOCKS it (no rule): the owner allows it with `kos firewall allow os:assistant HOST PORT --proto https|loopback`"))
         return 0
     try:
         if op == "set":       # refuse a bad endpoint before asking for anything
             if args.kind == "local":
                 A.check_endpoint("local", args.endpoint)
+                rule = A.rule_for("local", args.endpoint)
             else:
-                A.check_endpoint("api", args.endpoint or A.DEFAULT_ENDPOINTS[args.provider])
+                ep = args.endpoint or A.DEFAULT_ENDPOINTS[args.provider]
+                A.check_endpoint("api", ep)
+                rule = A.rule_for("api", ep, args.provider)
         authority, prompter = _authority(paths)
         if op == "use":
             with authority.authorize("assistant.config", f"use {args.kind}"):
@@ -724,23 +787,28 @@ def cmd_assistant(args, paths: Paths) -> int:
             print(f"assistant is now: {args.kind}")
         elif op == "set":
             with authority.authorize("assistant.config", f"set {args.kind}"):
+                F.add_rule(paths, *rule)          # the matching firewall rule, in the SAME authorised action
                 if args.kind == "local":
                     A.set_local(paths, args.endpoint, args.model)
                 else:
                     raw = prompter.password("API key (typed hidden, stored unencrypted in this computer's KOS state): ")
                     A.set_api(paths, args.provider, args.endpoint or "", args.model, (raw or b"").decode("utf-8", "replace").strip())
             print(f"saved the {args.kind} settings (switch to it with: kos assistant use {args.kind})")
+            print("firewall rule added: " + F.describe(F.check_rule(*rule)))
         else:                 # test
             with authority.authorize("assistant.config", "test"):
                 cfg = A.load(paths)
                 try:
                     reply = A.ask(cfg, "You are a connection test. Reply with one short word.",
-                                  [{"role": "user", "content": "Say ok."}])
+                                  [{"role": "user", "content": "Say ok."}], paths=paths)
                 except A.AssistantError as e:
                     print(f"error: {e.code}")
+                    if e.code == "blocked":
+                        print("the firewall blocks the assistant; the owner allows it with "
+                              "`kos firewall allow os:assistant HOST PORT --proto https|loopback`")
                     return 1
             print("ok: " + reply[:80].replace("\n", " "))
-    except (A.PolicyError, A.ConfigError) as e:
+    except (A.PolicyError, A.ConfigError, F.FirewallError) as e:
         eprint(f"refused: {e}")
         return 2
     return 0
@@ -1276,6 +1344,20 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--no-verify", action="store_true", help="skip the read-back comparison")
     u = us.add_parser("test", help="boot the image in QEMU attached as a USB stick")
     u.add_argument("image")
+    s = sub.add_parser("firewall", help="every connection is blocked until a rule allows it: status, allow, remove, log")
+    fsub = s.add_subparsers(dest="op", required=True)
+    fsub.add_parser("status", help="the rules (no password)")
+    a = fsub.add_parser("allow", help="add a rule: WHO HOST PORT --proto https|loopback (password)")
+    a.add_argument("who", help="app:NAME, os:assistant or os:aios")
+    a.add_argument("host", help="an exact DNS name or IP address; * only if you mean every host (WILDCARD)")
+    a.add_argument("port")
+    a.add_argument("--proto", required=True, choices=["https", "loopback"])
+    a = fsub.add_parser("remove", help="remove the rules for WHO HOST PORT (password)")
+    a.add_argument("who")
+    a.add_argument("host")
+    a.add_argument("port")
+    a = fsub.add_parser("log", help="recent allowed and blocked connection attempts")
+    a.add_argument("-n", type=int, default=20)
     s = sub.add_parser("assistant", help="choose the model behind every app's assistant: off, local or api")
     asub = s.add_subparsers(dest="op", required=True)
     asub.add_parser("status", help="what the assistant is (no password, never shows the key)")
@@ -1310,7 +1392,7 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "assistant": cmd_assistant, "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
+    "assistant": cmd_assistant, "firewall": cmd_firewall, "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
 
 
 def main(argv: list[str] | None = None) -> int:

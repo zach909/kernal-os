@@ -51,7 +51,6 @@ ACTIONS: dict[str, str] = {
     "file.view": "view file",
     "app.run": "run app",
     "app.graphical": "run app graphically",
-    "app.network": "give app network access",
     "device.mouse": "boot mouse",
     "device.keyboard": "boot keyboard",
     "device.desktop": "boot desktop",
@@ -82,6 +81,7 @@ ACTIONS: dict[str, str] = {
     "assistant.config": "change the assistant",
     "assistant.ask": "let an app use the assistant",
     "sysinfo.read": "let an app read facts about this computer",
+    "firewall.change": "change the firewall rules",
 }
 
 

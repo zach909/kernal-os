@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import base64
 import socket
 from collections import deque
 from typing import Iterator, Optional
@@ -234,6 +235,43 @@ class App:
             if ev.get("cmd") == "sysinfo":
                 if ev.get("ok") is True and isinstance(ev.get("data"), dict):
                     return (True, ev["data"])
+                err = ev.get("error")
+                return (False, err if isinstance(err, str) else "refused")
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return (False, "unreachable")
+            self._queue.append(ev)
+
+    # One https request, made by the OS (needs the 'network' permission - NOT 'system'; the app has no
+    # network of its own). The firewall decides first; a request no rule allows is never connected.
+    # Returns (True, {"status": int, "content_type": str, "body": bytes}) or (False, short reason:
+    # blocked / refused / unreachable / redirect / too-big / bad-url).
+    def fetch(self, url: str, method: str = "GET", headers: Optional[dict] = None, body: str = "") -> tuple:
+        from . import netfetch           # a request the OS would reject as malformed is never sent
+        try:
+            netfetch.check_headers(headers or {})
+            if (not isinstance(url, str) or not 1 <= len(url) <= netfetch.MAX_URL or method not in netfetch.METHODS
+                    or not isinstance(body, str) or len(body) > netfetch.MAX_BODY or (body and method != "POST")):
+                raise netfetch.FetchError("bad-url")
+        except netfetch.FetchError:
+            return (False, "bad-url")
+        try:
+            self.send({"cmd": "request", "action": "fetch", "url": url, "method": method,
+                       "headers": headers or {}, "body": body})
+        except OSError:
+            return (False, "unreachable")
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return (False, "unreachable")
+            if ev.get("cmd") == "fetch":
+                if ev.get("ok") is True and isinstance(ev.get("body_b64"), str) and isinstance(ev.get("status"), int):
+                    try:
+                        raw = base64.b64decode(ev["body_b64"], validate=True)
+                    except ValueError:
+                        return (False, "unreachable")
+                    ct = ev.get("content_type")
+                    return (True, {"status": ev["status"], "content_type": ct if isinstance(ct, str) else "", "body": raw})
                 err = ev.get("error")
                 return (False, err if isinstance(err, str) else "refused")
             if ev.get("cmd") == "quit":

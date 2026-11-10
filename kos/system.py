@@ -28,7 +28,9 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import assistant, backup, cache, sysinfo
+import base64
+
+from . import assistant, backup, cache, firewall, netfetch, sysinfo
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
@@ -47,17 +49,13 @@ MAX_LISTED = 200
 
 def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
                          prompter) -> SandboxPolicy:
-    """Shared by run / open / the bridge: mode check + optional network grant."""
+    """Shared by run / open / the bridge: mode check, then the sandbox. An app is NEVER given the host
+    network, whatever its manifest says: ``network`` only means "may ask the OS to fetch over https as
+    the firewall allows" (netfetch.py). There is no prompt for it here."""
     m = app.manifest
     if mode not in m.modes:
         raise KAppError(f"{name} has no {mode} mode (it has: {', '.join(m.modes)})")
-    allow_net = False
-    if "network" in m.permissions:
-        if prompter.confirm(f"{name} asks for network access. Allow?"):
-            authority.authorize("app.network", name).close()
-            allow_net = True
-    return SandboxPolicy(allow_network=allow_net,
-                         weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+    return SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
 
 
 def _row(paths: Paths, a, permits: PermitStore) -> dict:
@@ -155,14 +153,16 @@ class SystemBridge:
 
     def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
                  system: bool = True, assistant: bool = False, opener=None,
-                 sysinfo: bool = False):
+                 sysinfo: bool = False, network: bool = False, fetch_context=None):
         self.paths = paths
         self._spawner = spawner
         self.app = app or "app"
         self.system = system             # manifest 'system' permission (set by the OS)
         self.assistant = assistant       # manifest 'assistant' permission: ONLY the assistant request
         self.sysinfo = sysinfo           # manifest 'sysinfo' permission: ONLY the sysinfo request
+        self.network = network           # manifest 'network' permission: ONLY the fetch request (OS-brokered https)
         self._opener = opener            # tests only; the real one is assistant.make_opener()
+        self._fetch_context = fetch_context   # tests only: an SSLContext that still verifies; real one is netfetch's
         # The assistant grant lasts for this app instance (this session) only. It is bound to the
         # endpoint it was given for: switching the backend asks again. A refusal is remembered too,
         # so an app cannot nag the owner with password prompts.
@@ -173,6 +173,20 @@ class SystemBridge:
         # type the password without reading). A refusal is remembered for the session too.
         self._si_granted = False
         self._si_refused = False
+
+    def _fetch(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
+        def fail(code: str) -> None:
+            reply({"cmd": "fetch", "ok": False, "error": code})
+
+        if not self.network:
+            return fail("refused")              # no 'network' permission: nothing, not even a firewall lookup
+        try:
+            got = netfetch.fetch(self.paths, f"app:{self.app}", req["url"], req["method"], req["headers"],
+                                 req["body"], context=self._fetch_context)
+        except netfetch.FetchError as e:
+            return fail(e.code)
+        reply({"cmd": "fetch", "ok": True, "status": got["status"], "content_type": got["content_type"],
+               "body_b64": base64.b64encode(got["body"]).decode("ascii")})
 
     def _sysinfo(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
         topic = req.get("topic")
@@ -236,6 +250,13 @@ class SystemBridge:
         except assistant.AssistantError as e:
             audit(kind, "refused")
             return fail(e.code)
+        tgt = assistant.firewall_target(cfg)
+        if tgt is None or not firewall.allows_now(self.paths, "os:assistant", *tgt):
+            # no rule: no password prompt either. decide() writes the blocked attempt to the audit log.
+            if tgt is not None:
+                firewall.decide(self.paths, "os:assistant", *tgt)
+            audit(kind, "blocked")
+            return fail("blocked")
         fp = assistant.fingerprint(cfg)
         if self._refused == fp:
             audit(kind, "refused")
@@ -250,7 +271,7 @@ class SystemBridge:
         if not audit(kind, "allowed"):
             return fail("refused")
         try:
-            text = assistant.ask(cfg, req["system"], req["messages"], opener=self._opener)
+            text = assistant.ask(cfg, req["system"], req["messages"], opener=self._opener, paths=self.paths)
         except assistant.AssistantError as e:
             audit(kind, "failed:" + e.code)
             return fail(e.code)
@@ -264,6 +285,9 @@ class SystemBridge:
             return None
         if action == "sysinfo":
             self._sysinfo(req, reply, authority)
+            return None
+        if action == "fetch":
+            self._fetch(req, reply, authority)
             return None
 
         def result(ok: bool, detail: str, **extra) -> None:

@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from kos import assistant as A  # noqa: E402
+from kos import firewall as F  # noqa: E402
 from kos import cli as kcli  # noqa: E402
 from kos.auth import ACTIONS, Authority, AuthorizationDenied, KdfParams, PasswordStore, Throttle  # noqa: E402
 from kos.kapp import KAppError, Manifest  # noqa: E402
@@ -57,6 +58,17 @@ class Env(unittest.TestCase):
     def audit_text(self):
         f = self.paths.logs / "audit.log"
         return f.read_text() if f.exists() else ""
+
+
+def fw_ask(cfg, system, messages, opener=None):
+    """A.ask now needs the firewall's yes (os:assistant): these transport tests are about the wire, so
+    they allow exactly this config's endpoint first (the firewall itself is tested in test_firewall.py)."""
+    with tempfile.TemporaryDirectory() as d:
+        paths = Paths(Path(d))
+        tgt = A.firewall_target(cfg)
+        if tgt:
+            F.add_rule(paths, "os:assistant", *tgt)
+        return A.ask(cfg, system, messages, opener=opener, paths=paths)
 
 
 class Resp:
@@ -180,7 +192,7 @@ class TestEndpointPolicy(unittest.TestCase):
         for cfg in (local_cfg("http://evil.com:80/v1"), local_cfg("http://127.0.0.1/v1"),
                     api_cfg(endpoint="http://api.example.com/v1"), api_cfg(endpoint="https://127.0.0.1/v1")):
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(cfg, "", MSG, opener=op)
+                fw_ask(cfg, "", MSG, opener=op)
             self.assertEqual(c.exception.code, "refused")
         self.assertEqual(op.calls, 0)
 
@@ -190,7 +202,7 @@ class TestEndpointPolicy(unittest.TestCase):
                     {"active": "api", "local": {}, "api": {"provider": "anthropic", "model": "m"}},   # no key
                     {"active": "api", "local": {}, "api": {"provider": "evil", "model": "m", "key": "k"}}):
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(cfg, "", MSG, opener=op)
+                fw_ask(cfg, "", MSG, opener=op)
             self.assertEqual(c.exception.code, "not-configured")
         self.assertEqual(op.calls, 0)
 
@@ -219,7 +231,7 @@ class TestTransportSafety(unittest.TestCase):
             s = Server(redirect)
             try:
                 with self.assertRaises(A.AssistantError) as c:
-                    A.ask(local_cfg(s.url), "", MSG)
+                    fw_ask(local_cfg(s.url), "", MSG)
                 self.assertIn(c.exception.code, A.ERRORS)
             finally:
                 s.close()
@@ -230,7 +242,7 @@ class TestTransportSafety(unittest.TestCase):
         s = Server(reply_json(b"x" * (A.MAX_REPLY + 5000)))
         try:
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(local_cfg(s.url), "", MSG)
+                fw_ask(local_cfg(s.url), "", MSG)
             self.assertEqual(c.exception.code, "bad-reply")
         finally:
             s.close()
@@ -239,7 +251,7 @@ class TestTransportSafety(unittest.TestCase):
         evil = "ok\x1b[2J\x1b]0;pwn\x07 line1\nline2\x00\x7f‮\u0085end\ttab"
         s = Server(reply_json({"choices": [{"message": {"content": evil}}]}))
         try:
-            out = A.ask(local_cfg(s.url), "", MSG)
+            out = fw_ask(local_cfg(s.url), "", MSG)
         finally:
             s.close()
         self.assertNotRegex(out, r"[\x00-\x09\x0b-\x1f\x7f-\x9f‮]")
@@ -251,7 +263,7 @@ class TestTransportSafety(unittest.TestCase):
             s = Server(reply_json(body))
             try:
                 with self.assertRaises(A.AssistantError) as c:
-                    A.ask(local_cfg(s.url), "", MSG)
+                    fw_ask(local_cfg(s.url), "", MSG)
                 self.assertEqual(c.exception.code, "bad-reply")
             finally:
                 s.close()
@@ -259,12 +271,12 @@ class TestTransportSafety(unittest.TestCase):
     def test_unreachable_and_http_errors_use_fixed_phrases(self):
         sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
         with self.assertRaises(A.AssistantError) as c:
-            A.ask(local_cfg(f"http://127.0.0.1:{port}/v1"), "", MSG)
+            fw_ask(local_cfg(f"http://127.0.0.1:{port}/v1"), "", MSG)
         self.assertEqual(c.exception.code, "unreachable")
         s = Server(reply_json({"error": "SECRET-SERVER-BODY"}, 500))
         try:
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(local_cfg(s.url), "", MSG)
+                fw_ask(local_cfg(s.url), "", MSG)
         finally:
             s.close()
         self.assertEqual((c.exception.code, str(c.exception)), ("refused", "refused"))
@@ -274,7 +286,7 @@ class TestTransportSafety(unittest.TestCase):
         op = FakeOpener()
         with mock.patch("kos.assistant._localhost_is_loopback", return_value=False):
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(local_cfg("http://localhost:1234/v1"), "", MSG, opener=op)
+                fw_ask(local_cfg("http://localhost:1234/v1"), "", MSG, opener=op)
         self.assertEqual((c.exception.code, op.calls), ("refused", 0))
 
 
@@ -282,7 +294,7 @@ class TestWireFormats(unittest.TestCase):
     def test_local_server_openai_format_end_to_end(self):
         s = Server(reply_json({"choices": [{"message": {"content": "Hello from the local model"}}]}))
         try:
-            out = A.ask(local_cfg(s.url, "llama3"), "be brief", [{"role": "user", "content": "hi"}])
+            out = fw_ask(local_cfg(s.url, "llama3"), "be brief", [{"role": "user", "content": "hi"}])
         finally:
             s.close()
         self.assertEqual(out, "Hello from the local model")
@@ -300,7 +312,7 @@ class TestWireFormats(unittest.TestCase):
                 r = urllib.request.Request(s.url, data=req.data, headers=dict(req.header_items()), method="POST")
                 return A.make_opener().open(r, timeout=timeout)
         try:
-            out = A.ask(api_cfg("anthropic"), "sys", [{"role": "user", "content": "hi"}], opener=Redirecting())
+            out = fw_ask(api_cfg("anthropic"), "sys", [{"role": "user", "content": "hi"}], opener=Redirecting())
         finally:
             s.close()
         self.assertEqual(out, "Hello")
@@ -312,7 +324,7 @@ class TestWireFormats(unittest.TestCase):
 
     def test_openai_api_format_sends_a_bearer_key(self):
         op = FakeOpener()
-        self.assertEqual(A.ask(api_cfg("openai", "https://api.example.com/v1/chat/completions"), "s", MSG, opener=op), "hi there")
+        self.assertEqual(fw_ask(api_cfg("openai", "https://api.example.com/v1/chat/completions"), "s", MSG, opener=op), "hi there")
         req = op.reqs[0]
         self.assertEqual(req.get_header("Authorization"), "Bearer " + KEY)
         self.assertEqual(json.loads(req.data)["messages"][0]["role"], "system")
@@ -383,6 +395,9 @@ class TestAssistantBridge(Env):
         return SystemBridge(self.paths, **kw)
 
     def ask(self, bridge, *answers, messages=MSG):
+        tgt = A.firewall_target(A.load(self.paths))      # these tests are about the password/grant; the rule is allowed
+        if tgt:                                          # (a missing rule is tested in test_firewall.py)
+            F.add_rule(self.paths, "os:assistant", *tgt)
         bridge.handle(validate_app_message(request(system="s", messages=messages), "tui"), self.out.append, self.authority(*answers))
         return self.out[-1]
 
@@ -472,8 +487,10 @@ class TestAssistantBridge(Env):
         self.assertIn('"target":"notes api"', log)
         for outcome in ("granted", "allowed", "failed:unreachable"):
             self.assertIn(outcome, log)
-        for secret in (KEY, "SECRET-MESSAGE-TEXT", "api.example.com"):
+        # the host:port IS now logged (firewall.connect, by design); the URL path, message and key never are
+        for secret in (KEY, "SECRET-MESSAGE-TEXT", "/v1/chat/completions"):
             self.assertNotIn(secret, log)
+        self.assertIn("os:assistant api.example.com:443 https", log)
 
     def test_the_key_never_leaves_in_an_error_a_reply_or_a_traceback(self):
         s = Server(reply_json({"error": "bad key " + KEY}, 401))
@@ -486,13 +503,13 @@ class TestAssistantBridge(Env):
                 return A.make_opener().open(r, timeout=timeout)
         try:
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(cfg, "", MSG, opener=Redirecting())
+                fw_ask(cfg, "", MSG, opener=Redirecting())
         finally:
             s.close()
         seen += [str(c.exception), repr(c.exception), "".join(traceback.format_exception(c.exception))]
         for op in (FakeOpener(exc=OSError(KEY)), FakeOpener(exc=ValueError(KEY)), FakeOpener(body=KEY.encode())):
             with self.assertRaises(A.AssistantError) as c:
-                A.ask(cfg, "", MSG, opener=op)
+                fw_ask(cfg, "", MSG, opener=op)
             seen += [str(c.exception), repr(c.exception), "".join(traceback.format_exception(c.exception))]
         for e in ("", "http://u:" + KEY + "@127.0.0.1:1/", "http://" + KEY + ".evil.com:80/"):
             with self.assertRaises(A.PolicyError) as c:
@@ -626,6 +643,10 @@ class TestAssistantCLI(Env):
     def test_test_sends_one_fixed_message_and_reports_ok_or_the_phrase(self):
         A.set_local(self.paths, "http://127.0.0.1:11434/v1/chat/completions", "m"); A.use(self.paths, "local")
         op = FakeOpener()
+        code, out, _ = self.run_cli(["assistant", "test"], PW, opener=op)
+        self.assertEqual((code, op.calls), (1, 0))      # no firewall rule yet: blocked, nothing connected
+        self.assertIn("firewall", out)
+        F.add_rule(self.paths, "os:assistant", "127.0.0.1", 11434, "loopback")
         code, out, _ = self.run_cli(["assistant", "test"], PW, opener=op)
         self.assertEqual((code, op.calls), (0, 1))
         self.assertIn("ok", out)

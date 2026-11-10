@@ -56,9 +56,6 @@ def handle(conn: socket.socket, policy: SandboxPolicy):
     app = KApp(_recv_exact(conn, h["size"]))
     if app.manifest.name != h.get("name"):
         raise KAppError("app name does not match header")
-    if "network" in app.manifest.permissions:
-        # Cells have no network device at all; the permission can't be honoured.
-        policy.allow_network = False
     p = loader.plan(app, conn.fileno(), h["mode"])
     return loader.launch(p, policy, log_path=None)
 

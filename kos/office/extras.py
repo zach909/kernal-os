@@ -12,8 +12,6 @@ import json
 import re
 import signal
 import time
-import urllib.error
-import urllib.request
 
 from . import llm, tools
 from .docs import Library
@@ -283,7 +281,7 @@ class SearchLibrary(Library):
         if self.ask and res:
             if llm.configured(cfg):
                 ctx = "\n\n".join(f"[{n}]\n{self.load(n)[:3000]}" for n, _s, _x in res[:3])
-                try: lines = ["ANSWER:", *wrap(llm.ask(cfg, "Answer the question using only the context. Cite document names in [brackets]. Say so if the answer is not in the context.", [{"role": "user", "content": f"Question: {q}\n\nContext:\n{ctx}"}]), 74), "", "SOURCES:"] + lines
+                try: lines = ["ANSWER:", *wrap(llm.ask(self.host, cfg, "Answer the question using only the context. Cite document names in [brackets]. Say so if the answer is not in the context.", [{"role": "user", "content": f"Question: {q}\n\nContext:\n{ctx}"}]), 74), "", "SOURCES:"] + lines
                 except llm.LLMError as e: lines = [f"(model error: {e})", ""] + lines
             else: lines = ["(no model configured - showing ranked passages; connect one in the model settings of an assistant app)", ""] + lines
         return ("push", TextView(f"Search: {q}", lines))
@@ -332,9 +330,9 @@ class Dashboard(Screen):
         elif k == "escape": return ("quit",)
 
 
-API_SPEC = Spec("requests", "API requests", "request", [Field("name", "Name", required=True), Field("method", "Method", "choice", ("GET", "POST", "PUT", "PATCH", "DELETE"), "GET"),
+API_SPEC = Spec("requests", "API requests", "request", [Field("name", "Name", required=True), Field("method", "Method", "choice", ("GET", "POST"), "GET"),
                 Field("url", "URL", "url", required=True), Field("headers", "Headers (K: V per line)", "long"), Field("body", "Body", "long"), Field("pick", "Pick JSON path (a.b.0.c)")],
-                list_cols=("name", "method", "url"), scope="Needs network permission. Sends exactly the request you wrote.")
+                list_cols=("name", "method", "url"), scope="Needs the network permission AND a firewall rule for this app. The OS sends exactly the request you wrote (https, GET/POST).")
 
 
 def json_pick(obj, path: str):
@@ -364,13 +362,19 @@ class ApiTool(RecordList):
         return super().key(k)
 
     def send(self, r: dict) -> list:
+        if r["method"] not in ("GET", "POST"):
+            return ["only GET and POST can be sent: the OS makes the request (https only) for this app"]
         hs = {k.strip(): v.strip() for k, v in (h.split(":", 1) for h in r.get("headers", "").replace("\\n", "\n").split("\n") if ":" in h)}
-        body = r.get("body", "").replace("\\n", "\n").encode() or None
-        req = urllib.request.Request(r["url"], data=body, headers=hs, method=r["method"]); t = time.time()
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp: status, hdrs, raw = resp.status, dict(resp.headers), resp.read(100_000)
-        except urllib.error.HTTPError as e: status, hdrs, raw = e.code, dict(e.headers), e.read(100_000)
-        except (urllib.error.URLError, OSError, ValueError) as e: return [f"request failed: {type(e).__name__} - does this app have network access?"]
+        body = r.get("body", "").replace("\\n", "\n")
+        t = time.time()
+        ok, got = self.host.fetch(r["url"], r["method"], hs, body)
+        if not ok:
+            why = {"blocked": "blocked by the firewall (the owner allows it with: kos firewall allow app:NAME HOST PORT --proto https)",
+                   "refused": "refused (no network permission, or the certificate was not verified)",
+                   "bad-url": "not allowed (https URL only; headers limited to accept, content-type, authorization, x-api-key, anthropic-version, user-agent)",
+                   "redirect": "the server redirected (refused)", "too-big": "the reply was too big"}.get(got, "could not reach the server")
+            return [f"request failed: {why}"]
+        status, hdrs, raw = got["status"], {"content-type": got["content_type"]}, got["body"][:100_000]
         text = raw.decode("utf-8", "replace"); out = [f"HTTP {status}   {int((time.time() - t) * 1000)} ms   {len(raw)} bytes", ""] + [f"{k}: {v}" for k, v in list(hdrs.items())[:12]] + [""]
         try:
             data = json.loads(text)
