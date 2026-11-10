@@ -83,6 +83,10 @@ ACTIONS: dict[str, str] = {
     "sysinfo.read": "let an app read facts about this computer",
     "firewall.change": "change the firewall rules",
     "firewall.read": "let an app read the firewall rules and log",
+    "credential.list": "let an app list the stored credential names",
+    "credential.get": "reveal a stored credential to an app",
+    "credential.add": "store a credential for an app",
+    "credential.delete": "delete a stored credential for an app",
 }
 
 
@@ -498,12 +502,13 @@ class Authority:
             self._throttle = Throttle(self.paths, base=self.store.throttle_base())
         return self._throttle
 
-    def authorize(self, action: str, target: str = "") -> Grant:
+    def authorize(self, action: str, target: str = "", *, shown: str = "") -> Grant:
+        """``shown`` is extra text for the prompt ONLY (e.g. which credential); it is never audited."""
         if action not in ACTIONS:
             raise AuthorizationDenied(f"unknown action {action!r}")
         if not self.store.exists():
             raise AuthError("no password has been set up (run: kos setup)")
-        label = ACTIONS[action] + (f" '{target}'" if target else "")
+        label = ACTIONS[action] + (f" '{target}'" if target else "") + (f" - {shown}" if shown else "")
         for _ in range(self.MAX_ATTEMPTS):
             self.throttle.wait(self.prompter.info)
             password = self.prompter.password(f"Password to {label}: ")
@@ -519,4 +524,4 @@ class Authority:
             self.audit.record(action, target, "bad-password")
             self.prompter.info("Wrong password.")
         self.audit.record(action, target, "denied")
-        raise AuthorizationDenied(f"not authorized to {label}")
+        raise AuthorizationDenied("not authorized to " + ACTIONS[action] + (f" '{target}'" if target else ""))

@@ -384,7 +384,10 @@ class TestNetworkAndSettings(Env):
         install_fake(self.paths, "web", permissions=["network"])
         install_fake(self.paths, "quiet")
         (self.paths.state).mkdir(parents=True, exist_ok=True)
-        A.set_api(self.paths, "anthropic", "", "claude-x", self.SECRET_KEY)
+        from kos.auth import Authority, Throttle
+        from kos.prompt import ScriptedPrompter
+        g = Authority(self.paths, ScriptedPrompter([PW]), Throttle(self.paths, base=0)).authorize("assistant.config", "set api")
+        A.set_api(self.paths, "anthropic", "", "claude-x", self.SECRET_KEY, g)   # the key is sealed under the password now
         A.use(self.paths, "api")
         F.add_rule(self.paths, "app:web", "example.org", 443, "https")
         F.add_rule(self.paths, "os:assistant", "api.anthropic.com", 443, "https")

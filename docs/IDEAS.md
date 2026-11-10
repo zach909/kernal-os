@@ -10,8 +10,8 @@ land instead of getting lost in chat.
 ## Backlog - not started yet
 
 - **Backup follow-ups.** Encrypt blob bodies with a password-derived key
-  instead of relying on LUKS2 + 0700 (needs a streaming AEAD; stdlib has none,
-  so this wants the Rust port first). Restore a whole folder/snapshot in one
+  instead of relying on LUKS2 + 0700 (needs a streaming AEAD; `cryptography` is now a
+  dependency and kos/crypto.py seals small blobs, but backup bodies are large, so this still wants a streaming design). Restore a whole folder/snapshot in one
   password rather than per item. A "share this folder with the app" permission
   (see the per-resource permissions item below) so the `backup` app could be
   handed a folder instead of asking the OS to read a path. Garbage-collect

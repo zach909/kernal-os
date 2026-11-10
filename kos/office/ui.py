@@ -37,6 +37,11 @@ class Host:
         """Ask the OS to show (list/log) or change (allow/remove; the OS asks the password each time) the firewall rules.
         -> (True, dict) or (False, short reason)."""
         return (False, "refused")
+    def credential(self, op: str, label: str = "", username: str = "", secret: str = "", url: str = "",
+                   notes: str = "") -> tuple:
+        """Ask the OS for stored credentials (needs 'credentials'). list: the OS asks the password once; get/add/delete:
+        every time. -> (True, dict with entries / entry / detail) or (False, short reason)."""
+        return (False, "refused")
     def fetch(self, url: str, method: str = "GET", headers: Optional[dict] = None, body: str = "") -> tuple:
         """One https request made by the OS for this app (needs 'network'; the firewall decides first).
         -> (True, {"status", "content_type", "body": bytes}) or (False, blocked/refused/unreachable/...)."""
@@ -70,6 +75,8 @@ class AppHost(Host):
     def sysinfo(self, topic): return self.app.sysinfo(topic)
     def fetch(self, url, method="GET", headers=None, body=""): return self.app.fetch(url, method, headers, body)
     def firewall(self, op, who="", host="", port=0, proto=""): return self.app.firewall(op, who, host, port, proto)
+    def credential(self, op, label="", username="", secret="", url="", notes=""):
+        return self.app.credential(op, label, username, secret, url, notes)
 
 
 class FakeHost(Host):
@@ -83,6 +90,8 @@ class FakeHost(Host):
         self.sysinfo_calls: list = []
         self.firewall_fn = None             # tests inject (op, who, host, port, proto) -> (ok, dict or reason); default: refused
         self.firewall_calls: list = []
+        self.credential_fn = None           # tests inject (op, label, username, secret, url, notes) -> (ok, dict or reason); default: refused
+        self.credential_calls: list = []
         self.fetch_fn = None                # tests inject (url, method, headers, body) -> (ok, dict or reason); default: refused
         self.fetch_calls: list = []
         self.storage = storage              # a real kos.spaces.AppStorage: shared spaces are then truly enforced
@@ -165,6 +174,9 @@ class FakeHost(Host):
     def firewall(self, op, who="", host="", port=0, proto=""):
         self.firewall_calls.append((op, who, host, port, proto))
         return self.firewall_fn(op, who, host, port, proto) if self.firewall_fn else (False, "refused")
+    def credential(self, op, label="", username="", secret="", url="", notes=""):
+        self.credential_calls.append((op, label, username, secret, url, notes))
+        return self.credential_fn(op, label, username, secret, url, notes) if self.credential_fn else (False, "refused")
     def sysinfo(self, topic):
         self.sysinfo_calls.append(topic)
         return self.sysinfo_fn(topic) if self.sysinfo_fn else (False, "refused")

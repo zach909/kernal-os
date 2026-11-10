@@ -170,7 +170,7 @@ Shared folders: an app that **owns** one creates it (and its permission); an app
 
 Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Every app here also has the built-in agent (Ctrl-N). `docs/CAPABILITIES.md` maps every capability that was asked for to the app, OS command or reason that covers it.
 
-**92 products: 16 full, 56 partial, 20 not built.**
+**92 products: 16 full, 57 partial, 19 not built.**
 
 | Product | App | Scope | What it is / what it is not |
 |---|---|---|---|
@@ -244,7 +244,7 @@ Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Eve
 | System Information and Diagnostics | `system-information` | partial | Shows kernel, Python and KOS versions, memory, load and sandbox checks with OK / NOT OK verdicts, like `kos doctor`. Read-only; the OS reads the facts after your password. No host name or user names. |
 | Software Updates | `software-updates` | partial | Reads installed versions, you paste `name version` lines, it shows up to date, update available, would-be downgrade or unknown, and the `kos update FILE` command. It cannot download or install; `kos update` needs your password. |
 | Firewall Management | `firewall-management` | partial | Shows firewall rules and recent allowed/blocked decisions; adds or removes app: and os: rules. Each change goes through the OS password prompt with the exact rule. A front end over `kos firewall`, NOT a packet filter. |
-| Credential Manager | - | none | Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto library, which is an open owner decision (README). No `kos` command covers it. |
+| Credential Manager | `credential-manager` | partial | Stores logins encrypted at rest under a key protected by your password; each secret is revealed only after the password, every time. No autofill, no sync, no browser integration, no sharing. Encryption protects the files at rest, NOT a compromised running system. |
 | Device Pairing | - | none | Not an app: apps cannot reach Bluetooth or other devices, and KOS has no pairing support. Nothing covers it; `kos usb` only writes boot images to USB sticks. |
 | Window and Desktop Management | - | none | Not an app: there is no window manager. `kos boot desktop` runs the taskbar and App Library, which are themselves apps that ask the OS to open, close or focus apps. |
 | Camera and Photo Booth | - | none | Needs a camera. KOS apps never open devices and the command protocol carries only text and pixels, so there is no way to get a frame in. Nothing covers it today. |

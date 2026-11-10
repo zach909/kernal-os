@@ -46,6 +46,14 @@ class Paths:
         return self.state / "backup"
 
     @property
+    def keyring_file(self) -> Path:
+        return self.state / "keyring.bin"
+
+    @property
+    def credentials_file(self) -> Path:
+        return self.state / "credentials.bin"
+
+    @property
     def auth_file(self) -> Path:
         return self.etc / "auth.json"
 

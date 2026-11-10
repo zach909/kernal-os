@@ -1,14 +1,16 @@
 """pack_os: OS-management titles. Eight are real apps that ask the OS for facts with the narrow `sysinfo`
 permission (the OS reads them after the owner's password, audited; the app never opens /proc, /sys or a
-device), and one (Firewall Management) uses the narrow `firewall` permission, where every change goes through
-the OS's own password prompt. None has `system` or a network of its own. Four stay `none`."""
+device), one (Firewall Management) uses the narrow `firewall` permission, where every change goes through
+the OS's own password prompt, and one (Credential Manager) uses the narrow `credentials` permission: the OS keeps
+the secrets encrypted and asks the password to reveal, add or delete. None has `system` or a network of its own.
+Three stay `none`."""
 
 from __future__ import annotations
 
 import re
 
 from .packkit import app, none
-from .ui import bar, table, Screen, Prompt
+from .ui import bar, table, Screen, Prompt, Confirm, ListNav
 
 
 def _size(n) -> str:
@@ -482,6 +484,129 @@ def _make_firewall(host, e):
     return FirewallScreen(host)
 
 
+# ---- Credential Manager ----------------------------------------------------------------------------------
+class Reveal(Screen):
+    """Shows one credential after the OS asked the password for it. Held only by this screen: the app never
+    stores a secret in its vault or exports, and nothing here is sent to the Ctrl-N agent. Any key closes it."""
+
+    def __init__(self, entry):
+        self.title, self.entry = "Credential", entry
+        self.help = "any key closes (the secret is dropped from this app)"
+
+    def render(self, w, h):
+        e = self.entry
+        return ["", f"  Label    : {e.get('label', '')}", f"  User     : {e.get('username', '')}",
+                f"  Secret   : {e.get('secret', '')}", f"  URL      : {e.get('url', '')}",
+                f"  Notes    : {e.get('notes', '')}", "", "  Nothing here is copied, filled in or synced anywhere."]
+
+    def key(self, k):
+        self.entry = {}
+        return ("pop", None)
+
+
+class CredentialScreen(Screen):
+    """Lists names only. Secrets are fetched one at a time, after the OS asks your password each time."""
+
+    def __init__(self, host):
+        self.host_, self.title = host, "Credential Manager"
+        self.rows, self.note, self.nav = [], "", ListNav(0)
+        self.help = "a add   Enter reveal   d delete   r refresh   up/down select   Esc quit"
+
+    def on_enter(self):
+        self.load()
+
+    def _ask(self, *a):
+        try:
+            ok, d = self.host_.credential(*a)
+        except Exception:
+            ok, d = False, "unavailable"
+        return (ok and isinstance(d, dict)), d
+
+    def _why(self, d):
+        return d if isinstance(d, str) and re.fullmatch(r"[a-z-]{1,16}", d) else "refused"
+
+    def load(self):
+        ok, d = self._ask("list")
+        rs = d.get("entries") if ok else None
+        self.rows = [r for r in rs if isinstance(r, dict)][:500] if isinstance(rs, list) else []
+        self.nav.resize(len(self.rows))
+        if not ok:
+            self.note = f"the OS did not give the list ({self._why(d)}); open the app again to be asked"
+
+    def render(self, w, h):
+        out = ["Stored encrypted by the OS under a key your password protects. Revealing, adding or deleting asks",
+               "your password in the OS prompt, every time. No autofill, no sync, no browser, no sharing.", ""]
+        if self.note:
+            out += ["  >> " + self.note, ""]
+        rows = [[("> " if i == self.nav.sel else "  ") + str(r.get("label", "?")), r.get("username", ""), r.get("url", "")]
+                for i, r in enumerate(self.rows)]
+        out += ["  " + l for l in table(rows, ["label", "user", "url"])] if rows else ["  (nothing stored)"]
+        return out[:h]
+
+    def _cur(self):
+        return self.rows[self.nav.sel] if self.rows else None
+
+    def _result(self, res, okmsg):
+        ok, d = res
+        self.note = okmsg if ok else f"not done ({self._why(d)})"
+        self.load()
+
+    def _add_flow(self):
+        st = {}
+
+        def label(v):
+            st["label"] = v.strip(); return ("push", Prompt("Add", "User name (optional):", on_done=user))
+
+        def user(v):
+            st["username"] = v.strip(); return ("push", Prompt("Add", "URL (optional, just a note; nothing opens it):", on_done=url))
+
+        def url(v):
+            st["url"] = v.strip(); return ("push", Prompt("Add", "Notes (optional, one line):", on_done=notes))
+
+        def notes(v):
+            st["notes"] = v.strip(); return ("push", Prompt("Add", "Secret (hidden; the OS then asks your password):",
+                                                             secret=True, on_done=secret))
+
+        def secret(v):
+            if not st.get("label") or not v:
+                self.note = "not sent: a label and a secret are needed"; return None
+            self.note = ""
+            self._result(self.host_.credential("add", st["label"], st["username"], v, st["url"], st["notes"]), "stored")
+            st.clear()
+            return None
+        return ("push", Prompt("Add", "Label (a name you will recognise):", on_done=label))
+
+    def _reveal(self):
+        cur = self._cur()
+        if not cur:
+            return None
+        ok, d = self._ask("get", str(cur.get("label", "")))
+        if ok and isinstance(d.get("entry"), dict):
+            return ("push", Reveal(d["entry"]))
+        self.note = f"not shown ({self._why(d)})"
+        return None
+
+    def _delete(self):
+        cur = self._cur()
+        if not cur:
+            return None
+        label = str(cur.get("label", ""))
+        return ("push", Confirm(f"Delete '{label}'? (the OS asks your password)",
+                                lambda: self._result(self.host_.credential("delete", label), "deleted")))
+
+    def key(self, k):
+        if k == "r": self.note = ""; self.load()
+        elif k == "a": return self._add_flow()
+        elif k == "enter": return self._reveal()
+        elif k == "d": return self._delete()
+        elif self.nav.key(k): return None
+        elif k == "q": return ("quit",)
+
+
+def _make_credentials(host, e):
+    return CredentialScreen(host)
+
+
 ENTRIES: list = [
     app("Device Settings", _make_settings, "partial",
         "A read-only summary: assistant on/off, permitted apps, shared-folder grants, extensions, firewall rule count. "
@@ -518,9 +643,11 @@ ENTRIES: list = [
         "Shows firewall rules and recent allowed/blocked decisions; adds or removes app: and os: rules. Each change goes "
         "through the OS password prompt with the exact rule. A front end over `kos firewall`, NOT a packet filter.",
         name="firewall-management", perms=("firewall",)),
-    none("Credential Manager",
-         "Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto "
-         "library, which is an open owner decision (README). No `kos` command covers it."),
+    app("Credential Manager", _make_credentials, "partial",
+        "Stores logins encrypted at rest under a key protected by your password; each secret is revealed only after "
+        "the password, every time. No autofill, no sync, no browser integration, no sharing. Encryption protects the "
+        "files at rest, NOT a compromised running system.",
+        name="credential-manager", perms=("credentials",)),
     none("Device Pairing",
          "Not an app: apps cannot reach Bluetooth or other devices, and KOS has no pairing support. "
          "Nothing covers it; `kos usb` only writes boot images to USB sticks."),

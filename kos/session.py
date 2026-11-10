@@ -297,6 +297,9 @@ class Session:
         if self.bridge is None and msg["action"] == "firewall":
             self._send({"cmd": "firewall", "ok": False, "error": "refused"})
             return
+        if self.bridge is None and msg["action"] == "credential":
+            self._send({"cmd": "credential", "ok": False, "error": "refused"})
+            return
         if self.bridge is None and msg["action"] == "sysinfo":
             self._send({"cmd": "sysinfo", "ok": False, "error": "refused"})
             return

@@ -18,7 +18,7 @@ class TestPackOs(unittest.TestCase):
         self.assertEqual(len(TITLES), 12)
         self.assertEqual([e.title for e in ENTRIES], TITLES)
 
-    def test_eight_are_real_apps_and_four_stay_none(self):
+    def test_nine_are_real_apps_and_three_stay_none(self):
         sysinfo_apps = {"Battery and Power", "Storage and Disk Management", "Process and Resource Monitor",
                         "System Information and Diagnostics", "Device Settings", "Network and Wireless",
                         "Software Updates"}
@@ -29,12 +29,14 @@ class TestPackOs(unittest.TestCase):
                 self.assertIn("password", e.note, e.title)
             elif e.title == "Firewall Management":
                 self.assertEqual((e.scope, e.perms), ("partial", ("firewall",)))
+            elif e.title == "Credential Manager":
+                self.assertEqual((e.scope, e.perms), ("partial", ("credentials",)))
             else:
                 self.assertEqual(e.scope, "none", e.title)
                 self.assertEqual(e.perms, (), e.title)
-        self.assertEqual(sum(e.scope == "none" for e in ENTRIES), 4)
+        self.assertEqual(sum(e.scope == "none" for e in ENTRIES), 3)
         self.assertEqual(sorted(e.title for e in ENTRIES if e.scope == "none"),
-                         ["Credential Manager", "Device Pairing", "Printer Management", "Window and Desktop Management"])
+                         ["Device Pairing", "Printer Management", "Window and Desktop Management"])
         for e in ENTRIES:
             self.assertLessEqual(len(e.name), 32, e.title)
             self.assertNotIn("system", e.perms)

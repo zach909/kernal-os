@@ -57,14 +57,12 @@ mouse/keyboard --> evdev (OS only) --> key/pointer/button commands --> app
 | Kernel / sandbox | `kos/sandbox.py` | Landlock + namespaces; if the kernel can't enforce it, the app does not run. |
 | Hardware | OS only | Nothing but the OS touches it. |
 
-**Encryption status: not done yet.** The command channel is plain
-newline-delimited JSON over a socket (`Channel` in `kos/protocol.py`). The
-parties that really need it are the ones that are not just parent and child on
-one kernel: the broker socket under `<state>/instances/` (any process running
-as the owner can connect and `attach`), and cell vsock. Do not invent a cipher
-or use one from memory. The standard library has no authenticated encryption;
-adding a vetted library (for example `cryptography`) is a decision for the
-owner. Ask before adding a dependency.
+**Encryption status: partly done.** The owner approved one vetted dependency, `cryptography`, and `kos/crypto.py` uses it for
+encryption at rest (AES-256-GCM, HKDF; a password-wrapped data key in `keyring.bin`) for exactly two stores: the assistant API key and
+the Credential Manager. A missing library fails closed, never to plaintext. Still plain: the command channel (`Channel` in
+`kos/protocol.py`, newline-delimited JSON over a socket), the broker socket under `<state>/instances/` (any process running as the
+owner can connect and `attach`), cell vsock, every app's vault and the audit log. Do not invent a cipher or use one from memory; use
+`kos/crypto.py`. Adding any further dependency is still a decision for the owner: ask first.
 
 ## Layer skills
 

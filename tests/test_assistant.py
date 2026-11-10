@@ -41,6 +41,12 @@ KEY = "sk-SECRET-KEY-0123456789"
 MSG = [{"role": "user", "content": "SECRET-MESSAGE-TEXT hello"}]
 
 
+def grant(paths, pw=PW):
+    """A real password grant (the API key is now sealed under the password's master key: kos/crypto.py).
+    Justification for the signature change: set_api needs the master to encrypt the key."""
+    return Authority(paths, ScriptedPrompter([pw]), Throttle(paths, base=0)).authorize("assistant.config", "set api")
+
+
 class Env(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -476,7 +482,7 @@ class TestAssistantBridge(Env):
         self.assertEqual(self.ask(b, PW)["error"], "bad-reply")
 
     def test_audit_has_app_and_kind_but_never_message_text_or_key(self):
-        A.set_api(self.paths, "openai", "https://api.example.com/v1/chat/completions", "m", KEY)
+        A.set_api(self.paths, "openai", "https://api.example.com/v1/chat/completions", "m", KEY, grant(self.paths))
         A.use(self.paths, "api")
         b = self.bridge()
         self.assertTrue(self.ask(b, PW)["ok"])
@@ -525,7 +531,7 @@ class TestConfigFile(Env):
         self.assertEqual(A.status(self.paths)["active"], "off")
 
     def test_file_is_mode_0600_even_if_an_old_one_was_looser(self):
-        A.set_api(self.paths, "anthropic", "", "claude-x", KEY)
+        A.set_api(self.paths, "anthropic", "", "claude-x", KEY, grant(self.paths))
         f = A.config_path(self.paths)
         self.assertEqual(f.stat().st_mode & 0o777, 0o600)
         os.chmod(f, 0o644)
@@ -535,10 +541,10 @@ class TestConfigFile(Env):
 
     def test_bad_endpoints_are_refused_at_set_time_and_nothing_is_saved(self):
         with self.assertRaises(A.PolicyError): A.set_local(self.paths, "http://example.com:80/v1", "m")
-        with self.assertRaises(A.PolicyError): A.set_api(self.paths, "openai", "http://api.example.com/v1", "m", KEY)
-        with self.assertRaises(A.ConfigError): A.set_api(self.paths, "mystery", "", "m", KEY)
-        with self.assertRaises(A.ConfigError): A.set_api(self.paths, "openai", "", "m", "")
-        with self.assertRaises(A.ConfigError): A.set_api(self.paths, "openai", "", "m", "k\x1b[2J")
+        with self.assertRaises(A.PolicyError): A.set_api(self.paths, "openai", "http://api.example.com/v1", "m", KEY, grant(self.paths))
+        with self.assertRaises(A.ConfigError): A.set_api(self.paths, "mystery", "", "m", KEY, grant(self.paths))
+        with self.assertRaises(A.ConfigError): A.set_api(self.paths, "openai", "", "m", "", grant(self.paths))
+        with self.assertRaises(A.ConfigError): A.set_api(self.paths, "openai", "", "m", "k\x1b[2J", grant(self.paths))
         with self.assertRaises(A.ConfigError): A.set_local(self.paths, "http://127.0.0.1:1/v1", "bad model!")
         self.assertFalse(A.config_path(self.paths).exists())
 
@@ -553,7 +559,7 @@ class TestConfigFile(Env):
             self.assertEqual(A.load(self.paths)["active"], "off")
 
     def test_status_never_shows_the_key(self):
-        A.set_api(self.paths, "anthropic", "", "claude-x", KEY)
+        A.set_api(self.paths, "anthropic", "", "claude-x", KEY, grant(self.paths))
         A.use(self.paths, "api")
         s = A.status(self.paths)
         self.assertTrue(s["key_set"])
@@ -577,7 +583,7 @@ class TestAssistantCLI(Env):
         return code, out.getvalue(), err.getvalue()
 
     def test_status_needs_no_password_and_never_prints_the_key(self):
-        A.set_api(self.paths, "anthropic", "", "claude-x", KEY)
+        A.set_api(self.paths, "anthropic", "", "claude-x", KEY, grant(self.paths))
         A.use(self.paths, "api")
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"KOS_ROOT": self.tmp.name}), \
@@ -632,7 +638,9 @@ class TestAssistantCLI(Env):
         with mock.patch.dict(os.environ, {"KOS_ASSISTANT_KEY": "from-env", "ANTHROPIC_API_KEY": "from-env2"}):
             code, out, err = self.run_cli(["assistant", "set", "api", "--provider", "anthropic", "--model", "claude-x"], PW, KEY)
         self.assertEqual(code, 0)
-        self.assertEqual(A.load(self.paths)["api"]["key"], KEY)
+        # layout changed on purpose: the key is stored sealed (key_enc), never as plaintext "key"
+        self.assertNotIn("key", A.load(self.paths)["api"])
+        self.assertNotIn(KEY.encode(), A.config_path(self.paths).read_bytes())
         self.assertEqual(len(self.prompter.asked), 2)
         self.assertNotIn(KEY, out + err)
         self.assertEqual(A.config_path(self.paths).stat().st_mode & 0o777, 0o600)

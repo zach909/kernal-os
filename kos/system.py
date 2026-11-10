@@ -29,8 +29,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import base64
+import copy
 
-from . import assistant, backup, cache, firewall, netfetch, sysinfo
+from . import assistant, backup, cache, credentials, crypto, firewall, netfetch, sysinfo
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
@@ -45,6 +46,7 @@ from .sandbox import SandboxError, SandboxPolicy
 from .store import AppStore, TamperedError
 
 MAX_LISTED = 200
+MAX_CRED_DENIALS = 2        # denied password prompts for credential requests per app instance before it is not asked again
 MAX_FW_DENIALS = 2          # denied password prompts for firewall changes per app instance before they stop being asked
 
 
@@ -155,7 +157,7 @@ class SystemBridge:
     def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
                  system: bool = True, assistant: bool = False, opener=None,
                  sysinfo: bool = False, network: bool = False, fetch_context=None,
-                 firewall: bool = False):
+                 firewall: bool = False, credentials: bool = False):
         self.paths = paths
         self._spawner = spawner
         self.app = app or "app"
@@ -164,6 +166,10 @@ class SystemBridge:
         self.sysinfo = sysinfo           # manifest 'sysinfo' permission: ONLY the sysinfo request
         self.network = network           # manifest 'network' permission: ONLY the fetch request (OS-brokered https)
         self.firewall = firewall         # manifest 'firewall' permission: ONLY the firewall request
+        self.credentials = credentials   # manifest 'credentials' permission: ONLY the credential request
+        self._cred_denied = 0            # denied/cancelled credential prompts this instance; at MAX_CRED_DENIALS it is latched off
+        self._cred_rows: Optional[list] = None    # list rows (no secrets) once the owner allowed `list` for this instance
+        self._asst_key: Optional[tuple] = None    # (fingerprint, decrypted API key): memory only, this instance only
         self._fw_granted = False         # list/log: one password per app instance; allow/remove: every time
         self._fw_refused = False
         self._fw_denied = 0              # denied/cancelled allow/remove prompts this instance; at MAX_FW_DENIALS it is latched off
@@ -348,7 +354,7 @@ class SystemBridge:
             audit(kind, "refused")
             return fail("not-configured")
         try:
-            assistant.build_request(cfg, "", [{"role": "user", "content": "x"}])   # policy + completeness, no network
+            assistant.build_request(assistant.precheck_cfg(cfg), "", [{"role": "user", "content": "x"}])   # policy + completeness, no network
         except assistant.AssistantError as e:
             audit(kind, "refused")
             return fail(e.code)
@@ -365,7 +371,16 @@ class SystemBridge:
             return fail("refused")
         if self._granted != fp:
             try:
-                authority.authorize("assistant.ask", f"{self.app} ({kind})").close()   # audits itself
+                with authority.authorize("assistant.ask", f"{self.app} ({kind})") as g:   # audits itself
+                    self._asst_key = None
+                    if kind == "api":      # the key is opened here, while the password was just typed
+                        try:
+                            assistant.migrate(self.paths, g)
+                            cfg = assistant.load(self.paths)
+                            self._asst_key = (fp, assistant.with_key(self.paths, g, cfg)["api"]["key"])
+                        except (assistant.AssistantError, assistant.ConfigError):
+                            audit(kind, "failed:key")
+                            return fail("refused")
             except (AuthorizationDenied, AuthError):
                 self._refused = fp
                 return fail("refused")
@@ -373,11 +388,83 @@ class SystemBridge:
         if not audit(kind, "allowed"):
             return fail("refused")
         try:
+            if kind == "api":
+                if not self._asst_key or self._asst_key[0] != fp:
+                    return fail("refused")
+                cfg = copy.deepcopy(cfg)
+                cfg["api"].pop("key_enc", None)
+                cfg["api"]["key"] = self._asst_key[1]
             text = assistant.ask(cfg, req["system"], req["messages"], opener=self._opener, paths=self.paths)
         except assistant.AssistantError as e:
             audit(kind, "failed:" + e.code)
             return fail(e.code)
         reply({"cmd": "assistant", "ok": True, "text": text})
+
+    def _credential(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
+        op = req.get("op")
+        op = op if isinstance(op, str) and op in credentials.OPS else "-"     # never audit app text
+
+        def fail(code: str) -> None:
+            reply({"cmd": "credential", "ok": False, "error": code})
+
+        def audit(outcome: str) -> bool:
+            try:       # app and operation only: never the label, a secret or any value
+                authority.audit.record("credential.request", f"{self.app} {op}", outcome)
+                return True
+            except OSError:
+                return False
+
+        if not self.credentials or op == "-":
+            audit("refused")
+            return fail("refused")
+        if self._cred_denied >= MAX_CRED_DENIALS:       # an app must not be able to nag for a password
+            audit("refused")
+            return fail("refused")
+        if op == "list" and self._cred_rows is not None:
+            if not audit("allowed"):
+                return fail("refused")
+            return reply({"cmd": "credential", "ok": True, "entries": [dict(r) for r in self._cred_rows]})
+        shown = f"{op} '{req['label']}' for {self.app}" if op in ("get", "delete") else \
+            (f"add '{req['label']}' for {self.app}" if op == "add" else f"list names for {self.app}")
+        out: dict = {}
+        try:
+            with authority.authorize("credential." + op, self.app, shown=shown) as g:    # EVERY time except list
+                try:
+                    dek = crypto.dek_for(self.paths, g, create=(op == "add"))
+                except crypto.CryptoError:
+                    if op == "list" and not credentials.exists(self.paths) and not crypto.keyring_exists(self.paths):
+                        dek = None            # nothing stored yet
+                    else:
+                        raise
+                try:
+                    if op == "list":
+                        out = {"entries": credentials.list_rows(self.paths, dek) if dek is not None else []}
+                        self._cred_rows = out["entries"]
+                    elif op == "get":
+                        out = {"entry": credentials.get(self.paths, dek, req["label"])}
+                    elif op == "add":
+                        rows = credentials.add(self.paths, dek, {k: req[k] for k in credentials.FIELDS})
+                        self._cred_rows = rows if self._cred_rows is not None else None   # list stays password-gated
+                        out = {"detail": "stored"}
+                    else:
+                        rows = credentials.delete(self.paths, dek, req["label"])
+                        self._cred_rows = rows if self._cred_rows is not None else None
+                        out = {"detail": "deleted"}
+                finally:
+                    if dek is not None:
+                        crypto.wipe(dek)
+        except (AuthorizationDenied, AuthError):
+            self._cred_denied += 1
+            return fail("refused")
+        except credentials.CredentialError as e:
+            audit("failed:" + e.code)
+            return fail(e.code)
+        except (crypto.CryptoError, OSError):
+            audit("failed:unavailable")
+            return fail("unavailable")
+        if not audit("allowed"):
+            return fail("refused")
+        reply({"cmd": "credential", "ok": True, **out})
 
     def handle(self, req: dict, reply: Callable[[dict], None],
                authority: Authority) -> Optional[tuple[str, str]]:
@@ -393,6 +480,9 @@ class SystemBridge:
             return None
         if action == "fetch":
             self._fetch(req, reply, authority)
+            return None
+        if action == "credential":
+            self._credential(req, reply, authority)
             return None
 
         def result(ok: bool, detail: str, **extra) -> None:

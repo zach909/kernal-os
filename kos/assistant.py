@@ -22,10 +22,13 @@ one connection itself, through the policy below. The policy is code, not configu
   the assistant up (``kos assistant set``) adds the matching rule in the same password-authorised action.
 * errors are short fixed phrases. Never the API key, the request or the server's reply.
 
-Gap (README): the key is stored unencrypted in ``<state>/assistant.json`` (mode 0600)
-because KOS has no encryption at rest yet. Use a key you can revoke.
+The API key is never stored in plaintext: ``<state>/assistant.json`` holds ``key_enc`` (base64 of an
+AES-GCM blob sealed under the purpose ``assistant-key``, kos/crypto.py). It is opened only inside a
+password-granted block, and kept in memory for one app instance at most. An older plaintext ``key`` is
+re-encrypted (and removed) the first time a password step touches the file. Encryption protects the file at
+rest, not a compromised running system.
 
-Standard library only. This module deliberately does not import kos.office.
+This module deliberately does not import kos.office.
 """
 
 from __future__ import annotations
@@ -42,7 +45,10 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from . import firewall
+import base64
+import copy
+
+from . import crypto, firewall
 from .paths import Paths, atomic_write
 
 KINDS = ("off", "local", "api")
@@ -288,13 +294,23 @@ def load(paths: Paths) -> dict:
         return cfg
     if d.get("active") in KINDS:
         cfg["active"] = d["active"]
-    for k, fields in (("local", ("endpoint", "model")), ("api", ("provider", "endpoint", "model", "key"))):
+    for k, fields in (("local", ("endpoint", "model")), ("api", ("provider", "endpoint", "model", "key", "key_enc"))):
         if isinstance(d.get(k), dict):
             cfg[k] = {f: d[k][f] for f in fields if isinstance(d[k].get(f), str)}
     return cfg
 
 
+KEY_PURPOSE = "assistant-key"
+
+
+def has_key(cfg: dict) -> bool:
+    api = cfg.get("api") or {}
+    return bool(api.get("key") or api.get("key_enc"))
+
+
 def save(paths: Paths, cfg: dict) -> None:
+    if (cfg.get("api") or {}).get("key"):
+        raise ConfigError("refusing to write a plaintext API key")      # fail closed, whatever the caller did
     paths.state.mkdir(parents=True, exist_ok=True)
     atomic_write(config_path(paths), json.dumps(cfg, indent=2).encode(), mode=0o600)
 
@@ -313,7 +329,58 @@ def set_local(paths: Paths, endpoint: str, model: str) -> None:
     save(paths, cfg)
 
 
-def set_api(paths: Paths, provider: str, endpoint: str, model: str, key: str) -> None:
+def migrate(paths: Paths, grant) -> bool:
+    """Re-encrypt a legacy plaintext key and remove the plaintext. Needs a password grant (the master).
+    Returns True if it changed the file. Fails closed: if it cannot encrypt, the file is left as it was."""
+    cfg = load(paths)
+    key = cfg["api"].get("key")
+    if not key:
+        return False
+    try:
+        dek = crypto.dek_for(paths, grant, create=True)
+        try:
+            enc = base64.b64encode(crypto.seal(dek, KEY_PURPOSE, key.encode("utf-8"))).decode("ascii")
+        finally:
+            crypto.wipe(dek)
+    except crypto.CryptoError as e:
+        raise ConfigError(str(e)) from None
+    del cfg["api"]["key"]
+    cfg["api"]["key_enc"] = enc
+    save(paths, cfg)
+    return True
+
+
+def with_key(paths: Paths, grant, cfg: dict) -> dict:
+    """A copy of ``cfg`` whose api section carries the decrypted key (memory only; never save this copy).
+    Raises AssistantError('not-configured') if there is none, ('refused') if it cannot be decrypted."""
+    out = copy.deepcopy(cfg)
+    api = out.get("api") or {}
+    if out.get("active") != "api" or api.get("key"):
+        return out
+    enc = api.pop("key_enc", "")
+    if not enc:
+        raise AssistantError("not-configured")
+    try:
+        dek = crypto.dek_for(paths, grant, create=False)
+        try:
+            api["key"] = crypto.open_(dek, KEY_PURPOSE, base64.b64decode(enc, validate=True)).decode("utf-8")
+        finally:
+            crypto.wipe(dek)
+    except (crypto.CryptoError, ValueError):
+        raise AssistantError("refused") from None
+    return out
+
+
+def precheck_cfg(cfg: dict) -> dict:
+    """For the no-password completeness check: a key is present (value unknown, so a placeholder)."""
+    out = copy.deepcopy(cfg)
+    if has_key(out):
+        out["api"]["key"] = "x"
+    out["api"].pop("key_enc", None)
+    return out
+
+
+def set_api(paths: Paths, provider: str, endpoint: str, model: str, key: str, grant) -> None:
     if provider not in PROVIDERS:
         raise ConfigError(f"provider must be one of {', '.join(PROVIDERS)}")
     endpoint = endpoint or DEFAULT_ENDPOINTS[provider]
@@ -321,8 +388,17 @@ def set_api(paths: Paths, provider: str, endpoint: str, model: str, key: str) ->
     model = _model(model)
     if not key or len(key) > 512 or _CONTROL_RE.search(key) or not key.isprintable():
         raise ConfigError("the API key is empty, too long or has odd characters")
+    migrate(paths, grant)
+    try:
+        dek = crypto.dek_for(paths, grant, create=True)
+        try:
+            enc = base64.b64encode(crypto.seal(dek, KEY_PURPOSE, key.encode("utf-8"))).decode("ascii")
+        finally:
+            crypto.wipe(dek)
+    except crypto.CryptoError as e:
+        raise ConfigError(str(e)) from None
     cfg = load(paths)
-    cfg["api"] = {"provider": provider, "endpoint": endpoint, "model": model, "key": key}
+    cfg["api"] = {"provider": provider, "endpoint": endpoint, "model": model, "key_enc": enc}
     save(paths, cfg)
 
 
@@ -345,7 +421,7 @@ def use(paths: Paths, kind: str) -> None:
         check_endpoint("local", c["endpoint"])
     if kind == "api":
         c = cfg["api"]
-        if not (c.get("provider") in PROVIDERS and c.get("model") and c.get("key")):
+        if not (c.get("provider") in PROVIDERS and c.get("model") and (c.get("key") or c.get("key_enc"))):
             raise ConfigError("api is not set up yet: kos assistant set api --provider P --endpoint URL --model NAME")
         check_endpoint("api", c.get("endpoint") or DEFAULT_ENDPOINTS[c["provider"]])
     cfg["active"] = kind
@@ -367,11 +443,12 @@ def status(paths: Paths) -> dict:
     return {"active": kind, "endpoint_host": host, "model": c.get("model", ""),
             "firewall_allows": bool(tgt and firewall.allows_now(paths, "os:assistant", *tgt)),
             "provider": c.get("provider", "") if kind == "api" else "",
-            "key_set": bool(cfg["api"].get("key"))}
+            "key_set": has_key(cfg),
+            "key_encrypted": bool(cfg["api"].get("key_enc")) and not cfg["api"].get("key")}
 
 
 def fingerprint(cfg: dict) -> tuple:
-    """What a per-instance grant covers: the kind, endpoint and model (not the key)."""
+    """What a per-instance grant covers: the kind, endpoint, model and which sealed key (a new key asks again)."""
     kind = cfg.get("active")
     c = cfg.get(kind) or {}
-    return (kind, c.get("endpoint", ""), c.get("model", ""))
+    return (kind, c.get("endpoint", ""), c.get("model", ""), c.get("key_enc", ""))

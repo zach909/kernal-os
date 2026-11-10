@@ -60,6 +60,7 @@ from .backup import BackupError, VaultTamperedError
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
+from .crypto import CryptoError
 from .kapp import KApp, KAppError, pack
 from .paths import Paths
 from .permit import PermitError
@@ -115,8 +116,26 @@ def cmd_passwd(args, paths: Paths) -> int:
         new_pw = _new_password(prompter)
         params = _kdf(args)
         with derive_master(new_pw, params) as master:
+            # Order matters: nothing encrypted may become unreadable, whatever stops this half way.
+            # 1. prepare the keyring under the NEW master in memory; if the old master cannot open it we stop
+            #    here with nothing changed. 2. re-seal the apps (as before). 3. STAGE the new keyring beside the
+            #    old one. 4. write the new password file; if that fails, drop the staged keyring (old password and
+            #    old keyring still agree). 5. swap the staged keyring in. A crash between 4 and 5 is healed by
+            #    crypto.unlock(), which finds the old keyring unreadable under the new password, opens the staged
+            #    one and finishes the swap. A crash between 3 and 4 leaves a stale staged file that is ignored.
+            from . import crypto
+            new_ring = crypto.prepare_rewrap(paths, old, master)
             n = store.reseal_all(old, subkey(master, SEAL_KEY_LABEL))
-            authority.store.write(params, master, authority.store.throttle_base())
+            crypto.stage_keyring(paths, new_ring)
+            try:
+                authority.store.write(params, master, authority.store.throttle_base())
+            except BaseException:
+                crypto.abandon_keyring(paths)
+                raise
+            try:
+                crypto.finish_keyring(paths)
+            except OSError:
+                eprint("note: the new keyring will be swapped in the next time it is unlocked (nothing is lost)")
     print(f"Password changed; {n} app(s) re-sealed.")
     print("Remember to also change the disk password: cryptsetup luksChangeKey <root device>")
     return 0
@@ -227,9 +246,11 @@ def _bridge_for(paths: Paths, name: str, perms, system: bool | None = None):
     sysinfo = "sysinfo" in perms
     fw = "firewall" in perms              # only "may ask the OS to show / change firewall rules (password)"
     network = "network" in perms          # only "may ask the OS to fetch over https as the firewall allows"
-    if not (system or assistant or sysinfo or network or fw):
+    creds = "credentials" in perms        # only "may ask the OS for stored credentials (password each time for secrets)"
+    if not (system or assistant or sysinfo or network or fw or creds):
         return None
-    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo, network=network, firewall=fw)
+    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo, network=network,
+                        firewall=fw, credentials=creds)
 
 
 def cmd_run(args, paths: Paths) -> int:
@@ -767,7 +788,9 @@ def cmd_assistant(args, paths: Paths) -> int:
             print(f"model     : {s['model']}")
         if s["provider"]:
             print(f"provider  : {s['provider']}")
-        print(f"api key   : {'set' if s['key_set'] else 'not set'}")
+        print("api key   : " + ("set (encrypted)" if s["key_encrypted"] else
+                                "set - key not yet encrypted (the next password step, e.g. `kos assistant use`, encrypts it)"
+                                if s["key_set"] else "not set"))
         if s["active"] != "off":
             print("firewall  : " + ("allows it" if s["firewall_allows"] else
                                     "BLOCKS it (no rule): the owner allows it with `kos firewall allow os:assistant HOST PORT --proto https|loopback`"))
@@ -783,23 +806,27 @@ def cmd_assistant(args, paths: Paths) -> int:
                 rule = A.rule_for("api", ep, args.provider)
         authority, prompter = _authority(paths)
         if op == "use":
-            with authority.authorize("assistant.config", f"use {args.kind}"):
+            with authority.authorize("assistant.config", f"use {args.kind}") as g:
+                A.migrate(paths, g)         # a legacy plaintext key is encrypted the first time a password step sees it
                 A.use(paths, args.kind)
             print(f"assistant is now: {args.kind}")
         elif op == "set":
-            with authority.authorize("assistant.config", f"set {args.kind}"):
+            with authority.authorize("assistant.config", f"set {args.kind}") as g:
+                A.migrate(paths, g)
                 F.add_rule(paths, *rule)          # the matching firewall rule, in the SAME authorised action
                 if args.kind == "local":
                     A.set_local(paths, args.endpoint, args.model)
                 else:
-                    raw = prompter.password("API key (typed hidden, stored unencrypted in this computer's KOS state): ")
-                    A.set_api(paths, args.provider, args.endpoint or "", args.model, (raw or b"").decode("utf-8", "replace").strip())
+                    raw = prompter.password("API key (typed hidden, stored encrypted under a key your password protects): ")
+                    A.set_api(paths, args.provider, args.endpoint or "", args.model,
+                              (raw or b"").decode("utf-8", "replace").strip(), g)
             print(f"saved the {args.kind} settings (switch to it with: kos assistant use {args.kind})")
             print("firewall rule added: " + F.describe(F.check_rule(*rule)))
         else:                 # test
-            with authority.authorize("assistant.config", "test"):
-                cfg = A.load(paths)
+            with authority.authorize("assistant.config", "test") as g:
+                A.migrate(paths, g)
                 try:
+                    cfg = A.with_key(paths, g, A.load(paths))
                     reply = A.ask(cfg, "You are a connection test. Reply with one short word.",
                                   [{"role": "user", "content": "Say ok."}], paths=paths)
                 except A.AssistantError as e:
@@ -904,6 +931,10 @@ def cmd_doctor(args, paths: Paths) -> int:
     running = ", ".join(f.name for f in fw.blocking)
     print(f"firmware control      : {'NO - ' + running + ' running' if running else 'yes'}")
     print(f"password configured   : {ok(PasswordStore(paths).exists())}")
+    from . import crypto
+    print("encryption library    : " + ("yes (cryptography)" if crypto.available()
+                                        else "NO - install python3-cryptography; secrets cannot be stored"))
+    print(f"keyring               : {crypto.keyring_state(paths)}")
     return 0
 
 
@@ -1408,7 +1439,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, BackupError,
-            OSError) as e:
+            CryptoError, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

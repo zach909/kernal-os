@@ -270,6 +270,35 @@ class App:
                 return (False, "unreachable")
             self._queue.append(ev)
 
+    # The owner's stored credentials, through the OS (needs the 'credentials' permission - NOT 'system'). list (labels,
+    # user names, urls; never a secret): password once per app instance. get/add/delete: the OS asks the password
+    # EVERY time and shows the operation and label. Returns (True, dict with entries / entry / detail) or
+    # (False, short reason: refused / unavailable / not-found / exists / full / unreachable).
+    def credential(self, op: str, label: str = "", username: str = "", secret: str = "", url: str = "",
+                   notes: str = "") -> tuple:
+        msg = {"cmd": "request", "action": "credential", "op": op}
+        if op in ("get", "delete"):
+            msg["label"] = label
+        elif op == "add":
+            msg.update(label=label, username=username, secret=secret, url=url, notes=notes)
+        try:
+            self.send(msg)
+        except OSError:
+            return (False, "unreachable")
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return (False, "unreachable")
+            if ev.get("cmd") == "credential":
+                if ev.get("ok") is True:
+                    return (True, {k: v for k, v in ev.items() if k in ("entries", "entry", "detail")})
+                err = ev.get("error")
+                return (False, err if isinstance(err, str) else "refused")
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return (False, "unreachable")
+            self._queue.append(ev)
+
     # One https request, made by the OS (needs the 'network' permission - NOT 'system'; the app has no
     # network of its own). The firewall decides first; a request no rule allows is never connected.
     # Returns (True, {"status": int, "content_type": str, "body": bytes}) or (False, short reason:

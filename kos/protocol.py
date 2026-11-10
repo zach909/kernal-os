@@ -66,6 +66,16 @@ app -> OS
                                          allow/remove: the OS asks the password EVERY time and shows the exact
                                          rule. The wildcard host is refused. Answer: {"cmd": "firewall", "ok":
                                          bool, "rules"|"log"|"detail": ..., "error"?: "refused"|"unavailable"}.
+    {"cmd": "request", "action": "credential", "op": "list"}   |   {... "op": "get"|"delete", "label": str}   |
+    {... "op": "add", "label", "username", "secret", "url", "notes": all str}
+                                         the owner's stored credentials, through the OS (needs the narrow
+                                         'credentials' permission, NOT 'system'). list (labels, user names and
+                                         URLs only, never a secret): password once per app instance; get (reveals
+                                         the secret), add, delete: the OS asks the password EVERY time and shows
+                                         the operation and label. Exact keys, str values with length caps and no
+                                         control characters. Answer: {"cmd": "credential", "ok": bool,
+                                         "entries"|"entry"|"detail": ..., "error"?: "refused"|"unavailable"|
+                                         "not-found"|"exists"|"full"}.
     {"cmd": "request", "action": "fetch", "url": "https://HOST[:PORT]/path", "method": "GET"|"POST",
                        "headers": {accept|content-type|authorization|x-api-key|anthropic-version|user-agent: str},
                        "body": str<=262144}
@@ -240,6 +250,22 @@ def _firewall(msg: dict) -> dict:
     return {"cmd": "request", "action": "firewall", "op": op, "who": who, "host": host, "port": port}
 
 
+def _credential(msg: dict) -> dict:
+    """Exact keys per op, str values only, caps and control-character rule from kos.credentials."""
+    from . import credentials as C
+    op = msg.get("op")
+    if type(op) is not str or op not in C.OPS:
+        raise ProtocolError("request.credential op must be one of " + ", ".join(C.OPS))
+    want = {"list": set(), "get": {"label"}, "delete": {"label"}, "add": set(C.FIELDS)}[op]
+    if set(msg) != {"cmd", "action", "op"} | want:
+        raise ProtocolError(f"request.credential {op} takes exactly: op" + "".join(", " + k for k in sorted(want)))
+    try:
+        vals = {k: C.check_field(k, msg[k]) for k in want}
+    except C.CredentialError:
+        raise ProtocolError("request.credential: a field is not text, is empty, too long or has control characters") from None
+    return {"cmd": "request", "action": "credential", "op": op, **vals}
+
+
 def _fetch(msg: dict) -> dict:
     from . import netfetch
     if set(msg) - {"cmd", "action", "url", "method", "headers", "body"}:
@@ -291,6 +317,8 @@ def _request(msg: dict) -> dict:
         return _sysinfo(msg)
     if action == "fetch":
         return _fetch(msg)
+    if action == "credential":
+        return _credential(msg)
     if action == "firewall":
         return _firewall(msg)
     if action == "backup":

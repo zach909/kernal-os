@@ -156,7 +156,7 @@ def build(out_dir: Path) -> Path:
                    " service, and creates no state: run 'kos setup' to choose your password.")
     control = (f"Package: {NAME}\nVersion: {version}\nSection: admin\nPriority: optional\n"
                f"Architecture: all\nMaintainer: zach909 <zach909@users.noreply.github.com>\n"
-               f"Installed-Size: {(size + 1023) // 1024}\nDepends: python3 (>= 3.11)\n"
+               f"Installed-Size: {(size + 1023) // 1024}\nDepends: python3 (>= 3.11), python3-cryptography\n"
                f"Suggests: qemu-system-x86, cryptsetup-bin, busybox-static, cpio\n"
                f"Homepage: https://github.com/zach909/kernal-os\n"
                f"Description: KOS, a security-first OS layer (every action needs your password)\n"
