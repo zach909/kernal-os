@@ -1389,7 +1389,7 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -51,7 +51,6 @@ RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
 PERMISSIONS = {"network", "system", "storage", "ai"}
-PERMISSIONS = {"network", "system", "storage"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.

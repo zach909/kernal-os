@@ -9,6 +9,7 @@ COMMANDS = (
 # -- begin generated --
     ('activity', 'one feed: open apps + recent password decisions', 'kos activity [-h] [-n N]'),
     ('admin', 'the elevated administrator keyboard', 'kos admin [-h] [{status,boot,lock}]'),
+    ('ai', 'set up the AI connection: set, show, clear (password)', 'kos ai [-h] [--url URL] [--provider {openai,anthropic}] [--model MODEL] {set,show,clear}'),
     ('aios', 'AI OS: button clicker, app commands, kernel commands, skill maker', 'kos aios [-h] {status,gui,app,kernel,skill} [words ...]'),
     ('attach', 'attach your terminal to an open app', 'kos attach [-h] id'),
     ('audit', 'show the authorization log', 'kos audit [-h] [-n N] [--verify]'),
