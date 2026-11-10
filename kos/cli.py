@@ -225,10 +225,11 @@ def _bridge_for(paths: Paths, name: str, perms, system: bool | None = None):
     system = "system" in perms if system is None else system
     assistant = "assistant" in perms
     sysinfo = "sysinfo" in perms
+    fw = "firewall" in perms              # only "may ask the OS to show / change firewall rules (password)"
     network = "network" in perms          # only "may ask the OS to fetch over https as the firewall allows"
-    if not (system or assistant or sysinfo or network):
+    if not (system or assistant or sysinfo or network or fw):
         return None
-    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo, network=network)
+    return SystemBridge(paths, app=name, system=system, assistant=assistant, sysinfo=sysinfo, network=network, firewall=fw)
 
 
 def cmd_run(args, paths: Paths) -> int:

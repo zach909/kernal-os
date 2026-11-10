@@ -350,13 +350,232 @@ class TestApps(unittest.TestCase):
         for e in every():
             if e.scope == "none": continue
             p = manifest(e)["permissions"]
-            if e.title in FOUR:
+            if e.title in FOUR or e.title in ("Device Settings", "Network and Wireless", "Software Updates"):
                 self.assertEqual(p, ["storage", "assistant", "sysinfo"], e.title)
+            elif e.title == "Firewall Management":
+                self.assertEqual(p, ["storage", "assistant", "firewall"])
             else:
                 self.assertNotIn("sysinfo", p, e.title)
             self.assertNotIn("system", p, e.title)
             if e.title in FOUR: self.assertNotIn("network", p)
         Manifest.parse(json.dumps(manifest(next(e for e in every() if e.title == FOUR[0]))).encode())
+
+
+def install_fake(paths, name, version="1.0", permissions=()):
+    """A .kapp + .seal on disk (the seal is not verified by the read-only topics; they only describe)."""
+    from kos.kapp import pack
+    src = Path(paths.root if hasattr(paths, "root") else paths.state) / ("src-" + name)
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "main.py").write_text("def main():\n    pass\n")
+    (src / "manifest.json").write_text(json.dumps({"name": name, "version": version, "runtime": "python",
+                                                   "entry": "main:main", "permissions": list(permissions)}))
+    paths.apps.mkdir(parents=True, exist_ok=True)
+    pack(src, paths.apps / f"{name}.kapp")
+    (paths.apps / f"{name}.seal").write_text(json.dumps({"name": name, "version": version, "sha256": "0" * 64}))
+
+
+class TestNetworkAndSettings(Env):
+    SECRET_KEY = "sk-ant-PLANTED-SECRET-KEY-9999"
+
+    def plant(self):
+        from kos import assistant as A, firewall as F
+        from kos.permissions import Permissions
+        from kos.permit import PermitStore
+        install_fake(self.paths, "web", permissions=["network"])
+        install_fake(self.paths, "quiet")
+        (self.paths.state).mkdir(parents=True, exist_ok=True)
+        A.set_api(self.paths, "anthropic", "", "claude-x", self.SECRET_KEY)
+        A.use(self.paths, "api")
+        F.add_rule(self.paths, "app:web", "example.org", 443, "https")
+        F.add_rule(self.paths, "os:assistant", "api.anthropic.com", 443, "https")
+        PermitStore(self.paths).grant("web")
+        Permissions(self.paths).grant("web", "space:contacts", "read")
+        for i in range(3):
+            F.decide(self.paths, "app:web", "example.org", 443, "https")
+        F.decide(self.paths, "app:web", "evil.example", 443, "https")
+
+    def test_network_topic(self):
+        self.plant()
+        n = S.read("network", paths=self.paths)
+        self.assertEqual(n["declared_network_apps"], ["web"])
+        self.assertIn({"who": "app:web", "host": "example.org", "port": 443, "proto": "https"}, n["rules"])
+        self.assertEqual(n["assistant"], {"active": True, "endpoint_host_port": "api.anthropic.com", "firewall_allows": True})
+        self.assertEqual(n["recent"], {"allowed": 3, "blocked": 1})
+
+    def test_settings_topic(self):
+        self.plant()
+        s = S.read("settings", paths=self.paths)
+        self.assertEqual(s["assistant_active"], True)
+        self.assertEqual(s["permitted_apps"], 1)
+        self.assertEqual(s["shared_folder_grants"], [{"app": "web", "space": "contacts", "level": "read"}])
+        self.assertEqual(s["extensions_on"], [])
+        self.assertEqual(s["firewall_rules"], 2)
+
+    def test_no_secret_path_or_host_name_in_either_topic(self):
+        self.plant()
+        root = fixture(self.tmp.name + "/fx")
+        for t in ("network", "settings"):
+            text = json.dumps(S.read(t, root, paths=self.paths))
+            for bad in (self.SECRET_KEY, "PLANTED", HOST, str(self.paths.state), "/home", "assistant.json", "\\x1b"):
+                self.assertNotIn(bad, text, (t, bad))
+
+    def test_without_state_nothing(self):
+        self.assertEqual(S.read("network"), {})
+        self.assertEqual(S.read("settings"), {})
+
+    def test_damaged_sources_give_empty_not_errors(self):
+        self.paths.state.mkdir(parents=True, exist_ok=True)
+        (self.paths.state / "firewall.json").write_text("{not json")
+        (self.paths.state / "assistant.json").write_text("\x00\x01")
+        (self.paths.apps).mkdir(parents=True, exist_ok=True)
+        (self.paths.apps / "bad.kapp").write_bytes(b"junk")
+        (self.paths.apps / "bad.seal").write_text(json.dumps({"name": "bad", "version": "1", "sha256": "0"}))
+        n = S.read("network", paths=self.paths)
+        self.assertEqual((n["rules"], n["declared_network_apps"]), ([], []))
+        self.assertEqual(S.read("settings", paths=self.paths)["firewall_rules"], 0)
+
+    def test_recent_counts_only_the_last_200(self):
+        from kos import firewall as F
+        for i in range(210):
+            F.decide(self.paths, "app:web", "x.example", 443, "https")      # blocked
+        F.decide(self.paths, "app:web", "x.example", 443, "https")
+        r = S.read("network", paths=self.paths)["recent"]
+        self.assertEqual(r["allowed"] + r["blocked"], 200)
+
+    def test_bridge_gating_is_the_same(self):
+        self.plant()
+        with mock.patch.object(S, "read") as rd:
+            self.assertEqual(self.ask(self.bridge(sysinfo=False, system=True), "network")["error"], "refused")
+            self.assertEqual(self.ask(self.bridge(), "settings", None)["error"], "refused")
+        rd.assert_not_called()
+        b = self.bridge()
+        r = self.ask(b, "network", PW)
+        self.assertTrue(r["ok"])
+        self.assertTrue(self.ask(b, "settings")["ok"])           # one password per instance
+        self.assertNotIn(self.SECRET_KEY, self.audit_text())
+        self.assertIn('"target":"monitor network"', self.audit_text())
+
+
+class TestNewApps(unittest.TestCase):
+    TITLES = ("Network and Wireless", "Device Settings", "Software Updates")
+
+    def entry(self, t):
+        from kos.office.pack_os import ENTRIES
+        return next(e for e in ENTRIES if e.title == t)
+
+    def data(self, topic):
+        return (True, {
+            "network": {"declared_network_apps": ["web"], "rules": [{"who": "app:web", "host": "example.org", "port": 443, "proto": "https"},
+                                                                      {"who": "os:assistant", "host": "*", "port": 443, "proto": "https"}],
+                        "assistant": {"active": True, "endpoint_host_port": "api.example.com:443", "firewall_allows": False},
+                        "recent": {"allowed": 3, "blocked": 4}},
+            "settings": {"assistant_active": True, "permitted_apps": 2,
+                         "shared_folder_grants": [{"app": "web", "space": "c", "level": "read"}],
+                         "extensions_on": [{"name": "ext", "host_app": "web", "kind": "extension"}], "firewall_rules": 2},
+            "apps": {"installed": [{"name": "web", "version": "1.9", "permitted": True}, {"name": "notes", "version": "2.0-rc1", "permitted": True}],
+                     "open": []},
+        }[topic])
+
+    def run_app(self, t, fn, keys=KEYS):
+        from kos.office.ui import FakeHost, run
+        h = FakeHost(keys); h.sysinfo_fn = fn
+        e = self.entry(t)
+        run(h, e.args["make"](h, e))
+        return h
+
+    def test_survive_key_battery_with_data_refusal_and_crash(self):
+        for t in self.TITLES:
+            for fn in (self.data, None, lambda x: (False, "unavailable"), lambda x: 1 / 0, lambda x: (True, {"x": {"y": 1}}),
+                       lambda x: (True, {"network": 5, "settings": [], "apps": {"installed": "zz"}})):
+                h = self.run_app(t, fn, KEYS + ["ctrl-d", "e", "a", "enter", "ctrl-d"])
+                self.assertTrue(h.frames, t)
+
+    def test_network_content(self):
+        from kos.office.ui import FakeHost
+        h = FakeHost([]); h.sysinfo_fn = self.data
+        e = self.entry("Network and Wireless"); s = e.args["make"](h, e); s.on_enter()
+        txt = "\n".join(s.render(100, 100))
+        for want in ("web", "example.org", "WILDCARD", "api.example.com:443", "BLOCKS it", "3 allowed, 4 blocked",
+                     "no network of their own", "no Wi-Fi or Bluetooth"):
+            self.assertIn(want, txt)
+        self.assertEqual(h.sysinfo_calls, ["network"])
+
+    def test_settings_content_and_every_named_command_exists(self):
+        import re
+        from kos.cli import COMMANDS
+        from kos.office.ui import FakeHost
+        h = FakeHost([]); h.sysinfo_fn = self.data
+        e = self.entry("Device Settings"); s = e.args["make"](h, e); s.on_enter()
+        txt = "\n".join(s.render(100, 100))
+        self.assertIn("space:c", txt)
+        self.assertIn("ext", txt)
+        cmds = re.findall(r"`kos (\w+)", txt)
+        self.assertGreaterEqual(len(set(cmds)), 5)
+        for c in cmds:
+            self.assertIn(c, COMMANDS, c)
+        self.assertEqual(h.sysinfo_calls, ["settings"])
+        # sub-commands named exist too (parse them with the real parser)
+        for c in ("assistant status", "assistant use off", "permit web", "permit web --revoke", "grant web space:c --level read",
+                  "grant web space:c --revoke", "extend ext", "extend ext --revoke", "passwd", "firewall allow app:web example.org 443 --proto https",
+                  "firewall remove app:web example.org 443"):
+            self.assertTrue(any(c.split()[0] + " " in l or c in l for l in txt.splitlines()) or c.split()[0] in cmds, c)
+            from kos import cli
+            parser = cli.build_parser() if hasattr(cli, "build_parser") else None
+            if parser is not None:
+                parser.parse_args(c.split())
+
+    def test_software_updates_via_the_screen(self):
+        from kos.office.ui import FakeHost
+        h = FakeHost([]); h.sysinfo_fn = self.data
+        e = self.entry("Software Updates"); s = e.args["make"](h, e); s.on_enter()
+        for ch in "web 1.10":
+            s.key(ch)
+        s.key("enter")
+        for ch in "notes 2.0":
+            s.key(ch)
+        s.key("ctrl-d")
+        txt = "\n".join(s.render(100, 100))
+        self.assertIn("update available", txt)
+        self.assertIn("kos update web-1.10.kapp", txt)
+        self.assertIn("kos update notes-2.0.kapp", txt)
+        self.assertIn("cannot download or install", txt)
+        self.assertEqual(h.sysinfo_calls, ["apps"])
+
+
+class TestVersionCompare(unittest.TestCase):
+    CASES = [("1.9", "1.10", -1), ("1.10", "1.9", 1), ("1.0", "1.0.0", 0), ("1.0.0.0", "1", 0), ("2", "10", -1),
+             ("1.0-rc1", "1.0", -1), ("1.0", "1.0-rc1", 1), ("1.0-rc1", "1.0-rc2", -1), ("1.0-rc2", "1.0-rc10", -1),
+             ("1.0-alpha", "1.0-beta", -1), ("1.0-beta", "1.0-rc1", -1), ("1.0rc1", "1.0-rc1", 0), ("1.0+build5", "1.0", 0),
+             ("1.0.1-rc1", "1.0", 1), ("1.0-rc1", "1.0.1", -1), ("0.9.9", "1.0", -1), ("3.2.1", "3.2.1", 0),
+             ("1.0a", "1.0", -1), ("001.2", "1.2", 0),
+             ("latest", "1.0", None), ("", "1.0", None), ("1.", "1.0", None), (".1", "1.0", None), ("v1.0", "1.0", None),
+             ("1..0", "1.0", None), ("1.0", "x" * 40, None), ("1.0 ; rm", "1.0", None), (5, "1.0", None), (None, None, None),
+             ("1.0\n2.0", "1.0", None)]
+
+    def test_table(self):
+        from kos.office.pack_os import compare_versions
+        for a, b, want in self.CASES:
+            self.assertEqual(compare_versions(a, b), want, (a, b))
+            if want is not None:
+                self.assertEqual(compare_versions(b, a), -want, (b, a))
+
+    def test_garbage_lines_ignored_and_bounded(self):
+        from kos.office.pack_os import parse_available, update_rows, MAX_UPDATE_LINES
+        text = "web 1.2\nnotes\n\n  x  \nBad Name 1.0\nweb2 latest\nweb3 1.0 extra\n../etc 1\n\x1b[31m 1.0\nnotes 2.0\nweb 1.3\n"
+        self.assertEqual(parse_available(text), {"web": "1.3", "notes": "2.0"})
+        self.assertEqual(parse_available(None), {})
+        huge = "a 1.0\n" * 10 ** 6
+        self.assertEqual(parse_available(huge), {"a": "1.0"})
+        many = "".join(f"app{chr(97 + i % 26)}{i} 1.0\n" for i in range(5000))
+        self.assertLessEqual(len(parse_available(many)), MAX_UPDATE_LINES)
+        rows = update_rows([{"name": "a", "version": "1.0"}, {"name": "b", "version": "2.0"}, {"name": "c", "version": "1.0"},
+                            {"name": "d", "version": "1.0"}, {"name": "e", "version": "weird"}, "junk", {"name": 5}],
+                           {"a": "1.1", "b": "2.0", "c": "0.9", "e": "1.0"})
+        self.assertEqual([(r[0], r[3]) for r in rows],
+                         [("a", "update available"), ("b", "up to date"), ("c", "would be a downgrade (KOS refuses)"),
+                          ("d", "unknown"), ("e", "unknown")])
+        self.assertEqual(rows[0][4], "kos update a-1.1.kapp")
+        self.assertEqual([r[4] for r in rows[1:]], [""] * 4)
 
 
 class TestSdk(unittest.TestCase):

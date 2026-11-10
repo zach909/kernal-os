@@ -82,6 +82,7 @@ ACTIONS: dict[str, str] = {
     "assistant.ask": "let an app use the assistant",
     "sysinfo.read": "let an app read facts about this computer",
     "firewall.change": "change the firewall rules",
+    "firewall.read": "let an app read the firewall rules and log",
 }
 
 

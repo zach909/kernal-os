@@ -591,9 +591,10 @@ class TestBridgeFetch(TLS):
         self.assertEqual(self.srv.seen, [])
         self.assertNotIn("firewall.connect", self.audit_text())
 
-    def test_there_is_no_firewall_permission_for_apps_at_all(self):
+    def test_only_the_narrow_firewall_permission_exists_for_apps(self):
+        # 'firewall' is the narrow permission for the password-gated rule request (tests/test_firewall_request.py)
         base = {"name": "x", "version": "1", "runtime": "python", "entry": "a:main"}
-        for p in ("firewall", "fetch", "net", "networks"):
+        for p in ("firewall ", "Firewall", "fetch", "net", "networks"):
             with self.assertRaises(KAppError):
                 Manifest.parse(json.dumps({**base, "permissions": [p]}).encode())
         self.assertEqual(Manifest.parse(json.dumps({**base, "permissions": ["network"]}).encode()).permissions, ("network",))

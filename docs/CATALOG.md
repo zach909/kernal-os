@@ -170,7 +170,7 @@ Shared folders: an app that **owns** one creates it (and its permission); an app
 
 Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Every app here also has the built-in agent (Ctrl-N). `docs/CAPABILITIES.md` maps every capability that was asked for to the app, OS command or reason that covers it.
 
-**92 products: 16 full, 52 partial, 24 not built.**
+**92 products: 16 full, 56 partial, 20 not built.**
 
 | Product | App | Scope | What it is / what it is not |
 |---|---|---|---|
@@ -235,15 +235,15 @@ Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Eve
 | Chess | `chess` | full | Full rules: castling, en passant, promotion, check, mate, stalemate, fifty-move, threefold repetition, FEN, undo. Text board, no graphics. The computer uses alpha-beta to depth 1-3 with a node cap: modest strength, no opening book, no clock. |
 | Casual Games | `casual-games` | full | 2048, Minesweeper, Sudoku and Tic-Tac-Toe, turn-based with best scores saved. No timers, so no speed scores; Minesweeper keeps win/loss counts but does not resume a half-played board. |
 | Game Library | `game-library` | partial | A register of games with play-time totals. It cannot launch games or other apps and does not read any game's own play-time. |
-| Device Settings | - | none | Not an app: sandboxed apps cannot read or change device or system settings, and the OS has no settings layer yet. Nothing covers it today; `kos passwd` changes only your password. |
+| Device Settings | `device-settings` | partial | A read-only summary: assistant on/off, permitted apps, shared-folder grants, extensions, firewall rule count. Each line names the `kos` command that changes it. This app changes nothing; the OS reads the facts after your password. |
 | Battery and Power | `battery-and-power` | partial | Shows battery level and charging state if there is one; 'no battery found' is normal on servers and VMs. Read-only: it cannot change power settings. The OS reads the data after your password. |
 | Storage and Disk Management | `storage-and-disk` | partial | Shows free and total space and each app's own data as a bar chart. Read-only: it cannot delete, partition or format. The OS reads the sizes after your password. `kos optimize` reclaims space. |
-| Network and Wireless | - | none | Not an app: apps run in an empty network namespace and cannot configure networks. KOS has no network or Wi-Fi manager; `kos firewall` (rules, not an app) decides every connection. Nothing covers it. |
+| Network and Wireless | `network-and-wireless` | partial | Read-only network POLICY: which apps may ask to fetch, the firewall rules, the assistant's endpoint and whether the firewall allows it, allowed/blocked counts. Apps have no network of their own; no Wi-Fi or Bluetooth management. Read after your password. |
 | Printer Management | - | none | Not an app: apps cannot reach printers or drivers, and KOS has no printing support. No `kos` command or other app covers it; nothing in KOS talks to a printer. |
 | Process and Resource Monitor | `process-monitor` | partial | Shows KOS apps opened with `kos open`, memory and load; refresh with r. It can NOT see or manage other processes. The OS reads the facts after your password. `kos ps` lists the same apps. |
 | System Information and Diagnostics | `system-information` | partial | Shows kernel, Python and KOS versions, memory, load and sandbox checks with OK / NOT OK verdicts, like `kos doctor`. Read-only; the OS reads the facts after your password. No host name or user names. |
-| Software Updates | - | none | Not an app: apps cannot replace themselves or the OS. `kos update` updates installed apps only (newer version, scanned first, downgrades refused). There is no OS update mechanism. |
-| Firewall Management | - | none | Not an app: the firewall is `kos firewall` (status, allow, remove, log; the password is needed to change a rule). Every connection is blocked until a rule allows it. An app cannot change rules. |
+| Software Updates | `software-updates` | partial | Reads installed versions, you paste `name version` lines, it shows up to date, update available, would-be downgrade or unknown, and the `kos update FILE` command. It cannot download or install; `kos update` needs your password. |
+| Firewall Management | `firewall-management` | partial | Shows firewall rules and recent allowed/blocked decisions; adds or removes app: and os: rules. Each change goes through the OS password prompt with the exact rule. A front end over `kos firewall`, NOT a packet filter. |
 | Credential Manager | - | none | Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto library, which is an open owner decision (README). No `kos` command covers it. |
 | Device Pairing | - | none | Not an app: apps cannot reach Bluetooth or other devices, and KOS has no pairing support. Nothing covers it; `kos usb` only writes boot images to USB sticks. |
 | Window and Desktop Management | - | none | Not an app: there is no window manager. `kos boot desktop` runs the taskbar and App Library, which are themselves apps that ask the OS to open, close or focus apps. |

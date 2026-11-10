@@ -218,8 +218,87 @@ def _apps(root: str, paths) -> dict:
     return {"installed": installed, "open": opened}
 
 
+def _network(root: str, paths) -> dict:
+    """Policy view only: who may ask to fetch, the owner's firewall rules, the assistant's host:port (never a key
+    or a path) and how many of the last 200 firewall decisions were allowed / blocked."""
+    if paths is None:
+        return {}
+    from . import assistant, firewall
+    from .auth import AuditLog
+    from .kapp import KApp
+    from .store import AppStore
+    declared = []
+    try:
+        for a in AppStore(paths).installed()[:MAX_ITEMS]:
+            try:
+                if "network" in KApp.from_file(paths.apps / f"{a.name}.kapp").manifest.permissions:
+                    declared.append(a.name)
+            except Exception:
+                continue
+    except Exception:
+        declared = []
+    try:
+        rules = [{"who": r["who"], "host": r["host"], "port": r["port"], "proto": r["proto"]}
+                 for r in firewall.load(paths)[:MAX_ITEMS]]
+    except Exception:
+        rules = []
+    asst: dict = {"active": False, "endpoint_host_port": "", "firewall_allows": False}
+    try:
+        st = assistant.status(paths)
+        asst = {"active": st["active"] != "off", "endpoint_host_port": str(st.get("endpoint_host", "")),
+                "firewall_allows": bool(st.get("firewall_allows"))}
+    except Exception:
+        pass
+    recent = {"allowed": 0, "blocked": 0}
+    try:
+        rows = [e for e in AuditLog(paths).tail(5000) if e.get("action") == "firewall.connect"][-200:]
+        recent["allowed"] = sum(1 for e in rows if e.get("outcome") == "allowed")
+        recent["blocked"] = sum(1 for e in rows if e.get("outcome") == "blocked")
+    except Exception:
+        pass
+    return {"declared_network_apps": declared, "rules": rules, "assistant": asst, "recent": recent}
+
+
+def _settings(root: str, paths) -> dict:
+    """Counts and names of what the owner has switched on. No paths, no values, no keys."""
+    if paths is None:
+        return {}
+    from . import assistant, firewall
+    from .extensions import Extensions
+    from .permissions import Permissions
+    from .permit import PermitStore
+    out: dict = {}
+    try:
+        out["assistant_active"] = assistant.load(paths)["active"] != "off"
+    except Exception:
+        out["assistant_active"] = False
+    try:
+        out["permitted_apps"] = len(PermitStore(paths).list())
+    except Exception:
+        out["permitted_apps"] = 0
+    try:
+        out["shared_folder_grants"] = [
+            {"app": e["app"], "space": e["resource"].split(":", 1)[1], "level": e["level"]}
+            for e in Permissions(paths).list("space:")[:MAX_ITEMS]]
+    except Exception:
+        out["shared_folder_grants"] = []
+    try:
+        out["extensions_on"] = [
+            {"name": e["app"], "host_app": e["resource"].split(":", 1)[1],
+             "kind": "mod" if e["resource"].startswith("mod:") else "extension"}
+            for e in Extensions(paths).enabled()[:MAX_ITEMS]]
+    except Exception:
+        out["extensions_on"] = []
+    try:
+        out["firewall_rules"] = len(firewall.load(paths))
+    except Exception:
+        out["firewall_rules"] = 0
+    return out
+
+
 TOPICS: dict[str, Callable] = {"os": _os, "sandbox": _sandbox, "memory": _memory, "load": _load,
-                               "storage": _storage, "battery": _battery, "apps": _apps}
+                               "storage": _storage, "battery": _battery, "apps": _apps,
+                               "network": _network, "settings": _settings}
 
 
 def _bound(v: Any, depth: int = 0) -> Any:

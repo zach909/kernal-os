@@ -58,6 +58,14 @@ app -> OS
                                          read-only facts about this computer, read by the OS (needs the narrow
                                          'sysinfo' permission, NOT 'system'; password once per app instance,
                                          audited). Any other key or topic is refused.
+    {"cmd": "request", "action": "firewall", "op": "list"|"log"}   |
+    {"cmd": "request", "action": "firewall", "op": "allow", "who": "app:NAME"|"os:...", "host": str, "port": int,
+                       "proto": "https"|"loopback"}   |   {... "op": "remove", "who", "host", "port"}
+                                         the owner's firewall rules, through the OS (needs the narrow 'firewall'
+                                         permission, NOT 'system'). list/log: password once per app instance;
+                                         allow/remove: the OS asks the password EVERY time and shows the exact
+                                         rule. The wildcard host is refused. Answer: {"cmd": "firewall", "ok":
+                                         bool, "rules"|"log"|"detail": ..., "error"?: "refused"|"unavailable"}.
     {"cmd": "request", "action": "fetch", "url": "https://HOST[:PORT]/path", "method": "GET"|"POST",
                        "headers": {accept|content-type|authorization|x-api-key|anthropic-version|user-agent: str},
                        "body": str<=262144}
@@ -191,7 +199,7 @@ def _assistant(msg: dict) -> dict:
     return {"cmd": "request", "action": "assistant", "system": system, "messages": out}
 
 
-SYSINFO_TOPICS = ("os", "sandbox", "memory", "load", "storage", "battery", "apps")   # == sysinfo.TOPICS
+SYSINFO_TOPICS = ("os", "sandbox", "memory", "load", "storage", "battery", "apps", "network", "settings")   # == sysinfo.TOPICS
 
 
 def _sysinfo(msg: dict) -> dict:
@@ -199,6 +207,37 @@ def _sysinfo(msg: dict) -> dict:
     if set(msg) != {"cmd", "action", "topic"} or type(topic) is not str or topic not in SYSINFO_TOPICS:
         raise ProtocolError("request.sysinfo takes only a topic: " + ", ".join(SYSINFO_TOPICS))
     return {"cmd": "request", "action": "sysinfo", "topic": topic}
+
+
+FIREWALL_OPS = ("list", "log", "allow", "remove")
+
+
+def _firewall(msg: dict) -> dict:
+    """Exact keys per op; every value validated by firewall.check_rule / check_key. An app can never ask for
+    the wildcard host: the owner types wildcards on the command line only. ``remove`` has no proto (it
+    removes the who+host+port rule, whatever its protocol)."""
+    from . import firewall
+    op = msg.get("op")
+    base = {"cmd", "action", "op"}
+    if type(op) is not str or op not in FIREWALL_OPS:
+        raise ProtocolError("request.firewall op must be one of " + ", ".join(FIREWALL_OPS))
+    if op in ("list", "log"):
+        if set(msg) != base:
+            raise ProtocolError(f"request.firewall {op} takes only op")
+        return {"cmd": "request", "action": "firewall", "op": op}
+    keys = base | {"who", "host", "port"} | ({"proto"} if op == "allow" else set())
+    if set(msg) != keys:
+        raise ProtocolError(f"request.firewall {op} takes exactly: " + ", ".join(sorted(keys - {"cmd", "action"})))
+    if msg["host"] == firewall.WILDCARD:
+        raise ProtocolError("an app cannot ask for the wildcard host; the owner types it with `kos firewall`")
+    try:
+        if op == "allow":
+            r = firewall.check_rule(msg["who"], msg["host"], msg["port"], msg["proto"])
+            return {"cmd": "request", "action": "firewall", "op": op, **r}
+        who, host, port = firewall.check_key(msg["who"], msg["host"], msg["port"])
+    except firewall.FirewallError as e:
+        raise ProtocolError(f"request.firewall: {e}") from None
+    return {"cmd": "request", "action": "firewall", "op": op, "who": who, "host": host, "port": port}
 
 
 def _fetch(msg: dict) -> dict:
@@ -252,6 +291,8 @@ def _request(msg: dict) -> dict:
         return _sysinfo(msg)
     if action == "fetch":
         return _fetch(msg)
+    if action == "firewall":
+        return _firewall(msg)
     if action == "backup":
         return {"cmd": "request", "action": "backup"}
     if action == "backup_add":

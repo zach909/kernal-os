@@ -242,6 +242,34 @@ class App:
                 return (False, "unreachable")
             self._queue.append(ev)
 
+    # The owner's firewall rules, through the OS (needs the 'firewall' permission - NOT 'system'). list/log: password
+    # once per app instance; allow/remove: the OS asks the password every time, showing the exact rule. Returns
+    # (True, dict with rules / log / detail) or (False, short reason: refused / unavailable / unreachable).
+    # `remove` takes no proto (it removes the who+host+port rule); the wildcard host is never accepted.
+    def firewall(self, op: str, who: str = "", host: str = "", port: int = 0, proto: str = "") -> tuple:
+        msg = {"cmd": "request", "action": "firewall", "op": op}
+        if op in ("allow", "remove"):
+            msg.update(who=who, host=host, port=port)
+        if op == "allow":
+            msg["proto"] = proto
+        try:
+            self.send(msg)
+        except OSError:
+            return (False, "unreachable")
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return (False, "unreachable")
+            if ev.get("cmd") == "firewall":
+                if ev.get("ok") is True:
+                    return (True, {k: v for k, v in ev.items() if k in ("rules", "log", "detail")})
+                err = ev.get("error")
+                return (False, err if isinstance(err, str) else "refused")
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return (False, "unreachable")
+            self._queue.append(ev)
+
     # One https request, made by the OS (needs the 'network' permission - NOT 'system'; the app has no
     # network of its own). The firewall decides first; a request no rule allows is never connected.
     # Returns (True, {"status": int, "content_type": str, "body": bytes}) or (False, short reason:

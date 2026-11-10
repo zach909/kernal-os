@@ -34,17 +34,18 @@ from . import assistant, backup, cache, firewall, netfetch, sysinfo
 from . import cache, layers
 from .address import check_launch
 from .appdirs import AppDirs
-from .auth import AuthError, Authority, AuthorizationDenied
+from .auth import AuditLog, AuthError, Authority, AuthorizationDenied
 from .broker import spawn
 from .kapp import KApp, KAppError
 from .permit import PermitError, PermitStore
 from .paths import Paths
-from .protocol import clean_text
+from .protocol import clean_text, escape_text
 from .registry import Instance, Registry, RegistryError
 from .sandbox import SandboxError, SandboxPolicy
 from .store import AppStore, TamperedError
 
 MAX_LISTED = 200
+MAX_FW_DENIALS = 2          # denied password prompts for firewall changes per app instance before they stop being asked
 
 
 def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
@@ -153,7 +154,8 @@ class SystemBridge:
 
     def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
                  system: bool = True, assistant: bool = False, opener=None,
-                 sysinfo: bool = False, network: bool = False, fetch_context=None):
+                 sysinfo: bool = False, network: bool = False, fetch_context=None,
+                 firewall: bool = False):
         self.paths = paths
         self._spawner = spawner
         self.app = app or "app"
@@ -161,6 +163,10 @@ class SystemBridge:
         self.assistant = assistant       # manifest 'assistant' permission: ONLY the assistant request
         self.sysinfo = sysinfo           # manifest 'sysinfo' permission: ONLY the sysinfo request
         self.network = network           # manifest 'network' permission: ONLY the fetch request (OS-brokered https)
+        self.firewall = firewall         # manifest 'firewall' permission: ONLY the firewall request
+        self._fw_granted = False         # list/log: one password per app instance; allow/remove: every time
+        self._fw_refused = False
+        self._fw_denied = 0              # denied/cancelled allow/remove prompts this instance; at MAX_FW_DENIALS it is latched off
         self._opener = opener            # tests only; the real one is assistant.make_opener()
         self._fetch_context = fetch_context   # tests only: an SSLContext that still verifies; real one is netfetch's
         # The assistant grant lasts for this app instance (this session) only. It is bound to the
@@ -187,6 +193,102 @@ class SystemBridge:
             return fail(e.code)
         reply({"cmd": "fetch", "ok": True, "status": got["status"], "content_type": got["content_type"],
                "body_b64": base64.b64encode(got["body"]).decode("ascii")})
+
+    def _firewall(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
+        op = req.get("op")
+        op = op if isinstance(op, str) and op in ("list", "log", "allow", "remove") else "-"   # never audit app text
+
+        def fail(code: str) -> None:
+            reply({"cmd": "firewall", "ok": False, "error": code})
+
+        def audit(outcome: str) -> bool:
+            try:
+                authority.audit.record("firewall.request", f"{self.app} {op}", outcome)
+                return True
+            except OSError:
+                return False
+
+        if not self.firewall or op == "-":
+            audit("refused")
+            return fail("refused")
+        try:
+            if op in ("list", "log") and set(req) != {"cmd", "action", "op"}:
+                audit("refused")
+                return fail("refused")
+            if op in ("allow", "remove"):
+                if set(req) != {"cmd", "action", "op", "who", "host", "port"} | ({"proto"} if op == "allow" else set()) \
+                        or req.get("host") == firewall.WILDCARD:
+                    audit("refused")
+                    return fail("refused")
+                if op == "allow":
+                    rule = firewall.check_rule(req["who"], req["host"], req["port"], req["proto"])
+                    key, text = (rule["who"], rule["host"], rule["port"]), "allow " + firewall.describe(rule)
+                else:
+                    key = firewall.check_key(req["who"], req["host"], req["port"])
+                    rule, text = None, f"remove {key[0]} {key[1]}:{key[2]}"
+                if key[1] == firewall.WILDCARD:
+                    audit("refused")
+                    return fail("refused")
+                if key[0].startswith("app:") and op == "allow" and \
+                        key[0][4:] not in {a.name for a in AppStore(self.paths).installed()}:
+                    audit("refused")
+                    return fail("refused")
+        except (firewall.FirewallError, KeyError, TypeError):
+            audit("refused")
+            return fail("refused")
+        if op in ("allow", "remove"):
+            if self._fw_denied >= MAX_FW_DENIALS:      # an app must not be able to nag for a password
+                audit("refused")
+                return fail("refused")
+            try:
+                with authority.authorize("firewall.change", text):      # EVERY time; audits itself
+                    done = (firewall.add_rule(self.paths, **rule) and 1) if op == "allow" else \
+                        firewall.remove_rule(self.paths, *key)
+            except (AuthorizationDenied, AuthError, OSError):
+                self._fw_denied += 1
+                return fail("refused")
+            except firewall.FirewallError:
+                audit("failed:refused")
+                return fail("refused")
+            audit("allowed")
+            detail = "rule added" if op == "allow" else ("rule removed" if done else "no such rule")
+            return reply({"cmd": "firewall", "ok": True, "detail": detail})
+        if self._fw_refused:
+            audit("refused")
+            return fail("refused")
+        if not self._fw_granted:
+            try:
+                authority.authorize("firewall.read", f"{self.app} (rules and log)").close()
+            except (AuthorizationDenied, AuthError):
+                self._fw_refused = True
+                return fail("refused")
+            except OSError:
+                return fail("refused")
+            self._fw_granted = True
+        if not audit("allowed"):
+            return fail("refused")
+        try:
+            if op == "list":
+                reply({"cmd": "firewall", "ok": True, "rules": [dict(r) for r in firewall.load(self.paths)]})
+            else:
+                reply({"cmd": "firewall", "ok": True, "log": self._fw_log()})
+        except Exception:
+            audit("failed:unavailable")
+            fail("unavailable")
+
+    def _fw_log(self) -> list:
+        import time as _t
+        out = []
+        rows = [e for e in AuditLog(self.paths).tail(5000) if e.get("action") == "firewall.connect"]
+        for e in rows:
+            parts = str(e.get("target", "")).split(" ")
+            if len(parts) != 3 or ":" not in parts[1]:
+                continue
+            host, _, port = parts[1].rpartition(":")
+            out.append({"who": escape_text(parts[0]), "host": escape_text(host), "port": int(port) if port.isdigit() else 0,
+                        "proto": escape_text(parts[2]), "outcome": escape_text(str(e.get("outcome", ""))[:16]),
+                        "time": _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(e.get("t", 0)))})
+        return out[-100:]
 
     def _sysinfo(self, req: dict, reply: Callable[[dict], None], authority: Authority) -> None:
         topic = req.get("topic")
@@ -285,6 +387,9 @@ class SystemBridge:
             return None
         if action == "sysinfo":
             self._sysinfo(req, reply, authority)
+            return None
+        if action == "firewall":
+            self._firewall(req, reply, authority)
             return None
         if action == "fetch":
             self._fetch(req, reply, authority)
