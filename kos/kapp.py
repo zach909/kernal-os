@@ -70,6 +70,38 @@ KINDS = ("app", "extension", "mod")
 SYSTEM_APP_NAMES = ("taskbar", "app-library")
 EXTENSION_FILE = "extension.json"
 
+# Every app can explain itself: ``help.json`` is its own "help" command, as data. It is validated
+# when the app is read, never run, and what it says is the author's free text (untrusted).
+#   {"about": "one line", "commands": [{"name": "Esc", "help": "leave the app"}]}
+HELP_FILE = "help.json"
+MAX_HELP_COMMANDS = 40
+MAX_HELP_NAME = 40
+MAX_HELP_TEXT = 200
+
+
+def parse_help(raw: bytes) -> dict:
+    """Validate ``help.json``. Returns ``{"about": str, "commands": [(name, help), ...]}``."""
+    try:
+        d = json.loads(raw)
+    except ValueError as e:
+        raise KAppError(f"help.json is not valid JSON: {e}") from None
+    if not isinstance(d, dict) or set(d) - {"about", "commands"}:
+        raise KAppError("help.json must be an object with only 'about' and 'commands'")
+    about = d.get("about", "")
+    if not isinstance(about, str) or len(about) > MAX_HELP_TEXT:
+        raise KAppError(f"help.about must be a string of at most {MAX_HELP_TEXT} characters")
+    cmds = d.get("commands", [])
+    if not isinstance(cmds, list) or len(cmds) > MAX_HELP_COMMANDS:
+        raise KAppError(f"help.commands must be a list of at most {MAX_HELP_COMMANDS} entries")
+    out = []
+    for c in cmds:
+        if (not isinstance(c, dict) or set(c) != {"name", "help"}
+                or not isinstance(c["name"], str) or not isinstance(c["help"], str)
+                or not 0 < len(c["name"]) <= MAX_HELP_NAME or len(c["help"]) > MAX_HELP_TEXT):
+            raise KAppError("each help command is {\"name\": text, \"help\": text} within the length limits")
+        out.append((c["name"], c["help"]))
+    return {"about": about, "commands": out}
+
 
 class KAppError(Exception):
     pass
@@ -188,6 +220,8 @@ class KApp:
         self.manifest = Manifest.parse(self.read(MANIFEST, limit=64 << 10))
         self._check_entry()
         self.contributions = self._check_kind()
+        self.help = (parse_help(self.read(HELP_FILE, limit=64 << 10))
+                     if HELP_FILE in self._names else None)
 
     @classmethod
     def from_file(cls, path: Path) -> "KApp":

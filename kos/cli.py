@@ -1107,9 +1107,10 @@ def cmd_skills(args, paths: Paths) -> int:
     --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
     from .skillmaker import collect_apps, command_inventory, make_skills
     authority, prompter = _authority(paths)
-    manifests, skipped = collect_apps(paths, authority)
+    helps: dict = {}
+    manifests, skipped = collect_apps(paths, authority, helps)
     prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
     for line in skipped + refused:
         print(line, file=sys.stderr)
     if not args.out:
