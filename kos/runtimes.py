@@ -129,7 +129,10 @@ def check_trusted(path: str) -> str:
     d = os.path.dirname(real)
     while True:
         dst = os.stat(d)
-        if _unsafe_mode(dst) or dst.st_uid not in (0, os.geteuid()):
+        # A shared directory with the sticky bit (/tmp) is fine: nobody can rename or delete
+        # an entry they do not own there. A plain world-writable directory is not.
+        sticky = bool(dst.st_mode & stat.S_ISVTX)
+        if (_unsafe_mode(dst) and not sticky) or (not sticky and dst.st_uid not in (0, os.geteuid())):
             raise LanguageError(f"{d} can be changed by other users, so {real} is not trusted")
         parent = os.path.dirname(d)
         if parent == d:

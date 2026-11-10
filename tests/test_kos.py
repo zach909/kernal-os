@@ -1200,7 +1200,7 @@ class TestLang(unittest.TestCase):
         self.assertIn("no apps installed", buf.getvalue())
         # code is a command too; one with no sandboxed runtime says so (66) and runs nothing
         with redirect_stdout(io.StringIO()):
-            self.assertEqual(kcli.main(["do", "const", "a", "=", "1"]), 66)
+            self.assertEqual(kcli.main(["do", "int", "x", "=", "1;"]), 66)
 
 
 from unittest import mock  # noqa: E402
@@ -1864,9 +1864,9 @@ class TestCodeIsACommand(Env):
         self.assertIn("security scan", out)
 
     def test_language_without_a_runtime_is_a_command_that_runs_nothing(self):
-        status, out = self.run_line("const a = 1", "javascript")                    # no password asked
+        status, out = self.run_line("int x = 1;", "c")                               # no password asked
         self.assertEqual(status, 66)
-        self.assertIn("no sandboxed javascript runtime", out)
+        self.assertIn("no sandboxed c runtime", out)
         status, out = self.run_line("run hello; rm -rf /", "shell")
         self.assertEqual(status, 66)
 

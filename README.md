@@ -271,7 +271,8 @@ kos backup [list]            what is backed up + what deduplication saved
 kos backup restore ID DIR    put one item back (guarded write, never overwrites)
 kos backup remove ID         forget one item (body deleted when nothing else uses it)
 kos owed / kos settle        what earlier writes still owe / do it now
-kos exec --code LINE         run one line of code as a sandboxed command
+kos exec --code LINE         run one line of code as a sandboxed command (--lang=ruby etc.)
+kos runtimes                 which languages code can run in (password); add NAME PROGRAM / remove NAME
 kos do WORDS...              one line of human language, run as one command
 kos line [--explain]         the line shell: every line you type is a command
 kos cell start NAME --kernel K --initrd I --cpus 2,3
@@ -367,6 +368,7 @@ kos> please scan notes.kapp     kos> lance l'app hello         kos> write notes.
 kos> print(6 * 7)               -> asks your password, runs in a sandbox, prints 42
 kos> run hello; rm -rf /        -> a command too: shell code, but there is no sandboxed
                                    shell runtime, so nothing runs (and it never touches the host)
+kos> @ruby puts 6*7             -> ruby, in the same sandbox: 42
 ```
 
 Human language: the words are only *names for existing commands*; each one
@@ -377,9 +379,21 @@ command" with a did-you-mean. Shell command names (`ls`, `cat`, `kill`) are
 not words in the lexicon - they are code.
 
 Code: detected by syntax, scanned, then run as a one-shot sandboxed app with a
-password and a 10 s limit. Only Python has a sandboxed runtime here; any
-other language is still a command - understood, scanned, logged - and says
-it has no runtime. `kos line --explain` shows how each line was understood.
+password and a 10 s limit. Python runs as an app; every other language is a
+**row in a table** (`kos/runtimes.py`): a trusted interpreter plus one argument
+list. Built in: JavaScript (node), Ruby, Perl, Lua - each only if its program is
+installed *and* trusted (a regular file, owned by root or you, that nobody else
+can change, in a directory nobody else can change). They run directly under the
+same sandbox (no files, no network, private scratch directory, 10 s limit,
+64 KiB of output, control characters shown as `\x1b` not obeyed, children
+killed with them), about 20-40 ms a line. Say which language with
+`@ruby puts 1+1` (the line shell guesses Python/JavaScript/SQL/C... by syntax).
+`kos runtimes` lists languages; `kos runtimes add NAME PROGRAM [--arg=-e --arg={code}]`
+adds one (password; the program's SHA-256 is pinned and checked on every run, and
+`{code}` must be one argument right after a flag so code can never be read as
+a flag); `kos runtimes remove NAME` removes it (password). A language with no
+runtime (C, SQL, shell...) is still a command - understood, scanned, logged - and
+says so. `kos line --explain` shows how each line was understood.
 Honest limits: it is a verb lexicon, not language understanding; the verb comes
 first; each code line is its own app, so variables do not persist.
 
@@ -533,6 +547,17 @@ Secure Boot: enroll the key you signed with, or the stick will be refused.
   including a forger who re-links it and concurrent appends/trims (nothing recorded is lost); hostile file and
   zip-entry names (no escape sequences reach the terminal); the broker sleeping with zero wakeups; `kos security`
   against eight deliberately broken installs.
+* **Programming languages (this round):** the language table (`kos/runtimes.py`) and its
+  guards (hostile argument lists, untrusted or swapped programs, a damaged registry), and
+  Perl run for real inside the sandbox (reads, writes and network refused; runaway, flooding and
+  terminal-escape output; children killed; a pinned custom language refused once its program
+  changes); node and ruby were also run by hand through the same path. **Not covered:** C, SQL,
+  shell, Java, Rust, Go (no sandboxed runtime: compiling needs a compiler inside the sandbox);
+  the interpreter's own bugs (a language runtime is a large attack surface and the sandbox is the
+  only wall); a program swapped *between* the SHA-256 check and its start (the check is by path,
+  not by file descriptor); running as an unprivileged user (the dev container runs as root, where
+  the sandbox drops to `nobody` and a scratch directory under root-only parents is unreachable for
+  both Python and these languages); lines do not share variables or state.
 * **Written but not yet booted:** exclusive evdev capture for the admin
 * **Written but not yet booted on real hardware or QEMU:** `kos usb` end to end on a real stick (its logic, refusals, byte-for-byte verify and the QEMU argv are unit-tested), the USB kernel options, exclusive evdev capture for the admin
   keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the

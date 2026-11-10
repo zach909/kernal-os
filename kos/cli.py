@@ -69,6 +69,7 @@ from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
+from .runtimes import LanguageError
 from .sandbox import SandboxError, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
 from .system import SystemBridge, bridge_for, close_instance, open_background
@@ -1425,7 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, BackupError,
-            AIError, OSError) as e:
+            AIError, LanguageError, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:
