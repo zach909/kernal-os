@@ -1179,6 +1179,29 @@ def cmd_exec(args, paths: Paths) -> int:
             prompter.close()
 
 
+def cmd_runtimes(args, paths: Paths) -> int:
+    """`kos runtimes` lists the languages code can run in; `add` and `remove` change that list.
+    All three need the password: a language is a program the OS will start for you."""
+    from . import runtimes
+    if args.rt_cmd == "add":
+        name, real, rargs = runtimes.prepare_add(args.name, args.program, args.arg or runtimes.DEFAULT_ARGS)
+        authority, _ = _authority(paths)
+        with authority.authorize("runtime.add", f"{name}: {real}"):
+            digest = runtimes.add(paths, name, real, rargs)
+        print(f"added {name}: {real} (pinned sha256 {digest[:16]}...)")
+        return 0
+    authority, _ = _authority(paths)
+    if args.rt_cmd == "remove":
+        with authority.authorize("runtime.remove", args.name):
+            ok = runtimes.remove(paths, args.name)
+        print(f"removed {args.name}" if ok else f"{args.name} was not added by you")
+        return 0 if ok else 1
+    authority.authorize("state.view", "languages").close()
+    for name, program, state in runtimes.describe(paths):
+        print(f"{name:12} {state:28} {program}")
+    return 0
+
+
 def cmd_line(args, paths: Paths) -> int:
     """The line shell. Every line is a command - in any language in the
     lexicon - or it is refused. Code is never run here."""
@@ -1338,6 +1361,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
     s.add_argument("--lang", default="python")
     s.add_argument("--code", required=True)
+    s = sub.add_parser("runtimes", help="the programming languages code runs in: list | add NAME PROGRAM | remove NAME")
+    rs = s.add_subparsers(dest="rt_cmd")
+    rs.add_parser("list", help="every language and whether it is ready")
+    r = rs.add_parser("add", help="add a language: a trusted program that takes code after a flag (password)")
+    r.add_argument("name")
+    r.add_argument("program", help="absolute path of the interpreter")
+    r.add_argument("--arg", action="append", help="one argument, repeatable; {code} is the line (default: -e {code})")
+    r = rs.add_parser("remove", help="remove a language you added (password)")
+    r.add_argument("name")
     s = sub.add_parser("usb", help="boot KOS from a USB stick: list | check IMG | write IMG /dev/sdX | test IMG")
     us = s.add_subparsers(dest="usb_cmd", required=True)
     u = us.add_parser("list", help="USB disks it would be willing to write")
@@ -1368,18 +1400,6 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
@@ -1389,7 +1409,8 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai}
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
+    "runtimes": cmd_runtimes}
 
 
 def main(argv: list[str] | None = None) -> int:
