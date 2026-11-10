@@ -87,9 +87,9 @@ class TestTheSchema(unittest.TestCase):
     def test_hostile_arguments_never_reach_a_handler(self):
         bad = [
             ("audit.tail", {"n": 0}), ("audit.tail", {"n": 501}), ("audit.tail", {"n": True}),
-            ("audit.tail", {"n": "5"}), ("audit.tail", {"n": 5.0}), ("audit.tail", {"n": None}),
+            ("audit.tail", {"n": "5"}), ("audit.tail", {"n": 5.0}),
             ("audit.tail", []), ("audit.tail", "n=5"), ("audit.tail", {"n": 5, "x": 1}),
-            ("files.list", {}), ("files.list", {"path": ""}), ("files.list", {"path": "x" * 1025}),
+            ("files.list", {}), ("files.list", {"path": None}), ("files.list", {"path": ""}), ("files.list", {"path": "x" * 1025}),
             ("files.list", {"path": "a\x00b"}), ("files.list", {"path": "a\x1b[2Jb"}),
             ("files.list", {"path": "a‮b"}), ("files.list", {"path": 5}), ("files.list", {"path": ["a"]}),
             ("files.read", {"path": "/x", "limit": 0}), ("files.read", {"path": "/x", "limit": 262_145}),
@@ -120,6 +120,24 @@ class TestTheSchema(unittest.TestCase):
                     {"cmd": "service", "id": 1, "name": 5}, {"cmd": "service", "id": 2**31 + 1, "name": "audit.tail"}):
             with self.assertRaises(ProtocolError, msg=str(msg)):
                 validate_app_message(msg, "tui")
+
+    def test_checking_twice_gives_the_same_answer(self):
+        """The host checks a message the protocol already normalised; defaults (including None) must survive that."""
+        for name, spec in servicespec.SPECS.items():
+            args = {k: a.default for k, a in spec.args.items() if not a.required}
+            if any(a.required for a in spec.args.values()):
+                continue
+            once = spec.check(args)
+            self.assertEqual(spec.check(once), once, name)
+        spec = servicespec.SPECS["packages.convert"]
+        once = spec.check({"path": "/a.deb", "out": "/b.kapp"})
+        self.assertEqual(once["exe"], None)
+        self.assertEqual(spec.check(once), once)
+        self.assertEqual(spec.check({**once, "exe": None}), once)
+        with self.assertRaises(servicespec.SpecError):
+            spec.check({**once, "exe": 5})
+        with self.assertRaises(servicespec.SpecError):
+            servicespec.SPECS["files.list"].check({"path": None})            # a required argument is not optional
 
     def test_a_good_call_is_accepted_and_normalised(self):
         m = validate_app_message({"cmd": "service", "id": 4, "name": "files.read", "args": {"path": "/etc/hostname"},

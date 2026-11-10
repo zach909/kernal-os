@@ -327,14 +327,14 @@ def _pkg_permit(ctx: Ctx, name: str, revoke: bool) -> dict:
 
 
 @service("packages.convert")
-def _pkg_convert(ctx: Ctx, path: str, out: str) -> dict:
+def _pkg_convert(ctx: Ctx, path: str, out: str, exe: str) -> dict:
     from .debconv import MAX_DEB, DebError, convert
     if os.path.lexists(out):
         raise ServiceError(f"{out} already exists; refusing to overwrite it")
     with open(path, "rb") as f:
         data = f.read(MAX_DEB + 1)
     try:
-        kapp, report = convert(data, None)
+        kapp, report = convert(data, exe or None)
     except DebError as e:
         raise ServiceError(str(e)) from None
     ctx.authority.authorize("app.convert", report.kapp_name).close()

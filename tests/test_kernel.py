@@ -412,5 +412,72 @@ class TestInitClaimsTheCore(unittest.TestCase):
             init.kernel_gate(self.paths, self.Say(), k)
 
 
+class TestTheShippedKernelFiles(unittest.TestCase):
+    """kernel/ is what makes this OS's kernel its own. These fail if the pieces stop agreeing."""
+    K = Path(__file__).resolve().parent.parent / "kernel"
+
+    def test_the_pinned_source_is_named_and_checksummed(self):
+        import re
+        ver = (self.K / "KERNEL_VERSION").read_text().strip()
+        self.assertRegex(ver, r"^\d+\.\d+\.\d+$")
+        self.assertRegex((self.K / "KERNEL_SHA256").read_text().strip(), r"^[0-9a-f]{64}$")
+        patch = (self.K / "patches" / "0001-kos-lsm.patch").read_text()
+        self.assertIn(f"Linux {ver}", patch, "the patch says which Linux it is made against")
+        self.assertTrue(re.search(r"https://cdn\.kernel\.org", (self.K / "build.sh").read_text()))
+
+    def test_the_patch_touches_only_what_a_new_lsm_needs(self):
+        import re
+        patch = (self.K / "patches" / "0001-kos-lsm.patch").read_text()
+        files = set(re.findall(r"^\+\+\+ b/(\S+)", patch, re.M))
+        self.assertEqual(files, {"include/uapi/linux/lsm.h", "include/linux/lsm_count.h", "security/Kconfig",
+                                 "security/Makefile", "security/kos/Kconfig", "security/kos/Makefile",
+                                 "security/kos/kos.c"})
+        # an LSM may add hooks of its own; it must not edit what other code does
+        removed = [l for l in patch.splitlines() if l.startswith("-") and not l.startswith("---")]
+        self.assertTrue(all("bpf\"" in l or ",bpf" in l for l in removed), removed)
+
+    def test_the_config_selects_the_module_and_really_can_switch_off_what_it_says(self):
+        cfg = (self.K / "kos.config").read_text()
+        self.assertIn("CONFIG_SECURITY_KOS=y", cfg)
+        import re
+        lsm = re.search(r'^CONFIG_LSM="([^"]+)"', cfg, re.M).group(1).split(",")
+        self.assertIn("kos", lsm)
+        self.assertLess(lsm.index("kos"), lsm.index("bpf"), "bpf stays last")
+        for hidden in ("IO_URING", "X86_VSYSCALL_EMULATION"):         # only switchable with EXPERT: see build.sh
+            if f"# CONFIG_{hidden} is not set" in cfg:
+                self.assertIn("CONFIG_EXPERT=y", cfg, hidden)
+        self.assertNotIn("CONFIG_PAGE_TABLE_ISOLATION=", cfg, "renamed in 6.x: MITIGATION_PAGE_TABLE_ISOLATION")
+
+    def test_the_signed_command_line_requires_the_kos_kernel_and_names_the_module(self):
+        cmd = (self.K / "cmdline.txt").read_text().split()
+        self.assertIn("kos.require_kernel=1", cmd)
+        lsm = next(w for w in cmd if w.startswith("lsm=")).split("=", 1)[1].split(",")
+        self.assertIn("kos", lsm)
+        self.assertIn("landlock", lsm)
+
+    def test_the_scripts_are_executable_and_parse(self):
+        import subprocess
+        for f in (self.K / "build.sh", self.K / "test" / "run.sh"):
+            self.assertTrue(os.access(f, os.X_OK), f)
+            self.assertEqual(subprocess.run(["bash", "-n", str(f)], capture_output=True).returncode, 0, f)
+
+    def test_the_test_program_refuses_what_the_rules_say_and_allows_the_matching_call(self):
+        c = (self.K / "test" / "kos_lsm_test.c").read_text()
+        for must in ("only PID 1 can claim the core", "an app cannot write firewall rules",
+                     "app 7 with no rule cannot create a TCP socket", "an app cannot open a tty",
+                     "AF_UNSPEC does not smuggle", "a wildcard host is refused", "a range is refused",
+                     "trailing junk after an address is refused", "reading the log drains it",
+                     "confinement survives fork and exec", "control: the core can create an inet socket"):
+            self.assertIn(must, c)
+
+    @unittest.skipUnless(os.environ.get("KOS_KERNEL_TEST") == "1",
+                         "boots a real kernel under QEMU (about 2 minutes, downloads Linux): KOS_KERNEL_TEST=1")
+    def test_boot_the_patched_kernel_and_run_the_module_checks(self):
+        import subprocess
+        r = subprocess.run([str(self.K / "test" / "run.sh")], capture_output=True, text=True, timeout=1500)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        self.assertRegex(r.stdout, r"\d+ checks passed, 0 failed")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -84,6 +84,19 @@ def catalog_md() -> str:
     for e in packs:
         app = f"`{e.name}`" if e.scope != "none" else "-"
         lines.append(f"| {e.title} | {app}{' (network)' if e.network else ''} | {e.scope} | {e.note.replace('|', '/') or '-'} |")
+    from kos import sysapps
+    from kos.launchmap import APP_FOR_COMMAND, BOOTSTRAP
+    own = sysapps.entries()
+    lines += ["", "## The OS's own apps", "",
+              "The OS's own commands, as apps (`kos/office/pack_system.py`, and five titles in `pack_os`). Each asks the OS for what it "
+              "shows or changes through the service layer (`kos/servicespec.py`); the permission it asks for is in the third column, "
+              "and the password is typed in the OS's own prompt every time. `kos desktop install` installs them together.", "",
+              f"**{len(own)} apps.** The commands that now open them: `kos/launchmap.py`.", "",
+              "| App | Title | Asks the OS for | Opens for these commands | What it is / what it is not |", "|---|---|---|---|---|"]
+    for e in own:
+        cmds = ", ".join(f"`{c}`" for c, a in {**APP_FOR_COMMAND, **BOOTSTRAP}.items() if a == e.name) or "-"
+        asks = ", ".join(f"`service:{g}`" for g in e.services) + (" + `system`" if getattr(e, "system", False) else "")
+        lines.append(f"| `{e.name}` | {e.title} | {asks or '-'} | {cmds} | {e.note.replace('|', '/')} |")
     return "\n".join(lines) + "\n"
 
 

@@ -101,10 +101,11 @@ class TestTheCatalogue(unittest.TestCase):
 
     def test_a_converted_command_is_only_a_launcher_in_the_command_line(self):
         for cmd in APP_FOR_COMMAND:
-            if cmd == "scan":
-                continue                                    # `scan watch` is still the OS's: it is a long-running watcher
+            if cmd in ("scan", "skills"):
+                continue            # `scan watch` is a watcher, `skills --out` a guarded write: both stay the OS's
             self.assertEqual(cli.COMMANDS[cmd].__qualname__, "_launcher.<locals>.go", cmd)
         self.assertEqual(cli.COMMANDS["scan"].__name__, "cmd_scan")
+        self.assertEqual(cli.COMMANDS["skills"].__name__, "cmd_skills")
 
     def test_a_launcher_for_an_app_that_is_not_installed_says_so_and_does_nothing(self):
         import contextlib
@@ -373,7 +374,7 @@ class TestPackageAndPermissionApps(Os):
         self.assertIn("revoked", h.text)
 
     def test_converter_refuses_a_missing_package_with_a_reason(self):
-        h = self.drive("deb-converter", ["c", *typed("/no/such.deb"), "enter", *typed(str(self.root / "out.kapp")), "enter"])
+        h = self.drive("deb-converter", ["c", *typed("/no/such.deb"), "enter", *typed(str(self.root / "out.kapp")), "enter", "enter"])
         self.assertIn("Refused", h.text)
         self.assertFalse((self.root / "out.kapp").exists())
 

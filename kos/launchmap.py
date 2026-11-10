@@ -28,7 +28,7 @@ APP_FOR_COMMAND = {
     "owed": "disk-care",
     "cell": "cells",
     "convert": "deb-converter",
-    "skills": "skill-maker",
+    "skills": "skill-maker",        # the preview; `skills --out DIR` writes files and stays in the OS
     "grant": "permissions",
     "spaces": "permissions",
 }

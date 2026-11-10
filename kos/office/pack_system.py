@@ -437,9 +437,14 @@ def make_permissions(host, entry=None):
 
 def make_converter(host, entry=None):
     def go(screen):
-        return ask_chain("Convert", [("Debian package (.deb):", ""), ("Write the app to (a new file):", "")], lambda v: run_service(
-            screen.host, "Convert", "packages.convert", {"path": v[0], "out": v[1]},
-            lambda d: [d["summary"], "", f"wrote {d['wrote']}", "Next: install it with Software Updates (it is scanned again)."])
+        return ask_chain(
+            "Convert", [("Debian package (.deb):", ""), ("Write the app to (a new file):", ""),
+                        ("Which program inside, if there are several (else leave empty):", "")],
+            lambda v: run_service(
+                screen.host, "Convert", "packages.convert",
+                {"path": v[0], "out": v[1], **({"exe": v[2]} if v[2] else {})},
+                lambda d: [d["summary"], "", f"wrote {d['wrote']}",
+                           "Next: install it with Software Updates (it is scanned again)."])
             if v[0] and v[1] else None)
     return Report(host, "Debian Converter", ["", "Turn a .deb into an app. Only statically linked programs convert.", "",
                                              "Maintainer scripts are never run. The result gets no permissions.", "",
@@ -552,7 +557,7 @@ ENTRIES: list = [
         name="deb-converter", services=["packages"]),
     app("Skill Maker", make_skills, "partial",
         "Shows agent skills made from the installed apps and the commands. Replaces `kos skills` without `--out`; writing "
-        "them to disk is still `kos skills --out`.",
+        "them to disk is still `kos skills --out` (it needs the administrator keyboard).",
         name="skill-maker", services=["skills"]),
     app("Terminal", make_terminal, "partial",
         "The line shell as an app: a line in your language becomes one command, run by opening the app that now holds it. "

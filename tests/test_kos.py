@@ -2328,6 +2328,34 @@ class TestSkillMaker(Env):
         self.assertEqual(len(refused), 1)
         self.assertIn("bad", refused[0])
 
+    def test_skills_out_is_still_a_guarded_write_not_a_launcher(self):
+        """`kos skills` is an app now, but `--out DIR` writes files, which needs the exclusive administrator
+        keyboard that an app session cannot hold. It must reach that path, not quietly open the app."""
+        import types
+        from unittest import mock
+        from kos.admin import AdminError
+        self._install()
+        out = Path(self.tmp.name) / "skillsout"
+        out.mkdir()
+        def provide(paths):
+            a = self.authority(PW)
+            self.prompter.close = lambda: None
+            return a, self.prompter
+        with mock.patch.object(kcli, "_authority", provide), \
+                mock.patch.object(kcli, "_launcher", side_effect=AssertionError("must not launch the app")):
+            with self.assertRaises(AdminError):                          # no administrator keyboard is booted
+                kcli.cmd_skills(types.SimpleNamespace(out=str(out)), self.paths)
+        self.assertEqual(list(out.iterdir()), [], "nothing was written")
+
+    def test_skills_without_out_only_launches_the_app(self):
+        import contextlib
+        import types
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = kcli.cmd_skills(types.SimpleNamespace(out=None), self.paths)
+        self.assertEqual(code, 66)
+        self.assertIn("skill-maker", err.getvalue())
+
     def test_skills_service_needs_the_password(self):
         self._install()
         r = service_call(self, "skills.make", {}, "wrong", "wrong", "wrong")
@@ -2461,6 +2489,20 @@ class TestDebConvert(Env):
         self.assertIn("--exe", str(cm.exception))
         _, rep = self.conv(deb, "usr/bin/b")
         self.assertEqual(rep.entry, "usr/bin/b")
+
+    def test_the_convert_service_passes_exe_through_so_a_package_with_several_programs_still_converts(self):
+        src = Path(self.tmp.name) / "two.deb"
+        src.write_bytes(make_deb({"usr/bin/a": (fake_elf(False), 0o755), "usr/bin/b": (fake_elf(False), 0o755)}))
+        out = Path(self.tmp.name) / "two.kapp"
+        r = service_call(self, "packages.convert", {"path": str(src), "out": str(out)})        # no answers
+        self.assertFalse(r["ok"])
+        self.assertIn("--exe", r["detail"])
+        self.assertEqual(self.prompter.asked, [], "refused before any password")
+        r = service_call(self, "packages.convert", {"path": str(src), "out": str(out), "exe": "usr/bin/b"}, PW)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(out.exists())
+        with self.assertRaises(ProtocolError):                  # hostile: refused at the protocol, never reaches the OS
+            service_call(self, "packages.convert", {"path": str(src), "out": str(out), "exe": "x" * 201})
 
     def test_non_elf_and_missing_exe_are_refused(self):
         from kos.debconv import DebError

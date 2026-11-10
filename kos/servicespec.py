@@ -105,7 +105,11 @@ class Spec:
             raise SpecError(f"unknown argument {extra[0]!r} for {self.name}")
         out = {}
         for key, arg in self.args.items():
-            if key in raw:
+            if key in raw and raw[key] is None and not arg.required:
+                out[key] = arg.default          # null for an optional argument means "the default"; the host
+                                                # checks a message the protocol already normalised, so this
+                                                # makes checking twice give the same answer
+            elif key in raw:
                 out[key] = arg.check(key, raw[key])
             elif arg.required:
                 raise SpecError(f"{self.name} needs {key!r}")
@@ -159,7 +163,8 @@ SPECS: dict[str, Spec] = _specs(
     Spec("packages.update", {"path": path()}, "update to a newer version: scan, password, re-seal"),
     Spec("packages.remove", {"name": name()}, "remove an app"),
     Spec("packages.permit", {"name": name(), "revoke": flag(False)}, "let an app run at all (or take that away)"),
-    Spec("packages.convert", {"path": path(), "out": path()}, "convert a Debian package into an app"),
+    Spec("packages.convert", {"path": path(), "out": path(), "exe": text(200, required=False, default=None)},
+         "convert a Debian package into an app (exe: which program, when there are several)"),
     Spec("permissions.list", {}, "who may use which shared folder"),
     Spec("permissions.grant", {"app": name(), "space": name(), "level": one_of("read", "write", default="read"),
                                "revoke": flag(False)}, "let an app into a shared folder (or take it away)"),

@@ -27,9 +27,13 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    - Work side: nothing is done until you ran it and checked it.
 2. **Everything is an app.** New features ship as sandboxed `.kapp`s that
    only talk to the OS through the command protocol (`kos/protocol.py`).
-   The OS core stays small: auth, sandbox, devices, protocol. System
-   functions are `request` commands (needs `system` permission + a permit +
-   the password in the OS's own prompt).
+   What is not an app is the KOS kernel (`kernel/`: patched Linux) and a small
+   Python core (auth, seals, sandbox launch, protocol, devices) still to be
+   moved down. System functions are `request` commands (needs `system`
+   permission + a permit + the password in the OS's own prompt) or `service`
+   calls (`kos/servicespec.py`: manifest permission `service:GROUP`, the password
+   typed in the OS's own prompt, every argument checked, every answer scrubbed).
+   A converted command in `kos/cli.py` is only a launcher (`kos/launchmap.py`).
 3. **Every connection is blocked by default**, any pair, any protocol, any
    port, including the OS's own. Allowed only by a firewall rule (one app, one
    host, one port, one protocol). The firewall is an app that asks the OS;
@@ -83,6 +87,10 @@ hostile-input test.
 
 ## Before you call a change done
 
+- [ ] A new OS function an app needs is a **service**, not a new `request` and not code
+      in the app: spec, handler with the password asked before any read, tests.
+- [ ] A kernel change ran `kernel/test/run.sh`, and the README says what the kernel does
+      not cover (it only covers confined apps; it cannot see encryption).
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
 - [ ] Anything new that connects, listens or fetches is blocked by default and
       logged; nothing opens a plain-text connection.

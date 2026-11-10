@@ -893,6 +893,39 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def cmd_skills(args, paths: Paths) -> int:
+    """`kos skills` is the Skill Maker app (a preview). `kos skills --out DIR` stays here: each SKILL.md is a
+    guarded write (administrator keyboard, scan, optimize), and the exclusive keyboard is not something an app
+    session can hold. One password (``skill.make``) verifies every app's seal."""
+    if not args.out:
+        return _launcher("skills")(args, paths)
+    from .skillmaker import collect_apps, command_inventory, make_skills
+    authority, prompter = _authority(paths)
+    manifests, skipped = collect_apps(paths, authority)
+    prompter.close()
+    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    for line in skipped + refused:
+        print(line, file=sys.stderr)
+    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
+    out = Path(os.path.abspath(args.out))
+    if not out.is_dir() or out.is_symlink():
+        raise KAppError(f"{out} must be an existing directory (not a symlink)")
+    kb = AdminKeyboard(paths)
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)
+    try:
+        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        wauth = Authority(paths, wprompter)
+        for rel, text in files.items():
+            target = out / rel
+            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
+            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
+    finally:
+        if devices is not None:
+            devices.close()
+    return 0
+
+
 def _launcher(command: str):
     """The command line's whole job for a command that is an app now: run that app (kos/launchmap.py).
     The app is installed with `kos desktop install`; until it is, say so instead of doing the work here."""
@@ -921,8 +954,9 @@ COMMANDS = {
     "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
     # the commands that are apps now: the command line only opens the app
+    "skills": cmd_skills,
     **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
-                                  "doctor", "firmware", "audit", "security", "owed", "settle", "skills", "convert")}}
+                                  "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
 
 
 
