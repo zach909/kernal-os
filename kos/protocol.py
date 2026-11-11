@@ -45,9 +45,11 @@ app -> OS
     {"cmd": "request", "action": "ask", "text": str, "context": str?, "source": str?}
                                          ask the AI (needs the 'ai' permission; the OS asks for the
                                          password and says what leaves the computer). The answer is text.
-    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
+    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?, "store": "cookies"|"passwords"?}
                                          durable storage: the app's private data ('storage' permission) or a
-                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
+                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant), or - with "store" - the app's
+                                         cookie jar ('cookies' permission) or saved passwords ('passwords'
+                                         permission): separate stores, never reachable through 'storage'
     {"cmd": "exit", "code": int}
 
 ``request`` is how an app does anything beyond drawing: it *asks*. The OS only
@@ -199,6 +201,7 @@ def _request(msg: dict) -> dict:
 
 
 VAULT_OPS = ("put", "get", "list", "delete", "spaces")
+VAULT_STORES = ("cookies", "passwords")
 _SPACE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _VAULT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MAX_VAULT_VALUE = 400_000
@@ -214,6 +217,10 @@ def _vault(msg: dict) -> dict:
         if not isinstance(msg["space"], str) or not _SPACE_RE.match(msg["space"]) or op == "spaces":
             raise ProtocolError("vault.space must be a plain space name (and not used with 'spaces')")
         out["space"] = msg["space"]
+    if msg.get("store") is not None:
+        if msg["store"] not in VAULT_STORES or op == "spaces" or "space" in out:
+            raise ProtocolError(f"vault.store must be one of {VAULT_STORES} (not used with 'space' or 'spaces')")
+        out["store"] = msg["store"]
     if op not in ("list", "spaces"):
         key = msg.get("key")
         if not isinstance(key, str) or not _VAULT_KEY_RE.match(key):

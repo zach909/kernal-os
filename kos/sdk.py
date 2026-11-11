@@ -107,7 +107,8 @@ class App:
     # --- durable storage (needs the 'storage' permission) -----------------
     # Blocking round trips: the OS answers a vault command straight away and
     # never prompts. Any other event that arrives meanwhile is kept for events().
-    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None) -> dict:
+    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None,
+               store: Optional[str] = None) -> dict:
         self._seq += 1
         msg = {"cmd": "vault", "op": op, "id": self._seq}
         if op not in ("list", "spaces"):
@@ -116,6 +117,8 @@ class App:
             msg["value"] = value
         if space is not None:
             msg["space"] = space
+        if store is not None:
+            msg["store"] = store
         self.send(msg)
         while True:
             ev = self._read_event()
@@ -144,6 +147,22 @@ class App:
 
     def vault_delete(self, key: str, space: Optional[str] = None) -> bool:
         return bool(self._vault("delete", key, space=space).get("ok"))
+
+    # Cookies and saved passwords: separate stores behind the 'cookies' and 'passwords' manifest permissions.
+    # Without the permission the OS refuses (and logs it). ``store`` is "cookies" or "passwords".
+    def secret_put(self, store: str, key: str, value: str) -> bool:
+        return bool(self._vault("put", key, value, store=store).get("ok"))
+
+    def secret_get(self, store: str, key: str) -> Optional[str]:
+        r = self._vault("get", key, store=store)
+        return r.get("value") if r.get("ok") else None
+
+    def secret_keys(self, store: str) -> list:
+        r = self._vault("list", store=store)
+        return list(r.get("keys", [])) if r.get("ok") else []
+
+    def secret_delete(self, store: str, key: str) -> bool:
+        return bool(self._vault("delete", key, store=store).get("ok"))
 
     def vault_spaces(self) -> list:
         """Shared spaces this app can open right now: [{space, access, owner}]."""
