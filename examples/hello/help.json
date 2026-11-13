@@ -1,0 +1,8 @@
+{
+  "about": "Demo app: shows the commands the OS sends it.",
+  "commands": [
+    {"name": "any key", "help": "types it into the page"},
+    {"name": "click", "help": "counts a click; in graphical mode draws a dot"},
+    {"name": "Esc", "help": "leave the app"}
+  ]
+}

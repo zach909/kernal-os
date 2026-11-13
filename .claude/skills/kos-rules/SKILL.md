@@ -5,9 +5,10 @@ description: The rules every change to kernal-os (KOS) must follow - everything 
 
 # KOS rules
 
+**This does:** sets the six rules every change to KOS must follow
 **This does:** sets the rules every change to KOS must follow
 (verification, everything is an app, connections blocked and encrypted, the
-pipeline encrypted).
+pipeline encrypted, fractions not decimals, proofs).
 
 **So the AI:** reads the README rules first, applies the checklist at the
 bottom to its change, runs the tests against a baseline, and reports what is
@@ -34,9 +35,13 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
      static rule check plus a compile.
 2. **Everything is an app.** New features ship as sandboxed `.kapp`s that
    only talk to the OS through the command protocol (`kos/protocol.py`).
-   The OS core stays small: auth, sandbox, devices, protocol. System
-   functions are `request` commands (needs `system` permission + a permit +
-   the password in the OS's own prompt).
+   What is not an app is the KOS kernel (`kernel/`: patched Linux) and a small
+   Python core (auth, seals, sandbox launch, protocol, devices) still to be
+   moved down. System functions are `request` commands (needs `system`
+   permission + a permit + the password in the OS's own prompt) or `service`
+   calls (`kos/servicespec.py`: manifest permission `service:GROUP`, the password
+   typed in the OS's own prompt, every argument checked, every answer scrubbed).
+   A converted command in `kos/cli.py` is only a launcher (`kos/launchmap.py`).
 3. **Every connection is blocked by default**, any pair, any protocol, any
    port, including the OS's own. Allowed only by a firewall rule (one app, one
    host, one port, one protocol). The firewall is an app that asks the OS;
@@ -48,6 +53,16 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    no encrypted-to-plain redirect. The browser tells the user on every page
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
+6. **No decimals, only fractions.** Non-whole numbers are `Fraction`
+   (`kos/exact.py`); no decimal literals, no `float()`, no `/` between numbers
+   (use `//` or `Fraction`); show `7/2`, never `3.5`. A float handed to you by
+   hardware or a library goes through `exact.from_hardware` at once.
+   `tests/test_fractions_rule.py` fails on any new decimal (the old ones are
+   counted in `tests/fractions_baseline.json` and may not grow; lower the
+   number when you convert a file).
+7. **Proofs for everything that can be proved.** Maths-shaped claims go in
+   `kos/proofs.py` (Z3) with a negative control in `tests/test_proofs.py`.
+   Everything else gets a test that tries to break it. Say which is which.
 
 ## Soft rules (a strong default, not a hard rule)
 
@@ -79,14 +94,12 @@ mouse/keyboard --> evdev (OS only) --> key/pointer/button commands --> app
 | Kernel / sandbox | `kos/sandbox.py` | Landlock + namespaces; if the kernel can't enforce it, the app does not run. |
 | Hardware | OS only | Nothing but the OS touches it. |
 
-**Encryption status: not done yet.** The command channel is plain
-newline-delimited JSON over a socket (`Channel` in `kos/protocol.py`). The
-parties that really need it are the ones that are not just parent and child on
-one kernel: the broker socket under `<state>/instances/` (any process running
-as the owner can connect and `attach`), and cell vsock. Do not invent a cipher
-or use one from memory. The standard library has no authenticated encryption;
-adding a vetted library (for example `cryptography`) is a decision for the
-owner. Ask before adding a dependency.
+**Encryption status: built, not wired.** `kos/crypt.py` (`SecureChannel`) is
+the channel: vetted `cryptography` primitives only (X25519, HKDF-SHA256,
+ChaCha20-Poly1305), never a cipher of your own. The command channel, the
+broker socket under `<state>/instances/` and cell vsock still carry plain JSON
+lines. To wire the broker, both ends need `Grant.key(label)` from the password,
+so `attach` would ask for it: tell the owner, that is a behaviour change.
 
 ## Layer skills
 
@@ -105,6 +118,10 @@ hostile-input test.
 
 ## Before you call a change done
 
+- [ ] A new OS function an app needs is a **service**, not a new `request` and not code
+      in the app: spec, handler with the password asked before any read, tests.
+- [ ] A kernel change ran `kernel/test/run.sh`, and the README says what the kernel does
+      not cover (it only covers confined apps; it cannot see encryption).
 - [ ] New code uses whole numbers (`//`, no float); `tests/test_proof.py` ratchet passes.
       Anything new that can start code goes through `proof.require`.
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
@@ -119,6 +136,8 @@ hostile-input test.
       say which failures are yours. Never call a failure "the environment"
       without finding its cause (the earlier "14 known failures" were a real
       bug: `fcntl.F_ADD_SEALS` does not exist before Python 3.14).
+- [ ] New code has no decimals (`python3 -m unittest tests.test_fractions_rule`).
+- [ ] Anything maths-shaped has a Z3 proof and a negative control; the rest has a breaking test.
 - [ ] README gaps table updated: say what is still not covered. Never claim a
       rule is met when it is only met in one example.
 - [ ] Reported honestly: what ran, what failed, what you did not test.

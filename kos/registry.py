@@ -42,6 +42,7 @@ class Instance:
     status: str = "starting"  # starting -> running -> exited
     system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
     asks: list = field(default_factory=list)   # the single requests its manifest allows (ask:ACTION), set by the OS
+    admin: bool = False       # manifest has the 'admin' permission (set by the OS, never the app)
     address: str = ""         # the path+query of the kos:// address it was opened with (checked by the OS)
 
 
