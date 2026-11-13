@@ -117,8 +117,12 @@ mouse/keyboard --> evdev (OS only) --> key/pointer/button commands --> app
 | Kernel / sandbox | `kos/sandbox.py` | Landlock + namespaces; if the kernel can't enforce it, the app does not run. |
 | Hardware | OS only | Nothing but the OS touches it. |
 
-**Encryption status: built, not wired.** `kos/crypt.py` (`SecureChannel`) is
-the channel: vetted `cryptography` primitives only (X25519, HKDF-SHA256,
+**Encryption status: built, not wired.** The protocol for any connection is `kos/silent.py`
+(`SilentChannel`, KOS-SILENT/1): grants nothing (send/recv/close only, imports nothing that
+decides, never opens a connection, exposes no peer identity), gives nothing away (fixed-size
+random-looking handshake and records, no reply to a peer without the secret, one error text),
+X25519 + ML-KEM-768 hybrid, both mandatory, no fallback. New connections use it, not
+`SecureChannel`. `kos/crypt.py` (`SecureChannel`, X25519 only, not quantum resistant) is the older channel: vetted `cryptography` primitives only (X25519, HKDF-SHA256,
 ChaCha20-Poly1305), never a cipher of your own. The command channel, the
 broker socket under `<state>/instances/` and cell vsock still carry plain JSON
 lines. To wire the broker, both ends need `Grant.key(label)` from the password,
