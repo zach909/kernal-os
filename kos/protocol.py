@@ -264,6 +264,12 @@ def validate_app_message(msg: Any, mode: str) -> dict:
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")
 
 
+def _no_decimal(token: str):
+    """The no-decimals rule on the wire: a number with a point or exponent, or NaN/Infinity,
+    is refused before any validator sees it (the protocol only ever carries whole numbers)."""
+    raise ValueError("decimal number")
+
+
 class Channel:
     """Non-blocking JSON-lines endpoint used by the OS side."""
 
@@ -279,7 +285,7 @@ class Channel:
     def send(self, obj: dict) -> None:
         if self.closed:
             return
-        data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
+        data = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode() + b"\n"
         try:
             self.sock.setblocking(True)
             self.sock.settimeout(2.0)
@@ -310,7 +316,7 @@ class Channel:
             del self._buf[:i + 1]
             if line.strip():
                 try:
-                    out.append(json.loads(line))
+                    out.append(json.loads(line, parse_float=_no_decimal, parse_constant=_no_decimal))
                 except ValueError:
                     raise ProtocolError("app sent invalid JSON") from None
         if len(self._buf) > MAX_LINE:

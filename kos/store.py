@@ -24,6 +24,7 @@ from pathlib import Path
 from .auth import Authority, Grant
 from .kapp import ID_RE, MAX_ARCHIVE, KApp, KAppError, Manifest, compute_seal
 from .paths import Paths, atomic_write
+from . import proof
 from .scan import ScanResult, scan_bytes
 
 SEAL_KEY_LABEL = "kapp-seal"
@@ -121,6 +122,7 @@ class AppStore:
             qpath = qdir / f"{m.name}-{int(time.time())}.kapp"
             atomic_write(qpath, app.data)
             raise VirusFoundError(m.name, result, qpath)
+        proof.require(app)       # no proof, no install - and before the password, like the scan
         with authority.authorize("app.update" if update else "app.install", m.name) as grant:
             seal = compute_seal(grant.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
         self.paths.ensure()
@@ -161,7 +163,9 @@ class AppStore:
         if grant.action not in ("app.run", "app.graphical", "app.open", "app.extend", "app.mod") \
                 or grant.target != name:
             raise TamperedError("grant does not cover running this app")
-        return self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+        app = self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+        proof.require(app)       # the seal says these are the installed bytes; the proof says they may run
+        return app
 
     def verified_manifest(self, name: str, grant: Grant):
         """The manifest of an installed app, after the same seal check as a
