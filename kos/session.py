@@ -34,6 +34,8 @@ from typing import Optional
 from .auth import AuthError, Authority, AuthorizationDenied
 from .display import Modal
 from .devices import DeviceError
+from .guard import Guard
+from .kapp import wire_mode
 from .protocol import Channel, ProtocolError, validate_app_message
 
 BOOT_ORDER = ("mouse", "keyboard")
@@ -115,9 +117,16 @@ class Session:
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
+                 guard: Optional[Guard] = None, allow_network: Optional[bool] = None,
+                 app_pid: Optional[int] = None):
                  status_ok: bool = False):
                  services=None):
         self.name, self.mode = name, mode
+        # A layer with no pointer (the text layer) is never offered the mouse.
+        self.has_pointer = getattr(surface, "has_pointer", True)
+        self.device_names = tuple(d for d in BOOT_ORDER if self.has_pointer or d != "mouse")
+        boot_devices = tuple(d for d in boot_devices if d in self.device_names)
+        preboot = tuple(d for d in preboot if d in self.device_names)
         self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
         self.channel = channel
         self.proc = proc
@@ -146,6 +155,10 @@ class Session:
         self.prompter = prompter or SessionPrompter(self)
         # Every password asked during the session goes through the trusted overlay.
         self.authority.prompter = self.prompter
+        # The security system of each layer (guard.py): graphics, text, input, commands, kernel, hardware.
+        pid = app_pid if app_pid is not None else (proc.pid if proc is not None else None)
+        self.guard = guard or Guard(name, audit=getattr(authority, "audit", None), pid=pid,
+                                    allow_network=allow_network)
 
     # --- helpers -----------------------------------------------------------
     def show_modal(self, modal: Optional[Modal]) -> None:
@@ -153,12 +166,14 @@ class Session:
         self.surface_dirty = True
 
     def render(self) -> None:
-        devs = " ".join(f"{d}:{'ON' if d in self.booted else 'off'}" for d in BOOT_ORDER)
+        devs = " ".join(f"{d}:{'ON' if d in self.booted else 'off'}" for d in self.device_names)
         notice = self.notice if time.monotonic() < self._notice_until else ""
         self.surface.set_status(f" {self.name} [{self.mode}] {devs} | Ctrl-C quits"
                                 + (f" | {notice}" if notice else ""))
         self.surface.render()
-        self.surface_dirty = False
+        # a surface that held a change back (the text layer prints a page at most every 250 ms)
+        # says so, and is asked again on the next turn of the loop
+        self.surface_dirty = bool(getattr(self.surface, "deferred", False))
 
     def flash(self, text: str) -> None:
         self.notice = text
@@ -198,6 +213,10 @@ class Session:
 
     # --- event routing -----------------------------------------------------
     def route(self, ev: dict) -> None:
+        # input guard: only a well-formed event of a kind the OS sends goes any further
+        ev = self.guard.input_event(ev, *self._bounds(), pointer=self.has_pointer)
+        if ev is None:
+            return
         t = ev["type"]
         if t == "interrupt":
             if self.detach_on_interrupt:
@@ -231,9 +250,20 @@ class Session:
         elif t == "scroll":
             self._send({"cmd": "scroll", "dy": ev["dy"], "x": x, "y": y})
 
+    def _bounds(self) -> tuple[int, int]:
+        """The size of the screen an event's coordinates must fall in."""
+        s = self.surface
+        return (getattr(s, "width", getattr(s, "cols", 1 << 14)),
+                getattr(s, "height", getattr(s, "rows", 1 << 14)))
+
     def handle_app(self) -> None:
         for raw in self.channel.receive():
+            self.guard.message()                       # commands layer: how many, before anything else
             msg = validate_app_message(raw, self.mode)
+            if msg["cmd"] == "frame":
+                self.guard.frame(len(msg["ops"]))      # graphics layer
+            elif msg["cmd"] == "screen":
+                self.guard.page(len(msg["lines"]))     # text layer
             emit = getattr(self.surface, "emit", None)
             if emit:
                 emit("<", msg)
@@ -339,7 +369,17 @@ class Session:
             self._send({"cmd": "result", "action": msg["action"], "ok": False,
                         "detail": "this app does not have the 'system' permission"})
             return
-        target = self.bridge.handle(msg, self._send, self.authority)
+        why = self.guard.request(msg["action"])        # commands layer: not too often, not after too many failures
+        if why:
+            self._send({"cmd": "result", "action": msg["action"], "ok": False, "detail": why})
+            return
+
+        def reply(out: dict) -> None:
+            if out.get("cmd") in ("result", "answer") and not out.get("ok", True) and msg["action"] != "apps":
+                self.guard.request_failed()
+            self._send(out)
+
+        target = self.bridge.handle(msg, reply, self.authority)
         self.surface_dirty = True
         if target:
             self._switch(target)
@@ -376,7 +416,7 @@ class Session:
     # --- main loop ---------------------------------------------------------
     def run(self, first_frame_timeout: float = 1.5) -> int:
         w, h = self.surface.hello_size()
-        self._send({"cmd": "hello", "mode": self.mode, "width": w, "height": h})
+        self._send({"cmd": "hello", "mode": wire_mode(self.mode), "width": w, "height": h})
         if self.extensions and (self.extensions.get("items") or self.extensions.get("skipped")):
             # Data the owner switched on for this app. Only ever sent to the host it names;
             # an app with nothing switched on is told nothing.
@@ -385,7 +425,9 @@ class Session:
         self._preboot_devices()
         started = time.monotonic()
         try:
+            self.guard.attest(force=True)        # kernel + hardware: is the app really confined, holding no device?
             while not self.stop_requested and self._app_alive():
+                self.guard.attest()              # ... and again every couple of seconds
                 if self.surface_dirty:
                     self.render()
                 ready_for_boot = self.surface.has_content or \

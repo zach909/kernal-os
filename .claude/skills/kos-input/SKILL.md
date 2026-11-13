@@ -55,6 +55,16 @@ mouse/keyboard --> devices.py (OS only) --> session.py route() --> app (as a com
   stay OS-driven, never app-driven.
 - Encryption: the input channel is plain JSON today (see `kos-rules`).
 
+## The guard (`kos/guard.py`)
+
+`event-shape`: `Session.route` first passes every device event through `Guard.input_event`. Only a
+well-formed key (one printable character or a plain name such as `up`, `f5`, `ctrl-x`), button (left,
+middle, right, with `pressed` a bool) or scroll goes on, rebuilt from known fields, coordinates clamped
+to the surface. A bad one is dropped and audited (the first five of a kind), the app lives. Pointer
+moves and scrolls beyond 2,000 a second are dropped; a click is never dropped (a lost release leaves a
+button stuck). Ctrl-C is never judged. A layer with `has_pointer = False` (text) drops every pointer
+event and is never offered the mouse to boot. There is no key-rate limit.
+
 ## Testing without hardware
 
 `ScriptedDevices` feeds scripted events; `EvdevTranslator` can be tested with

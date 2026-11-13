@@ -35,7 +35,7 @@ from .address import check_launch
 from .appdirs import AppDirs
 from .auth import AuditLog, AuthError, Authority, AuthorizationDenied
 from .broker import spawn
-from .kapp import KApp, KAppError
+from .kapp import KApp, KAppError, supports_mode
 from .permit import PermitError, PermitStore
 from .paths import Paths
 from .protocol import clean_text
@@ -50,7 +50,7 @@ def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
                          prompter) -> SandboxPolicy:
     """Shared by run / open / the bridge: mode check + optional network grant."""
     m = app.manifest
-    if mode not in m.modes:
+    if not supports_mode(m.modes, mode):
         raise KAppError(f"{name} has no {mode} mode (it has: {', '.join(m.modes)})")
     allow_net = False
     if "network" in m.permissions:

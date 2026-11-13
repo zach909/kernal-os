@@ -10,10 +10,11 @@
     kos remove NAME
     kos list
     run NAME                        run the app as a text (TUI) page
+    run text NAME                   run it as plain text only: no colours, no cursor, no screen
     run graphical NAME              run the app's graphical version
     run cmd NAME                    run it with no drawing: raw command stream
-    run [graphical|cmd] NAME --cell C   run it inside kernel cell C
-    kos open [graphical|cmd] NAME   open an app in the background, return immediately
+    run [graphical|text|cmd] NAME --cell C   run it inside kernel cell C
+    kos open [graphical|text|cmd] NAME   open an app in the background, return immediately
     kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
     kos extend NAME                 switch an extension or mod on for the app it extends (password)
     kos extend --revoke NAME / --list
@@ -218,9 +219,9 @@ def cmd_list(args, paths: Paths) -> int:
 def _parse_run_target(words: list[str]) -> tuple[str, str]:
     if len(words) == 1:
         return "tui", words[0]
-    if len(words) == 2 and words[0] in ("graphical", "cmd"):
+    if len(words) == 2 and words[0] in ("graphical", "text", "cmd"):
         return words[0], words[1]
-    raise KAppError("usage: run [graphical|cmd] APP")
+    raise KAppError("usage: run [graphical|text|cmd] APP")
 
 
 def _address_and_mode(explicit: str | None, text: str):
@@ -280,6 +281,7 @@ def cmd_run(args, paths: Paths) -> int:
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            allow_network=policy.allow_network)
                             status_ok=_may_status(app.manifest.permissions))
                             services=_services_for(paths, name, app.manifest.permissions))
     finally:
@@ -353,7 +355,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     granted += (["admin"] if inst.admin else []) + (["ai"] if "ai" in perms else [])
     bridge = bridge_for(paths, inst.name, granted)
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True, bridge=bridge,
+                        detach_on_interrupt=True, bridge=bridge, app_pid=inst.app_pid or None,
                         vault=_vault_for(paths, inst.name, perms),
                         extensions=_extensions_for(paths, inst.name),
                         status_ok=inst.system or _may_status(perms), **session_kwargs)
@@ -573,6 +575,7 @@ def _build_surface(mode, name, term):
     from .cmdsurface import CmdSurface
     from .devices import EvdevDevices, TerminalDevices
     from .display import FbdevBackend, GraphicalSurface, TerminalBackend
+    from .textsurface import TextSurface
     from .tui import TUISurface
 
     cols, rows = term.size()
@@ -582,6 +585,8 @@ def _build_surface(mode, name, term):
         return CmdSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if mode == "tui":
         return TUISurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
+    if mode == "text":
+        return TextSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if use_fb:
         backend = FbdevBackend(tty_fd=0)
         return (GraphicalSurface(backend, status_in_frame=True),
@@ -613,7 +618,7 @@ def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) ->
     from .session import Session
     from .term import RawTerminal
 
-    with RawTerminal() as term:
+    with RawTerminal(plain=(mode == "text")) as term:     # the text layer never takes over the screen
         surface, devices = _build_surface(mode, name, term)
         try:
             return Session(name=name, mode=mode, channel=channel, proc=proc, surface=surface,
@@ -1338,11 +1343,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="remove an app")
     s.add_argument("name")
     sub.add_parser("list", help="list installed apps")
-    s = sub.add_parser("run", help="run an app: run [graphical|cmd] NAME")
+    s = sub.add_parser("run", help="run an app: run [graphical|text|cmd] NAME")
     s.add_argument("target", nargs="+")
     s.add_argument("--cell", help="run inside this kernel cell")
-    s = sub.add_parser("open", help="open an app in the background: open [graphical|cmd] NAME")
-    s.add_argument("mode", nargs="?", choices=["graphical", "cmd"], default=None)
+    s = sub.add_parser("open", help="open an app in the background: open [graphical|text|cmd] NAME")
+    s.add_argument("mode", nargs="?", choices=["graphical", "text", "cmd"], default=None)
     s.add_argument("name")
     s = sub.add_parser("go", help="open an address, like a browser's address bar: go kos://NAME[/path][?query]")
     s.add_argument("address")

@@ -55,6 +55,11 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    no encrypted-to-plain redirect. The browser tells the user on every page
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
+6. **Every layer guards itself** (`kos/guard.py`). Six layers, one guard each, none relying on its
+   neighbour: graphics `frame-budget`, text `page-budget`, input `event-shape`, commands
+   `message-budget` / `prompt-budget` / `failed-requests`, kernel `attest-process`, hardware
+   `no-device-handles`. A new layer or a new way into a layer needs a guard, a refusal test, and a
+   line in `guard.CHECKS` (a test fails if a layer has none or the README does not name it).
 6. **Everything is separate.** One app, one job. Every function is its own app;
    anything with a different screen is a different app, not a tab, mode or page
    inside another one. This covers the whole system, not only what is drawn:
@@ -107,11 +112,14 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
 ```
 screen  <-- frame/screen commands ---  app  --- request commands --->  OS  ---> kernel ---> hardware
 mouse/keyboard --> evdev (OS only) --> key/pointer/button commands --> app
+
+graphics -> text -> button clicker (input) -> app commands -> kernel -> hardware   (guard.PIPELINE)
 ```
 
 | Layer | File | Rule |
 |---|---|---|
 | Graphics (what you see) | `kos/display.py`, `kos/tui.py`, `kos/font.py` | App only sends `screen`/`frame` ops; the OS draws. The OS's password overlay can't be seen or covered by an app. |
+| Text (plain characters only) | `kos/textsurface.py` | Between graphics and input. Plain transcript: every OS line starts `KOS\| `, every app line `app\| `, anything unprintable is `?`. No pointer. |
 | Button / pointer / key input | `kos/devices.py`, `kos/term.py`, `kos/session.py` | Apps never open a device. The OS reads hardware and sends commands, only for devices booted with the password. |
 | App commands | `kos/protocol.py`, `kos/system.py` | Every app message is hostile: size-limited, schema-checked, control characters stripped. New message types need schema checks and tests. |
 | Kernel / sandbox | `kos/sandbox.py` | Landlock + namespaces; if the kernel can't enforce it, the app does not run. |
@@ -127,7 +135,7 @@ so `attach` would ask for it: tell the owner, that is a behaviour change.
 ## Layer skills
 
 One skill per layer of the pipeline; load the one you are changing:
-`kos-graphics`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
+`kos-graphics`, `kos-text`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
 `kos-hardware`.
 
 ## Generated skills
@@ -148,6 +156,8 @@ hostile-input test.
 - [ ] New code uses whole numbers (`//`, no float); `tests/test_proof.py` ratchet passes.
       Anything new that can start code goes through `proof.require`.
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
+- [ ] Any layer you touched still has its guard (`kos/guard.py`), with a refusal test
+      (`tests/test_guard.py`), and the limits are not loosened to make a test pass.
 - [ ] New function or new screen is its own folder under `apps/` (rule 6), with its own
       code, not a mode or page added to an existing app. Anything an app needs from the OS is a validated
       `request`, and nothing in the app opens a device.

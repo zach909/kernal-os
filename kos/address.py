@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from .kapp import ID_RE, KAppError
 
 SCHEME = "kos://"
-MODES = ("tui", "graphical", "cmd")
+MODES = ("tui", "text", "graphical", "cmd")
 MAX_LAUNCH = 256
 MAX_ADDRESS = 300
 # No '%', '#', '?' (only as the query separator), space or control characters.

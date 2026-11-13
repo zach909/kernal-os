@@ -43,6 +43,29 @@ MAX_ENTRIES = 4096
 MAX_UNCOMPRESSED = 1 << 30
 MAX_RATIO = 200
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")   # \Z, not $: "$" lets a trailing newline through
+# A program's id is its folder path under the app, joined with dots: ``backup.add`` is the program
+# in ``apps/backup/add/``. A plain app name can never contain a dot, so a program id can never
+# collide with, or pass for, an ordinary app. The id is identity only: it confers no authority.
+MAX_DEPTH = 4
+ID_PATTERN = r"[a-z][a-z0-9-]{0,31}(?:\.[a-z][a-z0-9-]{0,31}){0,%d}" % (MAX_DEPTH - 1)
+ID_RE = re.compile(rf"^{ID_PATTERN}\Z")
+RESERVED_NAMES = {"graphical", "text", "kos", "system", "all"}
+RUNTIMES = {"python", "native"}
+MODES = {"tui", "graphical", "cmd"}
+# "text" is a way to *show* an app, not a kind of app: the non-graphical text layer (``textsurface.py``)
+# serves any app that has a ``tui`` mode, and the app is still told ``tui`` - it speaks ``screen``,
+# exactly as before. So a manifest can never declare "text" (MODES above) and nothing needs repacking.
+RUN_MODES = ("tui", "text", "graphical", "cmd")
+
+
+def supports_mode(modes, mode: str) -> bool:
+    """May an app whose manifest lists ``modes`` be run in ``mode``?"""
+    return mode in modes or (mode == "text" and "tui" in modes)
+
+
+def wire_mode(mode: str) -> str:
+    """The mode the *app* is told. The text layer is the OS's business; the app just sees tui."""
+    return "tui" if mode == "text" else mode
 # An id is the path of groups down to the app, joined with dots: ``backup.add`` is the app
 # ``add`` in the group ``backup``. Groups nest as deep as you like - there is no level limit. The
 # only bound is the id's total length (it becomes a file name, ``<id>.kapp``, and an instance

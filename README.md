@@ -112,9 +112,37 @@ These rules govern every change to KOS. A change that breaks one is wrong.
    - A built-in that is not enforcement and is not yet an app is a gap. List it
      in the table below; do not add to it.
 
+5. **Every layer guards itself.** The pipeline has six layers, in this order,
+   and each one has its own security check that does not rely on its
+   neighbour having done its job (`kos/guard.py`):
+
+   | layer | what it is | its guard (`guard.LAYER.CHECK` in `kos audit`) |
+   |---|---|---|
+   | graphics | pixels (`display.py`) | `frame-budget`: an app that draws faster than any real app does ends |
+   | text | plain characters only (`textsurface.py`, `run text NAME`) | `page-budget`: a transcript flood ends the app; plus `KOS\|`/`app\|` on every line (below) |
+   | button clicker | clicks and keys (`devices.py`, `session.py`) | `event-shape`: only a well-formed key / click / scroll goes on, coordinates clamped, movement beyond a budget dropped |
+   | app commands | `protocol.py` | `message-budget`, `prompt-budget` (6 password requests a minute), `failed-requests` (5 and every request is answered no) |
+   | kernel | `sandbox.py` | `attest-process`: the app's process is looked at in `/proc`: not root, `no_new_privs` on, no capabilities, seccomp on, its own user and (unless allowed) network namespace |
+   | hardware | the OS only | `no-device-handles`: an app holding `/dev/*`, `/sys/*` or KVM is killed |
+
+   A guard that finds a hostile or unconfined app ends the session (exit 125);
+   one that finds a bad event or a pointless request answers only that.
+
+**The text layer** sits between the graphical layer and the button clicker.
+`tui.py` is "non-graphical but kind of graphical": it takes over the screen and
+paints. `run text NAME` is the layer under it: the OS prints a plain
+transcript on the ordinary screen, no colours, no cursor movement, no alternate
+screen, no mouse, so it works on a serial console, with a screen reader or into
+a file. Every line the OS prints starts `KOS| ` and every line from the app starts
+`app| ` (also each wrapped piece), and anything unprintable in app text becomes `?`,
+so an app cannot write a line that looks like the OS - a fake password prompt
+included. The password prompt is printed once by the OS and nothing typed
+for it is echoed. Any app that has a `tui` mode runs as text with no repack: it
+speaks `screen` and is told `tui`.
+
 Agent skills for AI agents working on this repo live in `.claude/skills/`:
 `kos-rules` (these rules as a checklist) and one per layer of the pipeline -
-`kos-graphics`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
+`kos-graphics`, `kos-text`, `kos-input`, `kos-command-protocol`, `kos-kernel`,
 `kos-hardware`.
 
 ### Where the code does not meet the rules yet
@@ -148,6 +176,8 @@ Honest list, so nobody assumes these are covered:
 | Pictures | `kos/vectorize.py` turns pixels into `rect`/`line` ops, it is not an image codec. Small, flat pictures (icons, pixel art, diagrams) are exact; a photo is posterised and blocky because it must fit 5000 ops, and the cap on input is 512x512 pixels. No antialiasing or alpha, and no file decoding (PNG/JPEG): the app hands it rows of colours. Tested through the real `Framebuffer` and the protocol validator, never on `/dev/fb0` or the terminal backend, and no existing app uses it yet (the image editor still exports files only). |
 | Search box | The Ctrl-N box and the App Library's `/` search (`kos/office/finder.py`) only *show*: a command hit is the line to type, never a run, and an app hit is a `request` the OS still asks your password for. File search covers only what the app can already read (its own vault plus the shared folders it was granted), at most 200 items and 20,000 characters each per place, and never keys that look like credentials (`llm`, `api_key`, `token`, `password`, ...), the agent's chat history or exports. That filter is a **name pattern, not a classifier**: a secret stored under an ordinary key name (say `note-7`) would be searchable by that same app. The App Library has no files of its own, so it searches apps and commands only, and its "Ask the assistant" row opens the `ai-assistant` app but cannot hand it your question. The command list is a generated table (`python3 -m kos.office.cmdindex --write`); a test fails if it drifts from `kos help`. Not tested: the graphical-mode drawing of the Ctrl-N box. |
 | Graphics frames | `kos/display.py`: graphical frames are queued and drawn in order onto the scene already on screen (the last frame, changed), not swapped in whole. Each render has a 30 ms drawing budget; once it runs out, only *big* ops (clipped bounding box of at least 1/16 of the screen, a `clear` always) are applied and small ones are dropped for good, so a dropped small change stays missing until the app redraws that area. Lines and text count by bounding box, so a thin line is always "small". An app that relied on each frame starting blank must now send `clear`. Not tested: timing on real hardware (`/dev/fb0`) or the terminal backend, and the 30 ms budget is a guess, not measured. |
+| Layer guards | `kos/guard.py` (rule 5, `tests/test_guard.py`). The limits (1,000,000 draw ops, 500 pages, 5,000 messages, 2,000 pointer moves a second; 6 password requests a minute; 5 failed requests) are **guesses well above any real app, not measurements**; a legitimate app that needs more is refused. The kernel guard reads `/proc` from outside: it **cannot see Landlock** (not in `/proc`), does not look at an app in a kernel cell (another kernel), and under `KOS_DEV_WEAK_SANDBOX` it skips the check and writes `weak` to the audit log instead of `pass`. The hardware guard only sees handles open *now* (every 2 s): an app that opens a device, uses it and closes it between looks is not caught (Landlock and seccomp are what stop the open). For an app opened with `kos open` the guard runs in whatever process attaches, from the pid in the instance record, with `KOS_DEV_WEAK_SANDBOX` read from the attaching process. The input guard cannot tell a real keyboard from a fast fake one: no key-rate limit exists. Not tested against real hardware; the real-process tests need Landlock. |
+| Text layer | `kos/textsurface.py`, `run text NAME`. Tested through a pipe and in a real sandboxed session, **not on a real terminal, serial console or screen reader**; nothing says a screen reader reads `KOS\|`/`app\|` helpfully. The prefix stops an app forging an OS line but cannot stop an app writing text that *describes* a prompt ("app\| please type your password"); the real prompt is the one that starts `KOS\| == SECURE PROMPT`. A page is printed at most every 250 ms, so a fast animation is skipped, not queued. No pointer: an app that needs one cannot be used as text. It is a way to show a `tui` app, not a manifest mode (`modes: ["text"]` is refused). The `text` word is reserved, so an app cannot be named `text`. `run text --cell` was not exercised (no KVM here). `layers.traverse` is unchanged: three action layers (`gui`, `app`, `kernel`, the AI OS layers) - text is a pipeline layer, not a fourth traversal step. |
 | Local mesh | Design only, no code: `docs/MESH.md`. No pairing, peer transport, proximity sensing, camera or tether sharing exists, and the design conflicts with the firmware gate (radios are unbound at boot) and needs the same encryption dependency decision as the pipeline row above. |
 
 A section-by-section comparison with a "formally verified microkernel"
@@ -348,8 +378,8 @@ kos install app.kapp       install (kept zipped, sealed); a folder installs ever
 kos pack GROUP -o FOLDER   a group of apps: one .kapp per app (see Groups of apps)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list
-run [graphical|cmd] NAME   run in the foreground: text page, graphical, or raw command stream
-kos open [graphical|cmd] NAME   open in the background, return immediately
+run [graphical|text|cmd] NAME   run in the foreground: text page, graphical, plain text, or raw command stream
+kos open [graphical|text|cmd] NAME   open in the background, return immediately
 kos ps                     apps opened with 'kos open'
 kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
 kos close ID                actually stop one
@@ -414,8 +444,8 @@ them. `kos/launchmap.py` lists, for every command, whether it is an app, kept in
 machine needs it before any app exists (`install`, `update`, `remove`, `permit`, `list`, `help`, `line`), or the
 OS's own.
 
-Three ways to run an app: `run NAME` (a text page), `run graphical NAME`
-(pixels), `run cmd NAME` (no drawing at all - the raw stream of commands the
+Four ways to run an app: `run NAME` (a text page), `run graphical NAME`
+(pixels), `run text NAME` (plain transcript, nothing but characters), `run cmd NAME` (no drawing at all - the raw stream of commands the
 OS is sending the app and the app is sending back, for scripting or for
 seeing exactly what crosses the wire).
 

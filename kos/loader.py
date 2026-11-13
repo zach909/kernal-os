@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from .address import check_launch
-from .kapp import KApp
+from .kapp import KApp, wire_mode
 from .sandbox import SandboxPolicy
 
 SDK_DIR = str(Path(__file__).resolve().parent.parent)
@@ -94,7 +94,7 @@ def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None
         "KOS_CHANNEL_FD": str(channel_fd),
         "KOS_KAPP_FD": str(kapp_fd),
         "KOS_APP": m.name,
-        "KOS_MODE": mode,
+        "KOS_MODE": wire_mode(mode),
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
     }

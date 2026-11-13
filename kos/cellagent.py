@@ -43,6 +43,7 @@ def _recv_header(conn: socket.socket) -> dict:
         if len(buf) > MAX_HEADER:
             raise ValueError("header too large")
     h = json.loads(buf)
+    # the host sends the mode the *app* is told: a text session is sent as "tui" (kapp.wire_mode)
     if h.get("cmd") != "load" or h.get("mode") not in ("tui", "graphical"):
         raise ValueError("bad load header")
     if not isinstance(h.get("size"), int) or not 0 < h["size"] <= MAX_ARCHIVE:

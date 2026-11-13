@@ -36,7 +36,7 @@ from typing import Optional
 
 from . import firewall
 from .auth import AuditLog
-from .kapp import KApp, KAppError
+from .kapp import KApp, KAppError, supports_mode
 from .permit import PermitStore
 from .registry import Instance, Registry
 from .sandbox import SandboxPolicy
@@ -74,7 +74,7 @@ def _gui(paths, get_authority, req: Request, p: Passage) -> str:
             raise KAppError(f"{req.target} has no button: it is not installed (kos install)")
         p.row = row
         if req.verb in LAUNCH:
-            if req.mode not in row["modes"]:
+            if not supports_mode(row["modes"], req.mode):
                 raise KAppError(f"{req.target} has no {req.mode} mode (it has: {', '.join(row['modes'])})")
             return f"App Library lists {req.target} [{req.mode}]"
         if row["kind"] == "app":
