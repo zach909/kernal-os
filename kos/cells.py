@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from .auth import Authority
-from .kapp import NAME_RE, KApp
+from .kapp import NAME_RE, KApp, wire_mode
 from .paths import Paths, atomic_write
 
 AGENT_PORT = 7000
@@ -175,7 +175,7 @@ def _alive(pid: int) -> bool:
 
 def send_app(sock: socket.socket, app: KApp, mode: str) -> None:
     """Host side: ship an already-verified app into a cell over its vsock."""
-    header = {"cmd": "load", "name": app.manifest.name, "mode": mode, "size": len(app.data)}
+    header = {"cmd": "load", "name": app.manifest.name, "mode": wire_mode(mode), "size": len(app.data)}
     sock.sendall(json.dumps(header).encode() + b"\n" + app.data)
 
 

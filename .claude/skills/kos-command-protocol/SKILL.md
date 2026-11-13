@@ -55,6 +55,15 @@ Names must match the same regexes the store uses.
    permission is told no (`TestRequestProtocol`, `TestSystemBridge`).
 5. Update the README gaps table if it changes what is covered.
 
+## The guard (`kos/guard.py`)
+
+Before `validate_app_message`, `Guard.message` counts every message (5,000 a second ends the app).
+Before a `request` reaches the bridge, `Guard.request` answers "no" without asking anyone for a
+password when the app asked 6 times in a minute (`prompt-budget`; `apps` asks for nothing and is exempt)
+or 5 of its requests already failed (`failed-requests`; time does not forgive it). A new `request` that
+asks for the password needs no change here; a new request that does NOT ask must be added to the
+exemption deliberately, not by default.
+
 ## Rules that apply here
 
 - Apps ask; the OS decides. Never let an app message name a file path, device,

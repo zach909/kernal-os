@@ -34,6 +34,13 @@ Only the OS touches hardware. Apps get commands, never devices.
   exclusive and the prompt falls back to the TTY. Never treat that as the
   hardware-backed path in a test or a claim.
 
+## The guard (`kos/guard.py`): `no-device-handles`
+
+Every attestation also lists `/proc/PID/fd` and refuses an app holding anything under `/dev/` (bar
+`null`, `zero`, `urandom`, `random`), `/sys/`, or a KVM handle: the "no hardware path inside the sandbox"
+rule, checked rather than assumed. It applies even under `KOS_DEV_WEAK_SANDBOX`. It sees handles open at
+the moment it looks (every 2 s), not ones opened and closed between looks.
+
 ## Working without hardware
 
 This container has **no** KVM, vhost-vsock, framebuffer or evdev. So:

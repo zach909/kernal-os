@@ -47,9 +47,23 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")   # \Z, not $: "$" lets a trail
 MAX_DEPTH = 4
 ID_PATTERN = r"[a-z][a-z0-9-]{0,31}(?:\.[a-z][a-z0-9-]{0,31}){0,%d}" % (MAX_DEPTH - 1)
 ID_RE = re.compile(rf"^{ID_PATTERN}\Z")
-RESERVED_NAMES = {"graphical", "kos", "system", "all"}
+RESERVED_NAMES = {"graphical", "text", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
+# "text" is a way to *show* an app, not a kind of app: the non-graphical text layer (``textsurface.py``)
+# serves any app that has a ``tui`` mode, and the app is still told ``tui`` - it speaks ``screen``,
+# exactly as before. So a manifest can never declare "text" (MODES above) and nothing needs repacking.
+RUN_MODES = ("tui", "text", "graphical", "cmd")
+
+
+def supports_mode(modes, mode: str) -> bool:
+    """May an app whose manifest lists ``modes`` be run in ``mode``?"""
+    return mode in modes or (mode == "text" and "tui" in modes)
+
+
+def wire_mode(mode: str) -> str:
+    """The mode the *app* is told. The text layer is the OS's business; the app just sees tui."""
+    return "tui" if mode == "text" else mode
 PERMISSIONS = {"network", "system", "storage", "ai"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions

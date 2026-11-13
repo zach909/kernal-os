@@ -10,10 +10,11 @@
     kos remove NAME
     kos list
     run NAME                        run the app as a text (TUI) page
+    run text NAME                   run it as plain text only: no colours, no cursor, no screen
     run graphical NAME              run the app's graphical version
     run cmd NAME                    run it with no drawing: raw command stream
-    run [graphical|cmd] NAME --cell C   run it inside kernel cell C
-    kos open [graphical|cmd] NAME   open an app in the background, return immediately
+    run [graphical|text|cmd] NAME --cell C   run it inside kernel cell C
+    kos open [graphical|text|cmd] NAME   open an app in the background, return immediately
     kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
     kos extend NAME                 switch an extension or mod on for the app it extends (password)
     kos extend --revoke NAME / --list
@@ -231,9 +232,9 @@ def cmd_list(args, paths: Paths) -> int:
 def _parse_run_target(words: list[str]) -> tuple[str, str]:
     if len(words) == 1:
         return "tui", words[0]
-    if len(words) == 2 and words[0] in ("graphical", "cmd"):
+    if len(words) == 2 and words[0] in ("graphical", "text", "cmd"):
         return words[0], words[1]
-    raise KAppError("usage: run [graphical|cmd] APP")
+    raise KAppError("usage: run [graphical|text|cmd] APP")
 
 
 def _address_and_mode(explicit: str | None, text: str):
@@ -293,7 +294,8 @@ def cmd_run(args, paths: Paths) -> int:
         bridge = bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
+                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            allow_network=policy.allow_network)
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
@@ -356,7 +358,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     # 'system' was recorded by the OS at open time; the manifest (sealed, checked at launch) adds 'ai'
     bridge = _bridge_for(paths, inst.name, set(perms) | ({"system"} if inst.system else set()))
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True, bridge=bridge,
+                        detach_on_interrupt=True, bridge=bridge, app_pid=inst.app_pid or None,
                         vault=_vault_for(paths, inst.name, perms),
                         extensions=_extensions_for(paths, inst.name), **session_kwargs)
 
@@ -563,6 +565,7 @@ def _build_surface(mode, name, term):
     from .cmdsurface import CmdSurface
     from .devices import EvdevDevices, TerminalDevices
     from .display import FbdevBackend, GraphicalSurface, TerminalBackend
+    from .textsurface import TextSurface
     from .tui import TUISurface
 
     cols, rows = term.size()
@@ -572,6 +575,8 @@ def _build_surface(mode, name, term):
         return CmdSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if mode == "tui":
         return TUISurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
+    if mode == "text":
+        return TextSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if use_fb:
         backend = FbdevBackend(tty_fd=0)
         return (GraphicalSurface(backend, status_in_frame=True),
@@ -595,7 +600,7 @@ def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) ->
     from .session import Session
     from .term import RawTerminal
 
-    with RawTerminal() as term:
+    with RawTerminal(plain=(mode == "text")) as term:     # the text layer never takes over the screen
         surface, devices = _build_surface(mode, name, term)
         try:
             return Session(name=name, mode=mode, channel=channel, proc=proc, surface=surface,
@@ -1320,11 +1325,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="remove an app")
     s.add_argument("name")
     sub.add_parser("list", help="list installed apps")
-    s = sub.add_parser("run", help="run an app: run [graphical|cmd] NAME")
+    s = sub.add_parser("run", help="run an app: run [graphical|text|cmd] NAME")
     s.add_argument("target", nargs="+")
     s.add_argument("--cell", help="run inside this kernel cell")
-    s = sub.add_parser("open", help="open an app in the background: open [graphical|cmd] NAME")
-    s.add_argument("mode", nargs="?", choices=["graphical", "cmd"], default=None)
+    s = sub.add_parser("open", help="open an app in the background: open [graphical|text|cmd] NAME")
+    s.add_argument("mode", nargs="?", choices=["graphical", "text", "cmd"], default=None)
     s.add_argument("name")
     s = sub.add_parser("go", help="open an address, like a browser's address bar: go kos://NAME[/path][?query]")
     s.add_argument("address")
@@ -1480,18 +1485,6 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
@@ -1501,8 +1494,6 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
     "runtimes": cmd_runtimes}
 

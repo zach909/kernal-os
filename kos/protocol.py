@@ -10,7 +10,8 @@ treated as hostile: size-limited, schema-checked, and every string is stripped
 of control characters so an app cannot inject terminal escape sequences.
 
 OS -> app
-    {"cmd": "hello", "mode": "tui"|"graphical", "width": W, "height": H}
+    {"cmd": "hello", "mode": "tui"|"graphical"|"cmd", "width": W, "height": H}
+                       (a ``text`` session is told "tui": the text layer shows the same ``screen`` commands)
     {"cmd": "key", "key": "a" | "enter" | "backspace" | "up" | ...}
     {"cmd": "pointer", "x": X, "y": Y}
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
@@ -37,7 +38,7 @@ app -> OS
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
-    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"text"|"graphical"|"cmd"}
     {"cmd": "request", "action": "open", "address": "kos://NAME[/path][?query]", "mode": ...}
                                          the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
@@ -75,7 +76,7 @@ MAX_COORD = 16384
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = ID_RE
 _INSTANCE_RE = re.compile(rf"^{ID_PATTERN}-[0-9a-f]{{6}}\Z")
-REQUEST_MODES = ("tui", "graphical", "cmd")
+REQUEST_MODES = ("tui", "text", "graphical", "cmd")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
 
@@ -161,7 +162,7 @@ def _request(msg: dict) -> dict:
         if not isinstance(app, str) or not _APP_NAME_RE.match(app):
             raise ProtocolError("request.app must be an app name")
         if mode not in REQUEST_MODES:
-            raise ProtocolError("request.mode must be tui, graphical or cmd")
+            raise ProtocolError("request.mode must be tui, text, graphical or cmd")
         return {"cmd": "request", "action": "open", "app": app, "mode": mode, "address": launch}
     if action in ("focus", "close"):
         ident = msg.get("id")
@@ -233,7 +234,7 @@ def validate_app_message(msg: Any, mode: str) -> dict:
     cmd = msg["cmd"]
     if mode == "cmd" and cmd in ("screen", "frame"):
         raise ProtocolError("cmd mode has no drawing surface; use log")
-    if cmd == "screen" and mode == "tui":
+    if cmd == "screen" and mode in ("tui", "text"):
         lines = msg.get("lines", [])
         if not isinstance(lines, list) or len(lines) > MAX_LINES:
             raise ProtocolError("screen.lines must be a list of at most 500 strings")

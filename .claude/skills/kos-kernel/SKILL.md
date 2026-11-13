@@ -49,6 +49,16 @@ administrator keyboard, which requires the kernel: `kernel_gaps()` (Landlock +
 user namespaces) is re-checked on every use, so a kernel that cannot enforce
 what KOS promises means the computer does not unlock.
 
+## The guard (`kos/guard.py`): `attest-process`
+
+The sandbox does its job in the child; the guard checks from the outside that it did. At session start
+and every 2 s `guard.attest_process(pid)` reads `/proc/PID`: not uid 0, `NoNewPrivs` 1, `CapEff` and
+`CapPrm` empty, `Seccomp` 2, a user namespace of its own, and (unless the owner allowed the network) a
+network namespace of its own. Anything else ends the session (exit 125) and writes
+`guard.kernel.attest-process refused`. A process that cannot be read is refused (fail closed); one that
+has exited is not. Under `KOS_DEV_WEAK_SANDBOX` the check is skipped and `weak` is audited, never `pass`.
+It cannot see Landlock, and does not look inside a kernel cell.
+
 ## Rules that apply here
 
 - Never add a code path that runs app code unconfined "just for dev" without it

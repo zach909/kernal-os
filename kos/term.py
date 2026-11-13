@@ -98,12 +98,17 @@ def _mouse_event(m: re.Match) -> dict:
 
 
 class RawTerminal:
-    """Context manager: raw mode + alternate screen, always restored on exit."""
+    """Context manager: raw mode + alternate screen, always restored on exit.
 
-    def __init__(self, in_fd: int = 0, out_fd: int = 1):
+    ``plain=True`` is for the text layer (``textsurface.py``): raw input only. It does not switch to
+    the alternate screen, hide the cursor or clear anything, and it never turns mouse reporting on,
+    so the session leaves an ordinary transcript behind and sends the terminal no escape sequence."""
+
+    def __init__(self, in_fd: int = 0, out_fd: int = 1, plain: bool = False):
         self.in_fd, self.out_fd = in_fd, out_fd
         self._saved = None
         self.mouse = False
+        self.plain = plain
 
     def write(self, s: str) -> None:
         os.write(self.out_fd, s.encode())
@@ -118,15 +123,19 @@ class RawTerminal:
     def __enter__(self) -> "RawTerminal":
         self._saved = termios.tcgetattr(self.in_fd)
         tty.setraw(self.in_fd)
-        self.write("\x1b[?1049h\x1b[?25l\x1b[2J")
+        if not self.plain:
+            self.write("\x1b[?1049h\x1b[?25l\x1b[2J")
         return self
 
     def enable_mouse(self) -> None:
+        if self.plain:
+            return          # the text layer has no pointer: reporting is never switched on
         self.mouse = True
         # 1000: clicks, 1002: drag, 1003: all motion, 1006: SGR coordinates
         self.write("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
 
     def __exit__(self, *exc) -> None:
-        self.write("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l")
+        if not self.plain:
+            self.write("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l")
         if self._saved is not None:
             termios.tcsetattr(self.in_fd, termios.TCSAFLUSH, self._saved)
