@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import cache, loader
 from .kapp import KApp
@@ -59,7 +59,9 @@ def daemonize(log_path: Path) -> None:
 
 class Broker:
     def __init__(self, inst: Instance, registry: Registry, app_channel: socket.socket,
-                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None):
+                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None,
+                 on_exit: Optional[Callable[[], None]] = None):
+        self.on_exit = on_exit
         self.inst = inst
         self.registry = registry
         self.app_channel = app_channel
@@ -224,6 +226,11 @@ class Broker:
             pass
         if self.cache_dir is not None:
             cache.wipe(self.cache_dir)
+        if self.on_exit is not None:
+            try:
+                self.on_exit()
+            except Exception as e:      # never let bookkeeping stop the instance from being removed
+                print(f"kos-broker: on_exit: {e!r}", file=sys.stderr)
         self.registry.remove(self.inst.id)
 
 
@@ -248,7 +255,7 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
         proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir, inst.address),
                              policy, log_path)
         b.close()
-        Broker(inst, registry, a, proc, cache_dir).run()
+        Broker(inst, registry, a, proc, cache_dir, on_exit=policy.on_exit).run()
     except BaseException as e:  # pragma: no cover - last-resort broker crash path
         try:
             print(f"kos-broker: {e!r}", file=sys.stderr)

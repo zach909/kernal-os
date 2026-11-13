@@ -114,7 +114,8 @@ class Session:
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
-                 outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None):
+                 outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
+                 services=None):
         self.name, self.mode = name, mode
         self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
         self.channel = channel
@@ -127,6 +128,7 @@ class Session:
         self.booted: set[str] = set()
         self.bridge = bridge
         self.vault = vault
+        self.services = services           # a services.ServiceHost, or None: no 'service:' permission
         self.right_click_to = right_click_to
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
@@ -242,6 +244,8 @@ class Session:
                 self._on_request(msg)
             elif msg["cmd"] == "vault":
                 self._on_vault(msg)
+            elif msg["cmd"] == "service":
+                self._on_service(msg)
             elif msg["cmd"] == "exit":
                 self.exit_code = msg["code"]
                 self.stop_requested = True
@@ -291,6 +295,16 @@ class Session:
             if msg.get("store"):
                 self._log(f"{msg['store']}: {msg['op']} refused: {reply['detail']}")
         self._send(reply)
+
+    def _on_service(self, msg: dict) -> None:
+        """An app asks the OS for one of its functions (services.py). The password, where the service
+        needs one, is typed in the OS's own prompt; this app can neither see nor answer it."""
+        if self.services is None:
+            self._send({"cmd": "service", "id": msg["id"], "ok": False, "data": {},
+                        "detail": "this app has no 'service:' permission in its manifest"})
+            return
+        self._send(self.services.call(msg, self.authority))
+        self.surface_dirty = True
 
     def _on_request(self, msg: dict) -> None:
         if self.bridge is None:

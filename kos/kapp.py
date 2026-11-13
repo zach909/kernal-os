@@ -35,6 +35,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import servicespec
+
 MANIFEST = "manifest.json"
 MAX_ARCHIVE = 512 << 20
 MAX_ENTRIES = 4096
@@ -63,6 +65,7 @@ PERMISSIONS = {"network", "system", "storage", "ai"}
 ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
+SERVICE_PERM_RE = re.compile(r"^service:([a-z]+)$")      # ask the OS for one group of functions (servicespec.py)
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
                   "kind", "extends"}
 
@@ -160,6 +163,13 @@ class Manifest:
             raise KAppError(f"modes must be a non-empty subset of {sorted(MODES)}")
         perms = tuple(d.get("permissions", []))
         for perm in perms:
+            m = SERVICE_PERM_RE.match(str(perm))
+            if m and m.group(1) not in servicespec.GROUPS:
+                raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
+            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)) and not m:
+                raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
+                                "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
+                                "or 'service:GROUP' (ask the OS for a group of functions)")
             if perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)):
                 continue
             if isinstance(perm, str) and perm.startswith(ASK_PREFIX) and perm[len(ASK_PREFIX):] in ASK_ACTIONS:
@@ -191,6 +201,10 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
+                # The power to open and close apps, or to ask the OS for its own state, must never
+                # ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
             for power in ("system", "ai"):
                 # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
                 if power in perms:

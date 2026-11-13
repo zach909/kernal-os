@@ -181,6 +181,24 @@ class App:
         r = self._vault("spaces")
         return list(r.get("spaces", [])) if r.get("ok") else []
 
+    # --- the OS's own functions (needs a 'service:GROUP' permission) ------
+    # A blocking round trip like the vault: the OS checks the call against servicespec.py, asks the
+    # owner for the password in its own prompt where the service needs one, and answers
+    # {"ok": bool, "detail": str, "data": {..}}. Events that arrive meanwhile are kept for events().
+    def service(self, name: str, /, **args) -> dict:       # positional-only: services have arguments called 'name'
+        self._seq += 1
+        self.send({"cmd": "service", "id": self._seq, "name": name, "args": args})
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return {"ok": False, "detail": "channel closed", "data": {}}
+            if ev.get("cmd") == "service" and ev.get("id") == self._seq:
+                return ev
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return {"ok": False, "detail": "quit", "data": {}}
+            self._queue.append(ev)
+
     # --- commands the app can issue -------------------------------------
     def screen(self, title: str, lines: list[str], status: str = "") -> None:
         self.send({"cmd": "screen", "title": title, "lines": lines, "status": status})
