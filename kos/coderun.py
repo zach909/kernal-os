@@ -39,6 +39,19 @@ from .protocol import Channel, ProtocolError, escape_text, validate_app_message
 from .sandbox import SandboxPolicy
 from .scan import scan_bytes
 
+
+def _now_ms() -> int:
+    """A monotonic clock in whole milliseconds (the OS keeps no decimals)."""
+    return time.monotonic_ns() // 1_000_000
+
+
+def _wait(files, ms: int) -> bool:
+    """Wait up to ``ms`` whole milliseconds for any of ``files`` to be readable (or hung up)."""
+    poller = select.poll()
+    for f in files:
+        poller.register(f, select.POLLIN | select.POLLHUP | select.POLLERR)
+    return bool(poller.poll(max(0, ms)))
+
 PYTHON_LIKE = {"python", "assignment", "code call", "comment"}
 MAX_LINE_CODE = 4000
 MAX_OUTPUT = 64 << 10           # bytes a foreign-language line may print before it is stopped
@@ -80,7 +93,7 @@ def build_kapp(code: str) -> KApp:
 
 
 def run_code(paths: Paths, get_authority: Callable[[], Authority], code: str, language: str, *,
-             timeout: float = 10.0, out: Callable[[str], None] = print) -> int:
+             timeout: int = 10, out: Callable[[str], None] = print) -> int:
     """Run one code line as a sandboxed app. Returns an exit status."""
     if len(code) > MAX_LINE_CODE:
         raise ValueError("that line is too long to run")
@@ -116,19 +129,19 @@ def run_code(paths: Paths, get_authority: Callable[[], Authority], code: str, la
     policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
     mine, theirs = socket.socketpair()
     proc = loader.launch(loader.plan(app, theirs.fileno(), "cmd", cache_dir), policy,
-                         paths.logs / "codeline.log")
+                         paths.logs.joinpath("codeline.log"))
     theirs.close()
     channel = Channel(mine)
     channel.send({"cmd": "hello", "mode": "cmd", "width": 80, "height": 24})
-    code_out, deadline = 0, time.monotonic() + timeout
+    code_out, deadline = 0, _now_ms() + timeout * 1000
     try:
         while True:
-            left = deadline - time.monotonic()
+            left = deadline - _now_ms()
             if left <= 0:
                 out(f"stopped: ran longer than {timeout:.0f}s")
                 code_out = TIMED_OUT
                 break
-            select.select([channel], [], [], min(left, 0.25))
+            _wait([channel], min(left, 250))
             try:
                 for raw in channel.receive():
                     msg = validate_app_message(raw, "cmd")
@@ -161,7 +174,7 @@ def _text(raw: bytes) -> str:
 
 
 def _run_foreign(paths: Paths, get_authority: Callable[[], Authority], rt: runtimes.Runtime,
-                 code: str, timeout: float, out: Callable[[str], None]) -> int:
+                 code: str, timeout: int, out: Callable[[str], None]) -> int:
     """Run one line in another language: its trusted interpreter, directly, in the sandbox.
     Same order as Python: scan (done by the caller), then the password, then launch."""
     try:
@@ -190,15 +203,15 @@ def _run_foreign(paths: Paths, get_authority: Callable[[], Authority], rt: runti
         raise
     finally:
         os.close(writer)
-    status, buf, deadline = None, bytearray(), time.monotonic() + timeout
+    status, buf, deadline = None, bytearray(), _now_ms() + timeout * 1000
     try:
         while True:
-            left = deadline - time.monotonic()
+            left = deadline - _now_ms()
             if left <= 0:
                 out(f"stopped: ran longer than {timeout:.0f}s")
                 status = TIMED_OUT
                 break
-            ready, _, _ = select.select([reader], [], [], min(left, 0.25))
+            ready = _wait([reader], min(left, 250))
             if not ready and proc.poll() is not None:
                 break                              # done, and nothing left to read
             if ready:

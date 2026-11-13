@@ -711,6 +711,7 @@ class TestCatalog(unittest.TestCase):
         from suite import gen
         with tempfile.TemporaryDirectory() as td:
             made = gen.build(Path(td))
+            self.assertEqual(len(made), sum(1 for e in gen.every() if e.scope != "none"))
             # gen.build packs the original catalogue AND every pack (gen.every()), so count both
             self.assertEqual(len(made), sum(1 for e in gen.every() if e.scope != "none"))
             self.assertGreater(len(made), sum(1 for e in CATALOG if e.scope != "none"))

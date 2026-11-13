@@ -266,7 +266,7 @@ class TestForeignLanguagesRunConfined(Env):
 
     @unittest.skipUnless(PERL, "no perl here")
     def test_runaway_and_flooding_lines_are_stopped_and_output_is_made_visible(self):
-        status, out = self.run_line("1 while 1", "perl", PW, timeout=1.5)
+        status, out = self.run_line("1 while 1", "perl", PW, timeout=2)
         self.assertEqual(status, TIMED_OUT)
         self.assertIn("ran longer", out)
         status, out = self.run_line("print 'x' x 1000 while 1", "perl", PW, timeout=5)

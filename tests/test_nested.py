@@ -471,7 +471,8 @@ class TestCommandLine(Env):
     def test_list_shows_each_programs_own_permissions(self):
         self.pack_and_install(PW, PW, PW)
         out = io.StringIO()
-        with redirect_stdout(out):
+        # listing needs the password (state.view): answer it with a scripted prompter, not a terminal
+        with mock.patch.object(kcli, "_authority", lambda p: (self.authority(PW), None)), redirect_stdout(out):
             kcli.cmd_list(types.SimpleNamespace(), self.paths)
         text = out.getvalue()
         self.assertIn("[in group backup; permissions: ask:backup_add]", text)

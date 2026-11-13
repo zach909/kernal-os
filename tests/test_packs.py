@@ -25,6 +25,31 @@ def make(e, host):
     return e.args["make"](host, e)
 
 
+BANNED_MODULES = {"socket", "urllib", "subprocess", "pickle", "ctypes", "requests"}
+BANNED_CALLS = {"eval", "exec", "os.system"}
+
+
+def forbidden_uses(src: str) -> list:
+    """Imports of, and calls to, things a pack must never use. Reads the code, not the words: a code
+    reviewer pack may list 'eval' or 'pickle' as data it warns about."""
+    import ast
+    found = []
+    for n in ast.walk(ast.parse(src)):
+        if isinstance(n, ast.Import):
+            found += [a.name for a in n.names if a.name.split(".")[0] in BANNED_MODULES]
+        elif isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] in BANNED_MODULES:
+            found.append(n.module)
+        elif isinstance(n, ast.Call):
+            f, name = n.func, None
+            if isinstance(f, ast.Name):
+                name = f.id
+            elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+                name = f"{f.value.id}.{f.attr}"
+            if name in BANNED_CALLS:
+                found.append(name)
+    return found
+
+
 class TestPackList(unittest.TestCase):
     def test_every_requested_title_is_built_or_explained_in_the_right_pack(self):
         self.assertEqual(len(REQ), 105)
@@ -98,6 +123,15 @@ class TestPacksAreLight(unittest.TestCase):
 
     def test_a_pack_does_not_open_sockets_or_run_programs(self):
         for p in PACKS:
+            src = (ROOT / "kos" / "office" / f"{p}.py").read_text()
+            self.assertEqual(forbidden_uses(src), [], p)
+
+    def test_the_pack_check_catches_real_uses_but_not_words_in_data(self):
+        self.assertTrue(forbidden_uses("import socket"))
+        self.assertTrue(forbidden_uses("from urllib import request"))
+        self.assertTrue(forbidden_uses("import os\nos.system('x')"))
+        self.assertTrue(forbidden_uses("eval('1')"))
+        self.assertEqual(forbidden_uses('RULES = {"eval": "eval() runs code", "os.system": "x", "pickle": "y"}'), [])
             self.assertEqual(self.violations((ROOT / "kos" / "office" / f"{p}.py").read_text()), [], p)
 
     def test_the_guard_catches_what_it_is_for_and_ignores_mentions(self):
