@@ -382,8 +382,8 @@ def _protected(paths: Paths, target: Path) -> Optional[Path]:
 def write_file(paths: Paths, authority: Authority, keyboard: AdminKeyboard, target: str,
                data: bytes, *, scanner: Callable[[bytes, str], ScanResult] = scan_bytes,
                optimizer: Optional[Callable[..., object]] = None,
-               ledger: Optional[Ledger] = None) -> WriteReport:
-    """Write a file. ``file.write`` *requires* the administrator keyboard
+               ledger: Optional[Ledger] = None, who: str = "") -> WriteReport:
+    """Write a file. ``who`` names the app asking, so the password prompt and the audit say so. ``file.write`` *requires* the administrator keyboard
     (before) and leaves a security scan and a disk optimize owed (after) - both
     discharged right here, in that order, under the same password. Anything not
     discharged stays on the ledger and blocks the next write until settled."""
@@ -417,7 +417,8 @@ def write_file(paths: Paths, authority: Authority, keyboard: AdminKeyboard, targ
 
     audit = AuditLog(paths)
     summary = {"opt": "not run"}
-    with authority.authorize("file.write", str(final)) as grant:
+    label = str(final) + (f" for {who}" if who else "")
+    with authority.authorize("file.write", label) as grant:
         keyboard.verify(grant)
         atomic_write(final, data, mode=0o600)
         entry_id = ledger.owe("file.write", str(final))

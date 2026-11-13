@@ -55,6 +55,10 @@ INSTANCE_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN + 7}}}\Z){ID_PATTERN}-[0-9a-f]{
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
+# ``admin`` lets a program ask the OS for the administrator keyboard's one job, the guarded file
+# write (request ``admin`` / ``write``). It is not root: the OS still needs a live lease, the
+# password typed for exactly that write, a clean security scan and a disk optimize.
+PERMISSIONS = {"network", "system", "storage", "ai", "admin"}
 # ``cookies`` and ``passwords`` each unlock one separate, OS-owned store (see vault.py / spaces.py).
 # They are not part of ``storage``: an app that keeps notes cannot read a cookie jar or saved logins.
 PERMISSIONS = {"network", "system", "storage", "ai", "cookies", "passwords"}
@@ -62,7 +66,7 @@ PERMISSIONS = {"network", "system", "storage", "ai"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
-ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove")
+ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "kernel")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 SERVICE_PERM_RE = re.compile(r"^service:([a-z]+)$")      # ask the OS for one group of functions (servicespec.py)
@@ -201,6 +205,9 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
+            for power in ("system", "ai", "admin"):
+                # The power to open and close apps, to send text to a model, or to write files as the
+                # administrator must never ride in on an add-on.
             if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
                 # The power to open and close apps, or to ask the OS for its own state, must never
                 # ride in on an add-on.

@@ -267,6 +267,19 @@ class App:
     def request_backup_remove(self, item_id: str) -> None:
         self.send({"cmd": "request", "action": "backup_remove", "id": item_id})
 
+    def request_kernel(self) -> None:
+        """Ask what the Linux kernel protects (needs ``ask:kernel``). Answered by one ``kernel`` event."""
+        self.send({"cmd": "request", "action": "kernel"})
+
+    def request_admin(self) -> None:
+        """Ask whether the administrator keyboard is on (needs ``admin``). Answered by a ``result`` event."""
+        self.send({"cmd": "request", "action": "admin"})
+
+    def request_write(self, path: str, text: str) -> None:
+        """Ask the OS to write a file as the administrator (needs ``admin``). The OS asks the owner for the
+        password, scans and optimizes; the answer is one ``result`` event that says ok or not."""
+        self.send({"cmd": "request", "action": "write", "path": path, "text": text})
+
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch
         didn't provide one. It is wiped the moment this app's process ends -
