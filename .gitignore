@@ -3,4 +3,5 @@ __pycache__/
 *.kapp
 dist/
 *.deb
+micro/build/
 build/
