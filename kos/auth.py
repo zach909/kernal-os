@@ -100,6 +100,7 @@ ACTIONS: dict[str, str] = {
     "ai.ask": "send text to the AI",
     "ai.config": "set up or look at the AI connection",
     "state.view": "look at what is installed, open or logged",
+    "hardware.scan": "look at every piece of hardware and record it in the permission store",
     "overlay.order": "set the load order of mod file layers",
     "overlay.view": "look at the merged mod file layers",
 }

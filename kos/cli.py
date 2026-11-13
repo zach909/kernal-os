@@ -38,6 +38,8 @@
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
     kos firmware                    management processors (Intel ME, AMD PSP, BMC) and whether the OS may boot
+    kos hardware scan               map every device and connection into the permission store (password)
+    kos hardware [show|links] [TEXT]  list the saved devices or connections (password)
     kos audit                       show the authorization log
     kos admin [status|boot|lock]    the elevated administrator keyboard (boots at login)
     kos write PATH --text T         write a file: admin keyboard + security scan + disk optimize
@@ -833,6 +835,62 @@ def cmd_cell(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_hardware(args, paths: Paths) -> int:
+    """`kos hardware scan` maps every device the kernel can see and the connections between them
+    into <state>/permissions/hardware/. `show` and `links` list the saved map. See kos/hardware.py
+    for what a "connection" can and cannot mean to software."""
+    from . import hardware
+    what = args.hw_cmd or "show"
+    if what == "scan":
+        authority, _ = _authority(paths)
+        with authority.authorize("hardware.scan", "every device and connection"):
+            old = None
+            try:
+                old = hardware.load(paths)
+            except hardware.HardwareError:
+                pass                                   # a broken old map is simply replaced
+            found = hardware.scan()
+            where = hardware.save(paths, found)
+        notes = found.notes
+        print(f"{len(found.devices)} devices, {len(found.links)} connections -> {where}")
+        if notes["truncated"]:
+            print(f"INCOMPLETE: stopped early ({', '.join(notes['truncated'])}); the map is partial")
+        if notes["unreadable"] or notes["dangling"]:
+            print(f"{notes['unreadable']} attributes could not be read, "
+                  f"{notes['dangling']} connections pointed at something not in the map")
+        if not notes["sources"]["devices"]:
+            print("no /sys/devices on this machine: nothing to map")
+        if old is not None:
+            d = hardware.diff(old, found)
+            for key, label in (("devices_added", "NEW device"), ("devices_removed", "gone device"),
+                               ("links_added", "NEW connection"), ("links_removed", "gone connection")):
+                for item in d[key]:
+                    print(f"  {label}: {item}")
+            if not any(d.values()):
+                print("unchanged since the last scan")
+        return 0
+    _view(paths, "hardware")
+    saved = hardware.load(paths)
+    if saved is None:
+        print("no hardware map yet (run: kos hardware scan)")
+        return 0
+    needle = (args.match or "").lower()
+    if what == "links":
+        for l in saved.links:
+            line = f"{l['kind']:20} {l['from']}  ->  {l['to']}"
+            extra = " ".join(f"{k}={v}" for k, v in sorted(l["attrs"].items()))
+            if needle in (line + " " + extra).lower():
+                print(line + (f"   [{extra}]" if extra else ""))
+        return 0
+    for d in saved.devices:
+        line = f"{d['id']}  {d['subsystem'] or '-'}  {d['driver'] or '-'}"
+        if needle in (line + " " + " ".join(d["attrs"].values())).lower():
+            print(line)
+    print(f"({saved.notes.get('devices', 0)} devices, {saved.notes.get('links', 0)} connections. "
+          f"Not visible to software: {'; '.join(saved.notes.get('not_visible', []))})")
+    return 0
+
+
 def cmd_usb(args, paths: Paths) -> int:
     from . import usb
     return usb.cmd_usb(args, paths)
@@ -1346,6 +1404,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
     s.add_argument("fw_cmd", nargs="?", choices=["status", "plan"],
                    help="plan: read-only advice on what each blocking chip would need")
+    s = sub.add_parser("hardware", help="map every device and connection into the permission store: scan | show | links")
+    s.add_argument("hw_cmd", nargs="?", choices=["scan", "show", "links"])
+    s.add_argument("match", nargs="?", help="only lines containing this text")
     s = sub.add_parser("audit", help="show the authorization log")
     s.add_argument("-n", type=int, default=30)
     s.add_argument("--verify", action="store_true",
@@ -1512,7 +1573,7 @@ COMMANDS = {
     "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
     "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
     "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
-    "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
+    "doctor": cmd_doctor, "firmware": cmd_firmware, "hardware": cmd_hardware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
