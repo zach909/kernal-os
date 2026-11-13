@@ -170,7 +170,7 @@ class TestDisplayAndInput(unittest.TestCase):
         fb.text(0, 0, "I", parse_color("#00ff00"))
         self.assertEqual(fb.pixel(2, 1), (0, 255, 0))
 
-    def _surface(self, budget=1.0, clock=None):
+    def _surface(self, budget=1000, clock=None):
         kw = {"clock": clock} if clock else {}
         be = HeadlessBackend(160, 100)
         return GraphicalSurface(be, budget=budget, **kw), be
@@ -198,11 +198,11 @@ class TestDisplayAndInput(unittest.TestCase):
         self.assertEqual(len(s.queue), 0)
 
     def test_out_of_time_keeps_big_changes_and_ditches_small_ones(self):
-        now = [0.0]
+        now = [0]
         def clock():
-            now[0] += 1.0          # every look at the clock costs a second: always out of time
+            now[0] += 1000         # every look at the clock costs a second: always out of time
             return now[0]
-        s, be = self._surface(budget=0.5, clock=clock)
+        s, be = self._surface(budget=500, clock=clock)
         s.scene.clear(parse_color("#000000"))
         s.present({"ops": [["rect", 0, 0, 160, 100, "#101010"],       # big: whole screen
                            ["rect", 10, 10, 3, 3, "#ff0000"],          # small
@@ -218,7 +218,7 @@ class TestDisplayAndInput(unittest.TestCase):
         self.assertEqual(fb.pixel(11, 11), (0, 255, 0))
 
     def test_with_time_to_spare_small_changes_are_kept(self):
-        s, be = self._surface(budget=1000.0)
+        s, be = self._surface(budget=1000000)
         s.present({"ops": [["rect", 10, 10, 3, 3, "#ff0000"]]})
         s.render()
         self.assertEqual(be.frames[-1].pixel(11, 11), (255, 0, 0))

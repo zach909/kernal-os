@@ -378,7 +378,7 @@ class VC(Menu):
         self.host, self.st, self.note = host, Store(host), ""
         self.repo = Repo(self.st.load("repo"))
         super().__init__("Version Control", [
-            ("Files (add, edit, delete)", self.files), ("Status", self.status), ("Commit", self.commit), ("Log", self.log),
+            ("Files (add, edit, delete)", self.files), ("Status", self.show_status), ("Commit", self.commit), ("Log", self.log),
             ("Diff against last commit", lambda: _tv("Diff", self.repo.diff_work() or ["no changes"])),
             ("Branches and tags", self.refs),
             ("Checkout a branch, tag or commit", lambda: self.ask("Checkout", "Branch, tag or commit id:", lambda r: self.do(self.repo.checkout, r))),
@@ -436,7 +436,7 @@ class VC(Menu):
             if ns: self.do(r.del_file, ns[i])
         return ("push", Lister("Files", rows, {"enter": edit, "a": new, "d": rm}, "Enter edit  a add  d delete from working copy (restore brings it back)", "(no files: press a)"))
 
-    def status(self):
+    def show_status(self):
         s = self.repo.status()
         lines = [f"on {self.repo.head or 'detached'}"] + [f"{k}: {', '.join(s[k])}" for k in ("added", "modified", "deleted", "conflicts") if s[k]]
         return _tv("Status", lines if len(lines) > 1 else lines + ["clean"])
@@ -552,7 +552,7 @@ def _py(text, docstrings):
         elif isinstance(n, ast.Call):
             d = _dotted(n.func)
             if d in _DANGER: out.append(_f(n.lineno, _DANGER[d][0], "dangerous-call", f"{d}: {_DANGER[d][1]}"))
-            if d.startswith("subprocess.") and any(k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value is True for k in n.keywords):
+            if "." in d and any(k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value is True for k in n.keywords):
                 out.append(_f(n.lineno, "error", "shell-true", f"{d} with shell=True allows command injection"))
         elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id in _BUILTINS:
             out.append(_f(n.lineno, "info", "shadow-builtin", f"assignment shadows builtin '{n.id}'"))
