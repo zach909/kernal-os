@@ -29,6 +29,7 @@ COMMANDS = (
     ('firmware', 'management processors (Intel ME, AMD PSP, BMC) and the boot gate', 'kos firmware [-h] [{status,plan}]'),
     ('go', "open an address, like a browser's address bar: go kos://NAME[/path][?query]", 'kos go [-h] address'),
     ('grant', 'let an app into a shared folder (space:NAME), or list who has access', 'kos grant [-h] [--level LEVEL] [--revoke] [--list] [app] [resource]'),
+    ('hardware', 'map every device and connection into the permission store: scan | show | links', 'kos hardware [-h] [{scan,show,links}] [match]'),
     ('help', 'list the commands, or explain one', 'kos help [-h] [topic]'),
     ('install', 'install a .kapp, or every .kapp in a folder (each asks for the password)', 'kos install [-h] file'),
     ('line', 'the line shell: every line you type is a command', 'kos line [-h] [--explain]'),
