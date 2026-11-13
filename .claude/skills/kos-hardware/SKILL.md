@@ -20,6 +20,7 @@ Only the OS touches hardware. Apps get commands, never devices.
 | Mouse / keyboard `/dev/input` | `EvdevDevices` in `kos/devices.py` | opened with `EVIOCGRAB` (exclusive); mouse not opened until booted |
 | Administrator keyboard | `kos/admin.py` (`open_admin_devices`, `AdminPrompter`) | grabs the keyboards; refuses if another process holds one |
 | `/dev/kvm`, `/dev/vhost-vsock` | `kos/cells.py` | kernel cells |
+| Device tree (read-only sysfs, no `/dev` opens) | `kos/hardware.py` (`scan`) | `kos hardware scan` maps devices and connections into `<state>/permissions/hardware/`; password action `hardware.scan`, authorized before anything is read; never reads serials or MACs |
 
 `kos doctor` shows which of these exist on the machine.
 
@@ -40,6 +41,10 @@ Every attestation also lists `/proc/PID/fd` and refuses an app holding anything 
 `null`, `zero`, `urandom`, `random`), `/sys/`, or a KVM handle: the "no hardware path inside the sandbox"
 rule, checked rather than assumed. It applies even under `KOS_DEV_WEAK_SANDBOX`. It sees handles open at
 the moment it looks (every 2 s), not ones opened and closed between looks.
+- Reading sysfs attributes is not opening a device, but it still goes through the password when it
+  records anything (`hardware.scan`). `kos/hardware.py` reads a fixed list of attributes, never
+  follows a symlink and never opens anything under `/dev`; keep it that way. Do not add serials,
+  MAC addresses or other unique ids to that list.
 
 ## Working without hardware
 

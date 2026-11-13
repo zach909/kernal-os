@@ -119,6 +119,8 @@ class Session:
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
                  guard: Optional[Guard] = None, allow_network: Optional[bool] = None,
                  app_pid: Optional[int] = None):
+                 status_ok: bool = False):
+                 services=None):
         self.name, self.mode = name, mode
         # A layer with no pointer (the text layer) is never offered the mouse.
         self.has_pointer = getattr(surface, "has_pointer", True)
@@ -136,6 +138,8 @@ class Session:
         self.booted: set[str] = set()
         self.bridge = bridge
         self.vault = vault
+        self.status_ok = status_ok       # from the verified manifest ('ask:status' or 'system'), never the app
+        self.services = services           # a services.ServiceHost, or None: no 'service:' permission
         self.right_click_to = right_click_to
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
@@ -272,6 +276,8 @@ class Session:
                 self._on_request(msg)
             elif msg["cmd"] == "vault":
                 self._on_vault(msg)
+            elif msg["cmd"] == "service":
+                self._on_service(msg)
             elif msg["cmd"] == "exit":
                 self.exit_code = msg["code"]
                 self.stop_requested = True
@@ -298,7 +304,10 @@ class Session:
             if msg["op"] == "spaces":
                 reply["spaces"] = self.vault.visible_spaces()
             else:
-                v = self.vault.vault(msg.get("space"), msg["op"])
+                store = msg.get("store")
+                v = self.vault.vault(msg.get("space"), msg["op"], store)
+                if store:       # cookies and passwords are sensitive: every use is logged (never the value)
+                    self._log(f"{store}: {msg['op']} {msg.get('key', '')}".rstrip())
                 if msg["op"] == "put":
                     v.put(msg["key"], msg["value"])
                 elif msg["op"] == "get":
@@ -315,9 +324,47 @@ class Session:
             reply["ok"] = True
         except (StorageError, VaultError, OSError) as e:
             reply["detail"] = str(e)[:200]
+            if msg.get("store"):
+                self._log(f"{msg['store']}: {msg['op']} refused: {reply['detail']}")
         self._send(reply)
 
+    def status_fields(self, topic: str) -> list:
+        """What the OS tells an app about one part of this session. Read-only, made here, never
+        taken from the app. Values are short plain text."""
+        backend = str(getattr(self.devices, "kind", "unknown"))
+        if topic == "mouse":
+            return [["state", "booted" if "mouse" in self.booted else "not booted"],
+                    ["backend", backend],
+                    ["right button", "App Library (the OS keeps it)" if self.right_click_to else "sent to the app"]]
+        if topic == "keyboard":
+            return [["state", "booted" if "keyboard" in self.booted else "not booted"],
+                    ["backend", backend],
+                    ["Ctrl-C", "always the OS's"]]
+        w, h = self.surface.hello_size()
+        return [["mode", self.mode], ["width", str(w)], ["height", str(h)],
+                ["surface", type(self.surface).__name__.lower()]]
+
+    def _on_status(self, msg: dict) -> None:
+        if not self.status_ok:
+            self._send({"cmd": "result", "action": "status", "ok": False,
+                        "detail": "this app does not have the 'ask:status' or 'system' permission"})
+            return
+        self._send({"cmd": "status", "topic": msg["topic"], "ok": True,
+                    "fields": self.status_fields(msg["topic"])})
+    def _on_service(self, msg: dict) -> None:
+        """An app asks the OS for one of its functions (services.py). The password, where the service
+        needs one, is typed in the OS's own prompt; this app can neither see nor answer it."""
+        if self.services is None:
+            self._send({"cmd": "service", "id": msg["id"], "ok": False, "data": {},
+                        "detail": "this app has no 'service:' permission in its manifest"})
+            return
+        self._send(self.services.call(msg, self.authority))
+        self.surface_dirty = True
+
     def _on_request(self, msg: dict) -> None:
+        if msg["action"] == "status":
+            self._on_status(msg)
+            return
         if self.bridge is None:
             self._send({"cmd": "result", "action": msg["action"], "ok": False,
                         "detail": "this app does not have the 'system' permission"})

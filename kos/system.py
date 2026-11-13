@@ -22,6 +22,7 @@ listing reveals names the owner installed, and switching is an ``attach``
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import time
@@ -58,6 +59,23 @@ def authorize_app_action(name: str, app: KApp, mode: str, authority: Authority,
             allow_net = True
     return SandboxPolicy(allow_network=allow_net,
                          weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+
+
+@contextlib.contextmanager
+def _admin_authority(lease, session_authority: Authority):
+    """Who asks for the password of an admin write. A lease on real hardware is *exclusive*: the
+    password must be typed on the administrator keyboard, taken for this one action, and if something
+    else holds a keyboard the write is refused (fails closed). A WEAK lease (a development terminal,
+    ``KOS_DEV_ADMIN_WEAK=1``) has no exclusive keyboard to take, so the session's own prompt is used."""
+    from .admin import AdminPrompter, open_admin_devices
+    devices = open_admin_devices(lease)      # raises AdminError if it cannot be taken exclusively
+    if devices is None:
+        yield session_authority
+        return
+    try:
+        yield Authority(session_authority.paths, AdminPrompter(devices))
+    finally:
+        devices.close()
 
 
 def _row(paths: Paths, a, permits: PermitStore) -> dict:
@@ -129,7 +147,8 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     sock_path=str(run_dir / f"{inst_id}.sock"),
                     log_path=str(run_dir / f"{inst_id}.log"), started=time.time(),
                     system="system" in app.manifest.permissions,
-                    asks=list(app.manifest.asks), address=address)
+                    asks=list(app.manifest.asks), admin="admin" in app.manifest.permissions,
+                    address=address)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
@@ -154,13 +173,20 @@ def close_instance(paths: Paths, authority: Authority, instance_id: str) -> Inst
 
 def bridge_for(paths: Paths, name: str, permissions, spawner: Callable = spawn) -> Optional["SystemBridge"]:
     """The bridge a program gets, from its own manifest permissions and nothing else: every request
-    for ``system``, only the named ones for ``ask:ACTION``, none at all for neither. Whatever the
+    for ``system``, only the named ones for ``ask:ACTION``, the AI for ``ai``, the guarded write for
+    ``admin`` (each separate from the others), none at all for none of them. Whatever the
     app it belongs to, or its sibling programs, may do plays no part."""
     perms = tuple(permissions)
-    if "system" in perms:
-        return SystemBridge(paths, spawner, who=name)
-    asks = frozenset(p[len("ask:"):] for p in perms if p.startswith("ask:"))
-    return SystemBridge(paths, spawner, allowed=asks, who=name) if asks else None
+    powers = {p for p in perms if p in ("system", "ai", "admin")}
+    allowed = None
+    if "system" not in powers:
+        asks = frozenset(p[len("ask:"):] for p in perms if p.startswith("ask:"))
+        if asks:
+            powers.add("system")        # the bridge's gate for requests; ``allowed`` narrows it
+            allowed = asks
+    if not powers:
+        return None
+    return SystemBridge(paths, spawner, allowed=allowed, who=name, app=name, permissions=powers)
 
 
 class SystemBridge:
@@ -172,7 +198,8 @@ class SystemBridge:
     before anything happens - no password is asked - and goes in the audit log."""
 
     def __init__(self, paths: Paths, spawner: Callable = spawn, allowed: Optional[frozenset] = None,
-                 who: str = "", *, app: str = "", permissions=None):
+                 who: str = "", *, app: str = "", permissions=None,
+                 admin_authority: Optional[Callable] = None):
         self.paths = paths
         self._spawner = spawner
         self.allowed = allowed
@@ -181,6 +208,59 @@ class SystemBridge:
         # None = the original behaviour (system actions only). The 'ai' permission is separate:
         # an app that may ask the AI gets no power to open, close or back up anything.
         self.permissions = frozenset(permissions) if permissions is not None else frozenset({"system"})
+        # How the password for an admin write is asked: ``(lease, session_authority) -> context manager
+        # yielding an Authority``. The default is the real thing (see _admin_authority).
+        self._admin_authority = admin_authority or _admin_authority
+
+    def _admin(self, req: dict, authority: Authority) -> None:
+        """``admin`` and ``write``: only with the 'admin' permission, and never more than the guarded
+        write. Everything that can be checked without the password is checked before it is asked."""
+        from .admin import AdminError, AdminKeyboard, WriteBlocked, write_file
+        action = req["action"]
+
+        def result(ok: bool, detail: str) -> None:
+            self._reply({"cmd": "result", "action": action, "ok": ok, "detail": clean_text(detail, 300)})
+
+        who = self.app or self.who or "?"
+        audit = AuditLog(self.paths)
+        if "admin" not in self.permissions:
+            audit.record("bridge.admin", f"{who}:{action}", "refused")
+            return result(False, "this app does not have the 'admin' permission")
+        kb = AdminKeyboard(self.paths)
+        if action == "admin":
+            status = kb.status()
+            return result(status.startswith("administrator keyboard: ON"), status)
+        try:
+            lease = kb.require_booted()          # refuse before any password
+            data = req["text"].encode("utf-8")
+            with self._admin_authority(lease, authority) as auth:
+                report = write_file(self.paths, auth, kb, req["path"], data, who=who)
+        except WriteBlocked as e:
+            audit.record("bridge.admin", f"{who}:write", "scan-failed")
+            return result(False, str(e))
+        except (AdminError, AuthorizationDenied, AuthError, OSError) as e:
+            audit.record("bridge.admin", f"{who}:write", "refused")
+            return result(False, str(e))
+        audit.record("bridge.admin", f"{who}:write", "written")
+        result(True, f"wrote {report.bytes_written} bytes to {report.path}; "
+                     f"scan: {report.scan.summary()}")
+
+    def _kernel(self) -> None:
+        """What the Linux kernel protects, as data. Read-only: it changes nothing and needs no password,
+        like ``kos doctor``. Cells are listed by name, not by anything that could start one."""
+        from .admin import AdminKeyboard
+        from .cells import CellManager
+        from .sandbox import report
+        try:
+            cells = [{"name": clean_text(str(c.get("name", "")), 32), "cid": int(c.get("cid", 0)),
+                      "cpus": [int(x) for x in c.get("cpus", [])][:64],
+                      "memory_mb": int(c.get("memory_mb", 0)), "running": bool(c.get("running"))}
+                     for c in CellManager(self.paths).cells()[:MAX_LISTED]]
+        except (OSError, ValueError, TypeError, KeyError):
+            cells = []
+        prot = {k: (v if isinstance(v, bool) else int(v or 0)) for k, v in report().items()}
+        self._reply({"cmd": "kernel", "protections": prot, "cells": cells,
+                     "admin": clean_text(AdminKeyboard(self.paths).status(), 200)})
 
     def _ask(self, req: dict, authority: Authority) -> None:
         """One question to the AI. Order matters: permission, then is there an endpoint at all
@@ -219,6 +299,9 @@ class SystemBridge:
         if action == "ask":
             self._ask(req, authority)
             return None
+        if action in ("admin", "write"):
+            self._admin(req, authority)
+            return None
         if "system" not in self.permissions:
             reply({"cmd": "result", "action": action, "ok": False,
                    "detail": "this app does not have the 'system' permission"})
@@ -246,6 +329,9 @@ class SystemBridge:
             if action == "close":
                 inst = close_instance(self.paths, authority, req["id"])
                 result(True, f"closed {inst.id}", id=inst.id)
+                return None
+            if action == "kernel":
+                self._kernel()
                 return None
             if action == "backup":
                 items, stats = backup.snapshot(self.paths, authority, "backup.list", "app")

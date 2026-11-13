@@ -52,9 +52,11 @@ class PermitStore:
         except FileNotFoundError:
             pass
 
-    def grant(self, name: str, declared: Optional[Iterable[str]] = None) -> None:
+    def grant(self, name: str, declared: Optional[Iterable[str]] = None, pin: Optional[str] = None) -> None:
+        """A permit is for one file. ``pin`` is that file's sha256: a different file with the same
+        name (an update, a swap) does not inherit it."""
         self._check(name)
-        self.perms.grant(name, "run", "use", declared=list(declared) if declared is not None else None)
+        self.perms.grant(name, "run", "use", declared=list(declared) if declared is not None else None, pin=pin)
 
     def revoke(self, name: str) -> None:
         self._check(name)
@@ -81,6 +83,14 @@ class PermitStore:
         if extra:
             raise PermitError(f"{name} now asks for {', '.join(extra)}, which you never approved "
                               f"(run: kos permit {name})")
+
+    def check_pin(self, name: str, sha256: str) -> None:
+        """Refuse if the file is not the exact file you permitted. Permits made before pinning existed
+        carry no pin and are not restricted."""
+        e = self.perms.get(name, "run")
+        if e and "pin" in e and e["pin"] != sha256:
+            raise PermitError(f"{name} is not the file you permitted (it changed since); "
+                              f"if you trust the new file run: kos permit {name}")
 
     def list(self) -> list[Permit]:
         return [Permit(e["app"], e["at"]) for e in self.perms.list("run")]

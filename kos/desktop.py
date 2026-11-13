@@ -25,6 +25,10 @@ from .kapp import KAppError
 from .registry import RegistryError
 
 SYSTEM_APPS = ("taskbar", "app-library")
+# One more app per function of the OS that has a screen of its own (rule 5: everything is separate). They
+# are ordinary apps in ``apps/``; ``kos desktop install`` installs them with the two above, and you reach
+# them from the App Library. The desktop itself only ever opens SYSTEM_APPS.
+FUNCTION_APPS = ("mouse", "keyboard", "display", "wallpaper")
 
 
 class DesktopError(Exception):

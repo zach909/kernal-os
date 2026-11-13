@@ -1,0 +1,2 @@
+{"about": "Shows what the Linux kernel enforces for KOS. Read-only: it changes nothing.",
+ "commands": [{"name": "r", "help": "ask the OS again"}, {"name": "Esc", "help": "leave the app"}]}

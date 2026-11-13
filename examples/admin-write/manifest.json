@@ -1,0 +1,9 @@
+{
+  "name": "admin-write",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["admin"],
+  "description": "An app that is an administrator: asks the OS to write a file. The OS asks for your password and scans the file."
+}

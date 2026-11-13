@@ -205,7 +205,7 @@ def validate_name(name: str) -> str:
 
 
 def _registry_path(paths: Paths) -> Path:
-    return paths.state / REGISTRY_FILE
+    return paths.state.joinpath(REGISTRY_FILE)
 
 
 def load_custom(paths: Paths) -> dict[str, dict]:

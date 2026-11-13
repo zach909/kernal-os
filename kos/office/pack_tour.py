@@ -40,7 +40,7 @@ PASSWORD = (
      ("No, the first time covered it", "Only after a reboot", "Only if the app uses the network"),
      "KOS has no cached logins: every action needs the password typed for that action (app.run)."),
     ("Which action asks for your password when you let an app use the mouse?", "device.mouse",
-     ("app.run", "file.view", "session.login"),
+     ("admin.boot", "file.view", "session.login"),
      "Booting a device is its own action; the keyboard is device.keyboard."),
     ("What does the audit log keep of each password decision?", "A hash-chained record you can check with kos audit --verify",
      ("Nothing, decisions are not logged", "A file the app can edit", "Only the wrong passwords"),
@@ -53,7 +53,7 @@ PASSWORD = (
      ("session.login", "app.permit", "admin.boot"),
      "Even changing the password goes through Authority.authorize."),
     ("Taking an app's shared-folder access away again uses which action?", "space.revoke",
-     ("app.revoke", "app.remove", "app.close"),
+     ("app.revoke", "app.remove", "backup.remove"),
      "app.revoke takes away permission to run; space.revoke takes away a shared folder."),
     ("Does kos security need a password?", "No, it is read-only and changes nothing",
      ("Yes, always", "Yes, but only the first time", "It needs the administrator keyboard"),
@@ -103,9 +103,9 @@ PERMITS = (
     ("Which permission does every suite app in this repo get?", "storage",
      ("network", "system", "camera"),
      "Apps keep their data in their own vault; network is declared only where an app cannot work without it."),
-    ("What does the network permission give an app today?", "Every host and port, and it may listen",
-     ("One host you pick", "Web pages only", "Outgoing connections on port 443 only"),
-     "It is one yes or no at launch. Per-host rules need the firewall, which does not exist yet."),
+    ("On the KOS kernel, what does the network permission give an app?", "Only the chance to be allowed: each address and port needs a firewall rule",
+     ("Every host and port", "Web pages only", "Outgoing connections on port 443 only"),
+     "The permission is still one yes or no at launch. On a stock kernel, without the KOS module, it still gives every host and port."),
     ("When is the network permission decided?", "At launch, with your password",
      ("When the app first connects", "At install time only", "Never, it is on for everyone"),
      "Decided at launch (action app.network), not at first use: a known gap."),
@@ -140,9 +140,9 @@ BLOCKED = (
     ("What does KOS rule 3 say about connections?", "Every connection is blocked until a rule allows it",
      ("Connections are allowed unless reported", "Only the internet is blocked", "Only apps from unknown makers are blocked"),
      "Any pair, any protocol, any port. It is a rule every change must meet."),
-    ("Does KOS have a firewall today?", "No: it is the rule's goal, not built yet",
-     ("Yes, as an app", "Yes, inside the kernel cell", "Yes, but only for websites"),
-     "The only block today is an app's empty network namespace."),
+    ("Where are firewall rules enforced?", "In the KOS kernel module; the firewall app only edits the rules",
+     ("In the firewall app", "In each app that asks for the network", "In the browser"),
+     "A broken or hostile firewall app leaves the default at deny. Without the KOS kernel, nothing enforces the rules yet."),
     ("An app without the network permission connects somewhere. Result?", "Blocked by its empty network namespace",
      ("Allowed on port 443", "Blocked by a firewall rule", "Allowed but logged"),
      "No permission, no network at all, for any host or port."),
@@ -151,10 +151,10 @@ BLOCKED = (
      "README gap: nothing yet blocks or logs connections made by the OS or from outside the sandbox."),
     ("By rule 3, what happens to a plain http:// connection?", "It is refused, never silently upgraded",
      ("It is upgraded to https", "It is allowed once", "It is allowed on local networks"),
-     "That is the rule; since no firewall exists yet, it is not enforced for everything."),
-    ("An app with the network permission can reach:", "Every host and port, and listen for incoming connections",
-     ("Only hosts you listed", "Only the host in its manifest", "Only HTTPS sites"),
-     "The permission is one yes or no. Rules naming one app, host and port are still to be built."),
+     "That is the rule. The firewall allows one address and port; it cannot tell encrypted from plain traffic, so only the web example enforces https."),
+    ("On the KOS kernel, an app has the network permission and no firewall rule. It can reach:", "Nothing: every connection is blocked until a rule allows it",
+     ("Every host and port", "Only the host in its manifest", "Only HTTPS sites"),
+     "A rule names one app, one protocol, connect or listen, one IP address typed out and one port."),
 )
 
 DEVICES = (
@@ -186,7 +186,7 @@ CELLS = (
      ("kos cell hello c1", "kos open hello c1", "run hello --vm c1"),
      "The app uses the same command protocol, carried over vsock."),
     ("Starting a cell needs the password. Which action is it?", "cell.start",
-     ("app.run", "admin.boot", "disk.optimize"),
+     ("admin.boot", "disk.optimize", "session.login"),
      "Stopping one is cell.stop."),
     ("Can an app call the kernel or hardware directly?", "No, only the OS does",
      ("Yes, with a permit", "Yes, from inside a cell", "Yes, if it is graphical"),
@@ -362,4 +362,4 @@ def make(host, entry):
 ENTRIES: list = [app(
     "Get to Know KOS", make, "full",
     "A guide to KOS as it is today: ten short quiz games, one per part of the OS, each with a one-line explanation. "
-    "It lists nothing that is not built, and says plainly where something (a firewall, encryption) is not done yet.")]
+    "It lists nothing that is not built, and says plainly where something (encryption, the OS's own connections) is not done yet.")]

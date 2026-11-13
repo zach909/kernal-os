@@ -1,9 +1,31 @@
 ---
 name: kos-kernel
-description: How KOS uses the Linux kernel - the sandbox that confines apps (Landlock, namespaces, no_new_privs), kernel cells (KVM micro-VMs over vsock), and the kernel-protection checks the administrator keyboard depends on. Use when changing or debugging sandbox.py, cells, kos doctor, or anything that runs code on behalf of an app in kernal-os.
+description: How KOS uses the Linux kernel - KOS ships its own patched kernel (the security module in kernel/patches), the sandbox that confines apps (Landlock, namespaces, no_new_privs, the KOS module), kernel cells (KVM micro-VMs over vsock), and the kernel-protection checks the administrator keyboard depends on. Use when changing or debugging kernel/, sandbox.py, kos/kernel.py, kos/firewall.py, cells, the System Information app, or anything that runs code on behalf of an app in kernal-os.
 ---
 
 # KOS kernel layer
+
+**KOS has its own kernel.** `kernel/patches/0001-kos-lsm.patch` adds a Linux Security
+Module (`security/kos`) to Linux 6.12.116; `kernel/build.sh` fetches the pinned source,
+refuses it unless the SHA-256 matches, applies the patches, merges `kernel/kos.config`
+and fails if any option in it did not stick. Read `docs/KERNEL.md` before changing it.
+The core's side is small: `kos/kernel.py` (claim the core, confine, rules, log) and
+`kos/firewall.py` (the owner's rules, sealed; applied at launch, revoked at exit).
+
+Rules for this layer:
+- **A kernel change needs the boot test**: `kernel/test/run.sh` (about 2 minutes, no KVM).
+  It boots the patched kernel under QEMU with `kernel/test/kos_lsm_test.c` as PID 1. Every
+  refusal in it is paired with the allowance that proves the rule said no. It found real
+  bugs (an address parser that accepted `10.0.0.0/8` as a host, the LSM silently dropped
+  by the framework for lack of a slot in `lsm_count.h`). Add a check for what you add.
+- **Fail closed.** `kos.require_kernel=1` (on the signed command line) means no app runs
+  without the module; `SandboxPolicy.probe` and `init.kernel_gate` enforce it.
+- **Default deny.** A rule names one app, protocol, direction, IP address and port; never
+  a name (resolving one is a connection), never a range or `0`. `kernel.check_rule` and the
+  kernel both refuse; neither trusts the other.
+- **The kernel only covers confined tasks.** Say so wherever you describe it: the OS's own
+  connections, processes outside the sandbox, and kernel cells are not covered (README).
+- **It cannot tell encrypted from plain traffic.** Do not claim the firewall enforces rule 4.
 
 **This does:** confines each app with the Linux kernel (Landlock,
 namespaces) and runs risky work in its own kernel cell, refusing to start if
@@ -29,11 +51,13 @@ applied, **the app does not start**.
    nothing else; no signals or abstract unix sockets outside the sandbox
 
 `kos doctor` reports what this kernel supports (`report()` in `sandbox.py`).
-Known gap: no seccomp filter yet (Landlock + namespaces only).
+A short seccomp denylist follows Landlock on x86_64 (`kos doctor` says if it is missing). On the KOS kernel the module's confinement is applied first of all, before any of the above.
 
-Network today: empty namespace by default; the `network` permission plus a
-password removes both the namespace and the Landlock TCP filter, which gives the
-app every host and port. That is the open gap against rule 3 in `kos-rules`.
+Network: an empty namespace by default; the `network` permission plus a password removes it and
+the Landlock TCP filter. **On the KOS kernel that no longer means every host:** the module denies
+every connection of a confined app unless the owner's firewall has a rule for exactly that app,
+protocol, direction, IP address and port. On a stock kernel the permission still gives every host
+and port - the README gaps table says so.
 
 ## Cells (`kos/cells.py`, `kos/cellagent.py`)
 

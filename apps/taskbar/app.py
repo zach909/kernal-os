@@ -2,6 +2,9 @@
 OS (never orders it) to switch to another app. The OS owns the right mouse
 button - it opens the App Library from anywhere - so this app never sees it.
 
+The background colour comes from the ``wallpaper`` shared folder (``uses:wallpaper``), only when the owner
+granted it; a missing or malformed value leaves the default.
+
 Keys: 1-9 jump to that open app, a-i open a pinned entry, l opens the App Library, r refreshes.
 
 Mods: a mod the owner switched on for the taskbar (``kos extend NAME``) arrives as an
@@ -17,6 +20,14 @@ CHIP_W, CHIP_H, CHIP_GAP, BAR_H = 96, 20, 4, 28
 PIN_KEYS = "abcdefghi"
 PIN_H = 18
 ACCENT = "#2f6db5"
+BACKGROUND = "#101820"   # the desktop background unless the wallpaper app saved another
+
+
+def valid_color(text):
+    """A colour the wallpaper app stored, only if it is exactly #rrggbb. Data from another app is never
+    trusted: a bad value would make the OS refuse the frame."""
+    ok = isinstance(text, str) and len(text) == 7 and text[0] == "#"
+    return text.lower() if ok and all(ch in "0123456789abcdefABCDEF" for ch in text[1:]) else None
 
 
 def pinned(items):
@@ -85,7 +96,7 @@ def tui_lines(state):
 
 def draw_graphical(app, state):
     w, h = app.width, app.height
-    c = Canvas().clear("#101820")
+    c = Canvas().clear(state["background"])
     color = accent(state["ext"])
     pins = pin_chips(w, pinned(state["ext"]))
     c.rect(0, 0, w, BAR_H, "#1f3a5f")
@@ -110,7 +121,7 @@ def draw_graphical(app, state):
 
 def main():
     app = App()
-    state = {"open": [], "note": "", "ext": []}
+    state = {"open": [], "note": "", "ext": [], "background": BACKGROUND}
 
     def focus(inst):
         if inst:
@@ -121,6 +132,7 @@ def main():
     for ev in app.events():
         cmd = ev["cmd"]
         if cmd == "hello":
+            state["background"] = valid_color(app.vault_get("color", space="wallpaper")) or BACKGROUND
             app.request_apps()
         elif cmd == "apps":
             state["open"] = ev["open"]
