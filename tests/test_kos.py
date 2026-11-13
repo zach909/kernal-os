@@ -170,6 +170,84 @@ class TestDisplayAndInput(unittest.TestCase):
         fb.text(0, 0, "I", parse_color("#00ff00"))
         self.assertEqual(fb.pixel(2, 1), (0, 255, 0))
 
+    def _surface(self, budget=1.0, clock=None):
+        kw = {"clock": clock} if clock else {}
+        be = HeadlessBackend(160, 100)
+        return GraphicalSurface(be, budget=budget, **kw), be
+
+    def test_frames_are_kept_and_changed_not_replaced(self):
+        s, be = self._surface()
+        s.present({"ops": [["clear", "#000000"], ["rect", 0, 0, 40, 40, "#ff0000"]]})
+        s.present({"ops": [["rect", 100, 50, 10, 10, "#00ff00"]]})   # a change, no clear
+        s.render()
+        fb = be.frames[-1]
+        self.assertEqual(fb.pixel(5, 5), (255, 0, 0))     # the earlier frame is still there
+        self.assertEqual(fb.pixel(105, 55), (0, 255, 0))  # and the new frame changed it
+        s.present({"ops": [["rect", 0, 0, 10, 10, "#0000ff"]]})
+        s.render()
+        self.assertEqual(be.frames[-1].pixel(5, 5), (0, 0, 255))
+        self.assertEqual(be.frames[-1].pixel(105, 55), (0, 255, 0))
+        self.assertEqual(s.dropped_ops, 0)
+
+    def test_every_queued_frame_is_applied_in_order(self):
+        s, be = self._surface()
+        for c in ("#ff0000", "#00ff00", "#0000ff"):
+            s.present({"ops": [["rect", 0, 0, 5, 5, c]]})
+        s.render()
+        self.assertEqual(be.frames[-1].pixel(1, 1), (0, 0, 255))   # last one wins, none skipped
+        self.assertEqual(len(s.queue), 0)
+
+    def test_out_of_time_keeps_big_changes_and_ditches_small_ones(self):
+        now = [0.0]
+        def clock():
+            now[0] += 1.0          # every look at the clock costs a second: always out of time
+            return now[0]
+        s, be = self._surface(budget=0.5, clock=clock)
+        s.scene.clear(parse_color("#000000"))
+        s.present({"ops": [["rect", 0, 0, 160, 100, "#101010"],       # big: whole screen
+                           ["rect", 10, 10, 3, 3, "#ff0000"],          # small
+                           ["line", 0, 0, 5, 5, "#ff0000"],            # small
+                           ["text", 50, 50, "hi", "#ff0000", 1],       # small
+                           ["rect", 0, 0, 80, 50, "#00ff00"]]})        # big: a quarter
+        s.render()
+        fb = be.frames[-1]
+        self.assertEqual(fb.pixel(70, 40), (0, 255, 0))        # big change kept
+        self.assertEqual(fb.pixel(150, 90), (16, 16, 16))      # big change kept
+        self.assertEqual(s.dropped_ops, 3)
+        self.assertNotEqual(fb.pixel(11, 11), (255, 0, 0))     # small ones ditched
+        self.assertEqual(fb.pixel(11, 11), (0, 255, 0))
+
+    def test_with_time_to_spare_small_changes_are_kept(self):
+        s, be = self._surface(budget=1000.0)
+        s.present({"ops": [["rect", 10, 10, 3, 3, "#ff0000"]]})
+        s.render()
+        self.assertEqual(be.frames[-1].pixel(11, 11), (255, 0, 0))
+
+    def test_queue_is_bounded_and_overflow_keeps_big_changes(self):
+        s, be = self._surface()
+        for i in range(s.MAX_QUEUED_FRAMES + 5):
+            s.present({"ops": [["rect", 0, 0, 2, 2, "#ff0000"]]})
+        self.assertLessEqual(len(s.queue), s.MAX_QUEUED_FRAMES)
+
+    def test_hostile_ops_cannot_blow_up_op_area(self):
+        fb = Framebuffer(20, 10)
+        for op in (["rect", -10**9, -10**9, 10, 10, "#000000"], ["rect", 10**9, 0, 5, 5, "#000000"],
+                   ["line", -5, -5, 10**6, 10**6, "#000000"], ["text", 0, 0, "x" * 256, "#000000", 8],
+                   ["wat"]):
+            self.assertGreaterEqual(fb.op_area(op), 0)
+        self.assertEqual(fb.op_area(["rect", 10**9, 0, 5, 5, "#000000"]), 0)
+        self.assertEqual(fb.op_area(["clear", "#000000"]), 200)
+
+    def test_app_frames_never_land_over_the_password_overlay(self):
+        from kos.display import Modal
+        s, be = self._surface()
+        s.set_modal(Modal("Password", ["type it"], secret_len=0))
+        s.present({"ops": [["clear", "#ff00ff"]]})
+        s.render()
+        fb = be.frames[-1]
+        self.assertEqual(fb.pixel(0, 0), (255, 0, 255))
+        self.assertIn((255, 204, 0), {fb.pixel(x, 50) for x in range(160)})   # overlay border drawn last
+
     def test_key_parser(self):
         ev = KeyParser().feed(b"a\x1b[A\r\x03\x1b[<0;5;3M")
         self.assertEqual([e.get("key", e["type"]) for e in ev],
