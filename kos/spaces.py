@@ -40,14 +40,22 @@ class AppStorage:
         self.paths, self.app = paths, app
         perms = tuple(manifest_permissions)
         self.has_private = "storage" in perms
+        self.stores = {x for x in ("cookies", "passwords") if x in perms}
         self.owns = {p[5:] for p in perms if p.startswith("owns:")}
         self.uses = {p[5:] for p in perms if p.startswith("uses:")}
         self.perms = Permissions(paths)
 
     def usable(self) -> bool:
-        return self.has_private or bool(self.owns or self.uses)
+        return self.has_private or bool(self.owns or self.uses or self.stores)
 
-    def vault(self, space: Optional[str], op: str) -> Vault:
+    def vault(self, space: Optional[str], op: str, store: Optional[str] = None) -> Vault:
+        if store is not None:
+            # Its own permission, its own folder: 'storage' never reaches it, and it never reaches 'storage'.
+            if store not in ("cookies", "passwords") or space is not None:
+                raise StorageError("bad store")
+            if store not in self.stores:
+                raise StorageError(f"this app does not have the '{store}' permission")
+            return Vault(self.paths, directory=AppDirs(self.paths, self.app).root / store)
         if space is None:
             if not self.has_private:
                 raise StorageError("this app does not have the 'storage' permission")

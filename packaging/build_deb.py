@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Build the whole repository into ONE Debian package.
 
-    python3 packaging/build_deb.py [OUTPUT_DIR]        (default: dist/)
+    python3 packaging/build_deb.py [--lean] [OUTPUT_DIR]        (default: dist/)
+
+``--lean`` builds ``kernal-os-core`` instead: only the OS core, stripped and xz-compressed (see
+lean.py for exactly what is cut and why).
 
 Standard library only. It does not need dpkg-deb; the package is assembled
 directly (ar + tar) so the build is the same on any machine, and reproducible:
@@ -29,6 +32,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import lzma
 import os
 import subprocess
 import sys
@@ -36,6 +40,9 @@ import tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lean as _lean  # noqa: E402  (the lean profile: see lean.py)
+
 NAME = "kernal-os"
 PREFIX = "usr/lib/kernal-os"
 LINKS = {"usr/bin/kos": "../lib/kernal-os/bin/kos",
@@ -109,6 +116,15 @@ def _tar_gz(entries, mtime: int) -> bytes:
     return out.getvalue()
 
 
+def _tar_xz(entries, mtime: int) -> bytes:
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for ti, data in entries:
+            t.addfile(ti, io.BytesIO(data) if data is not None else None)
+    return lzma.compress(raw.getvalue(), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64,
+                         preset=9 | lzma.PRESET_EXTREME)
+
+
 def _ar(members: list[tuple[str, bytes]], mtime: int) -> bytes:
     out = bytearray(b"!<arch>\n")
     for name, blob in members:
@@ -119,11 +135,16 @@ def _ar(members: list[tuple[str, bytes]], mtime: int) -> bytes:
     return bytes(out)
 
 
-def build(out_dir: Path) -> Path:
+def build(out_dir: Path, lean: bool = False) -> Path:
     if _git("status", "--porcelain", "--untracked-files=no").strip():
         print("note: uncommitted changes are NOT in this package (it is built from HEAD)", file=sys.stderr)
     version, mtime = version_and_time()
     files = tracked_files()
+    if lean:
+        files = [f for f in files if _lean.in_lean(f[0])]
+        if not files:
+            raise BuildError("the lean profile matched no files")
+    name = f"{NAME}-core" if lean else NAME
 
     # --- data.tar: directories first, then files, then the two symlinks ---
     dirs: set[str] = set()
@@ -139,13 +160,16 @@ def build(out_dir: Path) -> Path:
         entries.append((_tarinfo(f"./{d}/", mtime, 0o755, kind=tarfile.DIRTYPE), None))
     for path, mode, blob in files:
         data = _blob(blob)
+        if lean:
+            data = _lean.lean_bytes(path, data)
         size += len(data)
         rel = f"{PREFIX}/{path}"
         entries.append((_tarinfo(f"./{rel}", mtime, mode, len(data)), data))
         md5s.append(f"{hashlib.md5(data).hexdigest()}  {rel}\n")      # dpkg's md5sums format
     for link, target in sorted(LINKS.items()):
         entries.append((_tarinfo(f"./{link}", mtime, 0o777, kind=tarfile.SYMTYPE, link=target), None))
-    data_tar = _tar_gz(entries, mtime)
+    pack_tar = _tar_xz if lean else _tar_gz
+    data_tar = pack_tar(entries, mtime)
 
     # --- control.tar ---
     description = (" A security-first operating system layer on the Linux kernel: nothing happens\n"
@@ -154,10 +178,18 @@ def build(out_dir: Path) -> Path:
                    " .\n"
                    " This package installs files only. It has no maintainer scripts, starts no\n"
                    " service, and creates no state: run 'kos setup' to choose your password.")
-    control = (f"Package: {NAME}\nVersion: {version}\nSection: admin\nPriority: optional\n"
+    if lean:
+        description = (" Only the OS core of KOS: authentication, sandbox, devices, command protocol and\n"
+                       " the two system apps. Docstrings and comments are stripped; the suite, the\n"
+                       " example apps, the tests and the docs are not included (they are apps).\n"
+                       " .\n"
+                       " This package installs files only. It has no maintainer scripts, starts no\n"
+                       " service, and creates no state: run 'kos setup' to choose your password.")
+    control = (f"Package: {name}\nVersion: {version}\nSection: admin\nPriority: optional\n"
                f"Architecture: all\nMaintainer: zach909 <zach909@users.noreply.github.com>\n"
                f"Installed-Size: {(size + 1023) // 1024}\nDepends: python3 (>= 3.11)\n"
                f"Suggests: qemu-system-x86, cryptsetup-bin, busybox-static, cpio\n"
+               + (f"Conflicts: {NAME}\nReplaces: {NAME}\n" if lean else "") +
                f"Homepage: https://github.com/zach909/kernal-os\n"
                f"Description: KOS, a security-first OS layer (every action needs your password)\n"
                f"{description}\n").encode()
@@ -168,20 +200,22 @@ def build(out_dir: Path) -> Path:
     for e, _ in ctl_entries:
         if e.name.lstrip("./") in FORBIDDEN_CONTROL:
             raise BuildError("maintainer scripts are not allowed in this package")
-    control_tar = _tar_gz(ctl_entries, mtime)
+    control_tar = pack_tar(ctl_entries, mtime)
 
-    deb = _ar([("debian-binary", b"2.0\n"), ("control.tar.gz", control_tar),
-               ("data.tar.gz", data_tar)], mtime)
+    ext = "xz" if lean else "gz"
+    deb = _ar([("debian-binary", b"2.0\n"), (f"control.tar.{ext}", control_tar),
+               (f"data.tar.{ext}", data_tar)], mtime)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{NAME}_{version}_all.deb"
+    out = out_dir / f"{name}_{version}_all.deb"
     out.write_bytes(deb)
     return out
 
 
 def main(argv: list[str]) -> int:
-    out_dir = Path(argv[1]) if len(argv) > 1 else ROOT / "dist"
+    args = [a for a in argv[1:] if a != "--lean"]
+    out_dir = Path(args[0]) if args else ROOT / "dist"
     try:
-        deb = build(out_dir)
+        deb = build(out_dir, lean="--lean" in argv[1:])
     except (BuildError, subprocess.CalledProcessError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

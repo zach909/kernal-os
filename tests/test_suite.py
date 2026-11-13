@@ -742,3 +742,83 @@ class TestCatalog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCookiesAndPasswordsPermissions(unittest.TestCase):
+    """'cookies' and 'passwords' are manifest permissions, each with its own store the OS keeps."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.paths = Paths(Path(self.tmp.name))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_manifest_accepts_both_and_the_ai_permission_still_parses(self):
+        import json as _j
+        from kos.kapp import Manifest
+        base = {"name": "web", "version": "1.0", "runtime": "python", "entry": "web:main"}
+        m = Manifest.parse(_j.dumps({**base, "permissions": ["network", "ai", "cookies", "passwords"]}).encode())
+        self.assertEqual(m.permissions, ("network", "ai", "cookies", "passwords"))
+        Manifest.parse((ROOT / "examples" / "web" / "manifest.json").read_bytes())
+        from kos.kapp import KAppError
+        with self.assertRaises(KAppError):
+            Manifest.parse(_j.dumps({**base, "permissions": ["cookie"]}).encode())
+
+    def test_protocol_accepts_a_store_and_rejects_the_rest(self):
+        ok = validate_app_message({"cmd": "vault", "id": 1, "op": "put", "key": "sid", "value": "x", "store": "cookies"}, "tui")
+        self.assertEqual(ok["store"], "cookies")
+        for bad in ({"store": "keys"}, {"store": "../x"}, {"store": 5}, {"store": "cookies", "space": "contacts"}):
+            with self.assertRaises(ProtocolError):
+                validate_app_message({"cmd": "vault", "id": 1, "op": "get", "key": "a", **bad}, "tui")
+        with self.assertRaises(ProtocolError):
+            validate_app_message({"cmd": "vault", "id": 1, "op": "spaces", "store": "cookies"}, "tui")
+
+    def test_each_permission_opens_only_its_own_store(self):
+        both = AppStorage(self.paths, "web", ["cookies", "passwords"])
+        both.vault(None, "put", "cookies").put("sid", "abc")
+        both.vault(None, "put", "passwords").put("site", "hunter2")
+        self.assertEqual(both.vault(None, "get", "cookies").keys(), ["sid"])
+        self.assertEqual(both.vault(None, "get", "passwords").keys(), ["site"])
+        only_cookies = AppStorage(self.paths, "web", ["cookies"])
+        self.assertEqual(only_cookies.vault(None, "get", "cookies").get("sid"), "abc")
+        with self.assertRaises(StorageError): only_cookies.vault(None, "get", "passwords")
+        with self.assertRaises(StorageError): only_cookies.vault(None, "get")                # no 'storage'
+
+    def test_storage_does_not_reach_them_and_they_do_not_reach_storage(self):
+        AppStorage(self.paths, "web", ["cookies", "passwords"]).vault(None, "put", "passwords").put("site", "hunter2")
+        notes = AppStorage(self.paths, "web", ["storage"])
+        with self.assertRaises(StorageError): notes.vault(None, "get", "passwords")
+        self.assertEqual(notes.vault(None, "get").keys(), [])           # private data is a different folder
+        none = AppStorage(self.paths, "other", [])
+        self.assertFalse(none.usable())
+        with self.assertRaises(StorageError): none.vault(None, "get", "cookies")
+
+    def test_another_app_never_sees_them(self):
+        AppStorage(self.paths, "web", ["cookies"]).vault(None, "put", "cookies").put("sid", "abc")
+        self.assertEqual(AppStorage(self.paths, "web2", ["cookies"]).vault(None, "get", "cookies").keys(), [])
+
+    def test_a_bad_store_and_a_store_with_a_space_are_refused(self):
+        s = AppStorage(self.paths, "web", ["cookies", "owns:contacts"])
+        for args in (("bogus",), ("cookies", "contacts")):
+            with self.assertRaises(StorageError):
+                if len(args) == 1: s.vault(None, "get", args[0])
+                else: s.vault(args[1], "get", args[0])
+
+    def test_over_the_wire_with_the_real_sdk_and_session_handler(self):
+        a, b = socket.socketpair(); a.settimeout(10)
+        logged = []
+        stub = StubOS(AppStorage(self.paths, "web", ["cookies"]), b)
+        stub._log = logged.append
+        t = threading.Thread(target=TestSdkVaultRoundTrip().serve, args=(b, stub), daemon=True); t.start()
+        os.environ["KOS_MODE"] = "tui"
+        app = App(a)
+        self.assertTrue(app.secret_put("cookies", "sid", "abc"))
+        self.assertEqual(app.secret_get("cookies", "sid"), "abc")
+        self.assertEqual(app.secret_keys("cookies"), ["sid"])
+        self.assertFalse(app.secret_put("passwords", "site", "hunter2"))          # not permitted
+        self.assertIsNone(app.secret_get("passwords", "site"))
+        self.assertIn("does not have the 'passwords' permission", app.vault_error)
+        self.assertTrue(app.secret_delete("cookies", "sid"))
+        self.assertTrue(any("passwords: put refused" in l for l in logged))
+        self.assertFalse(any("abc" in l or "hunter2" in l for l in logged))        # values are never logged
+        a.close(); b.close()

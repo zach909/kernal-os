@@ -1,0 +1,9 @@
+{
+  "name": "ai",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["ai"],
+  "description": "Ask the AI. Advice only: every question needs your password and shows where it goes."
+}

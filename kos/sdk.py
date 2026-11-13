@@ -50,6 +50,18 @@ class Canvas:
         self.ops.append(["text", int(x), int(y), s, color, int(scale)])
         return self
 
+    def image(self, pixels, x: int = 0, y: int = 0, scale: int = 1, max_ops: Optional[int] = None):
+        """Draw a picture. KOS has no image command, so the pixels (rows of
+        '#rrggbb' or (r, g, b)) are turned into rects and lines first; see
+        ``kos.vectorize``. Fits in what is left of the frame's op budget, and
+        degrades (fewer colours, then blockier) rather than overflow. Returns
+        the ``Vectorized`` result: check ``.lossless``. Raises ValueError."""
+        from .vectorize import DEFAULT_BUDGET, MAX_OPS, vectorize
+        room = MAX_OPS - len(self.ops)
+        v = vectorize(pixels, x, y, scale, min(max_ops or DEFAULT_BUDGET, room) if room >= 1 else 0)
+        self.ops.extend(v.ops)
+        return v
+
 
 class App:
     def __init__(self, sock: Optional[socket.socket] = None):
@@ -69,6 +81,7 @@ class App:
         self.extensions: list = []
         self._queue: deque = deque()     # events that arrived while waiting for a vault reply
         self._seq = 0
+        self.ai_error = ""              # why the last ask was refused
         self.vault_error = ""           # why the last vault call was refused, for the app to show
 
     def send(self, obj: dict) -> None:
@@ -106,7 +119,8 @@ class App:
     # --- durable storage (needs the 'storage' permission) -----------------
     # Blocking round trips: the OS answers a vault command straight away and
     # never prompts. Any other event that arrives meanwhile is kept for events().
-    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None) -> dict:
+    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None,
+               store: Optional[str] = None) -> dict:
         self._seq += 1
         msg = {"cmd": "vault", "op": op, "id": self._seq}
         if op not in ("list", "spaces"):
@@ -115,6 +129,8 @@ class App:
             msg["value"] = value
         if space is not None:
             msg["space"] = space
+        if store is not None:
+            msg["store"] = store
         self.send(msg)
         while True:
             ev = self._read_event()
@@ -143,6 +159,22 @@ class App:
 
     def vault_delete(self, key: str, space: Optional[str] = None) -> bool:
         return bool(self._vault("delete", key, space=space).get("ok"))
+
+    # Cookies and saved passwords: separate stores behind the 'cookies' and 'passwords' manifest permissions.
+    # Without the permission the OS refuses (and logs it). ``store`` is "cookies" or "passwords".
+    def secret_put(self, store: str, key: str, value: str) -> bool:
+        return bool(self._vault("put", key, value, store=store).get("ok"))
+
+    def secret_get(self, store: str, key: str) -> Optional[str]:
+        r = self._vault("get", key, store=store)
+        return r.get("value") if r.get("ok") else None
+
+    def secret_keys(self, store: str) -> list:
+        r = self._vault("list", store=store)
+        return list(r.get("keys", [])) if r.get("ok") else []
+
+    def secret_delete(self, store: str, key: str) -> bool:
+        return bool(self._vault("delete", key, store=store).get("ok"))
 
     def vault_spaces(self) -> list:
         """Shared spaces this app can open right now: [{space, access, owner}]."""
@@ -205,6 +237,27 @@ class App:
     # Backups (needs the 'system' permission). The OS asks for the password in
     # its own prompt for every one of these; the app only ever sees the answer:
     # {"cmd": "backup", "stats": {...}, "items": [...]} or a "result" event.
+    def ask(self, text: str, context: str = "", source: str = "") -> list:
+        """Ask the AI (needs the 'ai' permission). The OS asks the owner for the password and says
+        what leaves the computer; this blocks until it answers. Returns lines of text, or [] and
+        ``self.ai_error`` says why. ``context`` is untrusted text you hand over (a page, a file)."""
+        self.send({"cmd": "request", "action": "ask", "text": text, "context": context, "source": source})
+        self.ai_error = ""
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                self.ai_error = "channel closed"
+                return []
+            if ev.get("cmd") == "answer":
+                if not ev.get("ok"):
+                    self.ai_error = ev.get("detail", "refused")
+                return list(ev.get("lines", [])) if ev.get("ok") else []
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                self.ai_error = "quit"
+                return []
+            self._queue.append(ev)
+
     def request_backup(self) -> None:
         self.send({"cmd": "request", "action": "backup"})
 

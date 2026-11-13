@@ -106,6 +106,7 @@ def _kernel(paths, get_authority, req: Request, p: Passage) -> str:
             app = store.load_verified(req.target, grant)
             fw_key = grant.key(firewall.KEY_LABEL)       # to check the firewall's rules are the owner's
         PermitStore(paths).check_declared(req.target, app.manifest.permissions)
+        PermitStore(paths).check_pin(req.target, app.sha256)
         if req.sandbox_prompt:
             policy = authorize_app_action(req.target, app, req.mode, authority, authority.prompter)
         else:

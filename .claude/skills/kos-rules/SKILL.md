@@ -5,7 +5,7 @@ description: The rules every change to kernal-os (KOS) must follow - everything 
 
 # KOS rules
 
-**This does:** sets the four rules every change to KOS must follow
+**This does:** sets the rules every change to KOS must follow
 (verification, everything is an app, connections blocked and encrypted, the
 pipeline encrypted).
 
@@ -25,6 +25,13 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
      action to `ACTIONS`, call `authorize` *before* doing anything. Other
      checks (scan, seal, `requires`) add to the password, never replace it.
    - Work side: nothing is done until you ran it and checked it.
+   - **Nothing runs unproven; no decimals** (`kos/proof.py`). Every `.kapp` carries
+     `proof.json`, recomputed at install and at every launch. No proof, a mismatch, a
+     broken rule, or compiled code means it does not run. Whole numbers only: no
+     float/complex, no `/` (use `//`), no `Decimal`/`Fraction`. Do not add a way
+     around it (no flag that skips `proof.require`); `pack(prove=False)` exists only to
+     build an app the OS must refuse, in tests. Never call it a formal proof: it is a
+     static rule check plus a compile.
 2. **Everything is an app.** New features ship as sandboxed `.kapp`s that
    only talk to the OS through the command protocol (`kos/protocol.py`).
    What is not an app is the KOS kernel (`kernel/`: patched Linux) and a small
@@ -45,6 +52,21 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    no encrypted-to-plain redirect. The browser tells the user on every page
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
+
+## Soft rules (a strong default, not a hard rule)
+
+- **No APIs between apps; permissions and a shared folder instead.** When two
+  apps need to work together, do not give one a way to call the other (no
+  app-to-app commands, endpoints or message types). Let them share through a
+  shared folder ("space", `kos/spaces.py`): the owner app says `owns:NAME` in
+  its manifest and creates it; a partner says `uses:NAME`; the user lets it in
+  with `kos grant APP space:NAME --level read|write`. The permission store
+  (`<state>/permissions/grants.json`) is the only thing that decides who may
+  read or write. Check `kos spaces` and the README "Shared folders" section
+  before inventing another channel.
+- Break this only with a reason you can state, and say in your report that you
+  did. If the shared folder cannot do the job (for example live data between
+  two machines), say that is the gap rather than quietly adding an API.
 
 ## The pipeline (what each layer may do)
 
@@ -91,6 +113,8 @@ hostile-input test.
       in the app: spec, handler with the password asked before any read, tests.
 - [ ] A kernel change ran `kernel/test/run.sh`, and the README says what the kernel does
       not cover (it only covers confined apps; it cannot see encryption).
+- [ ] New code uses whole numbers (`//`, no float); `tests/test_proof.py` ratchet passes.
+      Anything new that can start code goes through `proof.require`.
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
 - [ ] Anything new that connects, listens or fetches is blocked by default and
       logged; nothing opens a plain-text connection.

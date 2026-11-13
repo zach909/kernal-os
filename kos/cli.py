@@ -3,7 +3,8 @@
     kos setup                       choose your password (first boot)
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
-    kos install APP.kapp            install (the zip is stored as-is, sealed)
+    kos pack APPDIR -o FOLDER       a group of apps: one .kapp per app (NAME.py + NAME.json, or a folder with a manifest), each with only its own permissions
+    kos install APP.kapp            install (the zip is stored as-is, sealed); a folder installs every .kapp in it
     kos update APP.kapp             update to a newer version (no downgrades)
     kos view FILE                   view a file (password first)
     kos remove NAME
@@ -16,6 +17,9 @@
     kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
     kos extend NAME                 switch an extension or mod on for the app it extends (password)
     kos extend --revoke NAME / --list
+    kos overlay order MOD...        set the load order of mod file layers, last wins (password)
+    kos overlay show [FOLDER]       the merged files and who provides each (password)
+    kos overlay conflicts           every file more than one mod provides, who wins (password)
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
@@ -41,6 +45,11 @@
     kos backup [list]               what is backed up and how much deduplication saved (password)
     kos backup restore ID DIR       put one item back in DIR; guarded write, never overwrites
     kos backup remove ID            forget one item (its body goes when nothing else uses it)
+    kos backup link APP URL         back up an app as its https address + SHA-256, not its bytes (password)
+    kos backup links                the linked apps and the space saved
+    kos backup fetch APP            download a linked app, verify the hash, scan, install (password)
+    kos backup unlink APP           forget a link
+    kos folders [create]            the standard data folders; create makes them (password)
     kos do WORDS...                 one line of human language, run as one command
     kos line [--explain]            the line shell: every line you type is a command
 """
@@ -55,24 +64,33 @@ from pathlib import Path
 
 from . import loader
 from .admin import AdminError, WriteBlocked
+from .ai import AIError
 from .backup import BackupError, VaultTamperedError
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
-from .kapp import KApp, KAppError, pack
+from .kapp import MANIFEST, KApp, KAppError, has_program_below, pack, pack_tree
 from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
+from .runtimes import LanguageError
 from .sandbox import SandboxError, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
-from .system import SystemBridge, close_instance, open_background
+from .system import SystemBridge, bridge_for, close_instance, open_background
 from .vfs import VFSError
 
 
 def _authority(paths: Paths) -> tuple[Authority, TTYPrompter]:
     prompter = TTYPrompter()
     return Authority(paths, prompter), prompter
+
+
+def _view(paths: Paths, what: str) -> None:
+    """Looking at what is installed, open, logged or owed needs the password too: the audit log and
+    the activity feed show what you did and which apps you run. Refused before anything is printed."""
+    authority, _ = _authority(paths)
+    authority.authorize("state.view", what).close()
 
 
 def _new_password(prompter: TTYPrompter) -> bytes:
@@ -122,15 +140,35 @@ def cmd_passwd(args, paths: Paths) -> int:
 
 
 def cmd_pack(args, paths: Paths) -> int:
-    m = pack(Path(args.dir), Path(args.output))
-    print(f"packed {m.name} {m.version} -> {args.output}")
+    src = Path(args.dir)
+    if (src / MANIFEST).is_file() and not has_program_below(src, pairs=False):
+        m = pack(src, Path(args.output))
+        print(f"packed {m.name} {m.version} -> {args.output}")
+        return 0
+    # A group of apps (a folder with no manifest): one .kapp per app in the folder OUTPUT, each with
+    # only its own permissions. A folder app with an app inside it is refused by pack_tree.
+    out = Path(args.output)
+    if out.suffix == ".kapp":
+        raise KAppError(f"{src} is a group of apps: give -o a folder, one .kapp is written per app")
+    for m in pack_tree(src, out):
+        perms = ", ".join(m.permissions) or "none"
+        print(f"packed {m.name} {m.version} -> {out / (m.name + '.kapp')}   permissions: {perms}")
+    if not (src / MANIFEST).is_file():
+        print(f"{src.name} is a group, not an app, and has no permissions; install and permit each app")
     return 0
 
 
 def cmd_install(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
-    m = AppStore(paths).install(Path(args.file), authority)
-    print(f"installed {m.name} {m.version} (modes: {', '.join(m.modes)}) - kept zipped, sealed")
+    src = Path(args.file)
+    # A folder of programs (what `kos pack` wrote): each one is installed on its own, scanned and
+    # sealed on its own, and asks for the password on its own.
+    files = sorted(src.glob("*.kapp")) if src.is_dir() else [src]
+    if not files:
+        raise KAppError(f"no .kapp files in {src}")
+    for f in files:
+        m = AppStore(paths).install(f, authority)
+        print(f"installed {m.name} {m.version} (modes: {', '.join(m.modes)}) - kept zipped, sealed")
     return 0
 
 
@@ -161,6 +199,7 @@ def cmd_remove(args, paths: Paths) -> int:
 
 def cmd_list(args, paths: Paths) -> int:
     from .system import list_apps
+    _view(paths, "apps")
     apps = AppStore(paths).installed()
     if not apps:
         print("no apps installed")
@@ -168,6 +207,8 @@ def cmd_list(args, paths: Paths) -> int:
     for a in apps:
         row = kinds.get(a.name, {})
         tag = f"  [{row['kind']} of {row['extends']}]" if row.get("kind", "app") != "app" else ""
+        if "." in a.name:       # a program: show what IT may do, which is all that matters
+            tag += f"  [in group {a.name.rpartition('.')[0]}; permissions: {', '.join(row.get('permissions', [])) or 'none'}]"
         print(f"{a.name:20} {a.version:10} sha256:{a.sha256[:16]}{tag}")
     return 0
 
@@ -233,7 +274,8 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        bridge = SystemBridge(paths) if "system" in app.manifest.permissions else None
+        bridge = _bridge_for(paths, name, app.manifest.permissions)
+        bridge = bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
@@ -245,6 +287,12 @@ def cmd_run(args, paths: Paths) -> int:
             policy.on_exit()
     print(f"{name} exited ({code})")
     return code
+
+
+def _bridge_for(paths: Paths, name: str, permissions):
+    """The bridge an app gets: only if its manifest has 'system' or 'ai', and only for those powers."""
+    perms = {p for p in permissions if p in ("system", "ai")}
+    return SystemBridge(paths, app=name, permissions=perms) if perms else None
 
 
 def cmd_open(args, paths: Paths) -> int:
@@ -267,6 +315,7 @@ def cmd_go(args, paths: Paths) -> int:
 
 def cmd_ps(args, paths: Paths) -> int:
     from .registry import Registry
+    _view(paths, "open apps")
     insts = Registry(paths).list()
     if not insts:
         print("no apps open")
@@ -285,12 +334,15 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     except OSError as e:
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
-    bridge = SystemBridge(paths) if inst.system else None   # set by the OS at open time
+    # what the bridge allows was recorded by the OS at open time, from the verified manifest
+    bridge = bridge_for(paths, inst.name, ["system"] if inst.system else [f"ask:{a}" for a in inst.asks])
     perms = ()
     try:
         perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
     except (KAppError, OSError):
         pass
+    # 'system' was recorded by the OS at open time; the manifest (sealed, checked at launch) adds 'ai'
+    bridge = _bridge_for(paths, inst.name, set(perms) | ({"system"} if inst.system else set()))
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
@@ -404,6 +456,98 @@ def cmd_desktop(args, paths: Paths) -> int:
     return 0
 
 
+def _print_text(data: bytes, clean_text) -> None:
+    text = data.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        print(clean_text(line.replace("\t", "    "), 10_000))
+
+
+def _resolve_mixed(path: str):
+    """Walk a path that may cross from the real disk into a zip and, once
+    inside, into further nested zips - e.g. ``apps/hello.kapp/manifest.json``.
+    ``VFS.cd`` already treats a zip entry as just another directory, so this
+    is a plain walk down the real, absolute path one component at a time.
+    Returns (VFS positioned at the parent, final component name)."""
+    from .vfs import VFS
+
+    parts = [p for p in os.path.abspath(path).split(os.sep) if p]
+    if not parts:
+        raise KAppError("no path given")
+    vfs = VFS("/")
+    for part in parts[:-1]:
+        vfs.cd(part)
+    return vfs, parts[-1]
+
+
+def cmd_ls(args, paths: Paths) -> int:
+    from .protocol import escape_text
+    vfs, last = _resolve_mixed(args.path)
+    vfs.cd(last)
+    for e in vfs.list():
+        tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
+        print(f"{escape_text(e.name)}{tag}")
+    return 0
+
+
+def cmd_cat(args, paths: Paths) -> int:
+    """View a file - including one living inside a zip, without extracting it."""
+    from .protocol import clean_text
+    authority, _ = _authority(paths)
+    authority.authorize("file.view", os.path.abspath(args.path)).close()
+    vfs, last = _resolve_mixed(args.path)
+    _print_text(vfs.read_bytes(last), clean_text)
+    return 0
+
+
+def cmd_explore(args, paths: Paths) -> int:
+    """An interactive shell for walking real directories and zip files as one
+    tree: `cd something.kapp` steps straight into the archive. Browsing
+    (`cd`/`ls`) needs no password; `cat` does, same as `kos view`."""
+    from .protocol import clean_text, escape_text
+    from .vfs import VFS
+
+    vfs = VFS(args.start)
+    print(f"kos explore - {vfs.pwd()}  (cd, ls, cat FILE, up, exit)")
+    while True:
+        try:
+            line = input(f"{vfs.pwd()}> ").strip()
+        except EOFError:
+            print()
+            return 0
+        if not line:
+            continue
+        cmd, _, rest = line.partition(" ")
+        rest = rest.strip()
+        try:
+            if cmd in ("exit", "quit"):
+                return 0
+            elif cmd == "pwd":
+                print(vfs.pwd())
+            elif cmd == "ls":
+                for e in vfs.list():
+                    tag = "/" if e.is_dir else (" (zip)" if e.is_archive else "")
+                    print(f"{escape_text(e.name)}{tag}")
+            elif cmd in ("cd", "up") and (cmd == "up" or not rest):
+                vfs.up()
+            elif cmd == "cd":
+                vfs.cd(rest)
+            elif cmd == "cat" and rest:
+                authority, _ = _authority(paths)
+                authority.authorize("file.view", f"{vfs.pwd()}/{rest}").close()
+                _print_text(vfs.read_bytes(rest), clean_text)
+            else:
+                print("commands: cd NAME | cd .. | ls | cat FILE | pwd | exit")
+        except VFSError as e:
+            print(f"error: {e}")
+
+
+def cmd_activity(args, paths: Paths) -> int:
+    from .activity import build_feed, render_feed
+    _view(paths, "activity")
+    print(render_feed(build_feed(paths, limit=args.n)))
+    return 0
+
+
 def _on_console_vt() -> bool:
     try:
         name = os.ttyname(0)
@@ -496,6 +640,57 @@ def cmd_extend(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_overlay(args, paths: Paths) -> int:
+    """Mod file layers. The base is empty here: KOS has no core file set yet (see the README gaps),
+    so this merges mods only. Nothing is written but the load order, and that needs the password."""
+    from .overlay import BASE, Layer, OverlayConfig, OverlayError
+    from .protocol import escape_text
+    cfg = OverlayConfig(paths)
+    authority, _ = _authority(paths)
+    try:
+        if args.ovact == "order":
+            rules = {}
+            for r in args.rule or []:
+                prefix, _, names = r.partition("=")
+                rules[prefix] = [n for n in names.split(",") if n]
+            doc = cfg.save(authority, args.mods, rules)
+            print("load order (last wins): " + (" < ".join(e["name"] for e in doc["order"]) or "(none)"))
+            return 0
+        with authority.authorize("overlay.view"):
+            ov, skipped = cfg.build(Layer(BASE, {}))
+        for s in skipped:
+            eprint(f"  skipped {escape_text(s['name'], 40)}: {escape_text(s['why'], 100)}")
+        if args.ovact == "show":
+            folder = (args.folder or "").rstrip("/")
+            prefix = folder + "/" if folder else ""
+            names = ov.files() if args.deep else ov.listdir(folder)
+            for name in names:
+                if name.endswith("/"):
+                    print(f"  {escape_text(name, 240)}")
+                    continue
+                r = ov.resolve(name if args.deep else prefix + name)
+                print(f"  {escape_text(name, 240):40} {r.provider}"
+                      + (f"  (hides {', '.join(r.shadowed)})" if r.shadowed else ""))
+            return 0
+        found = ov.conflicts()
+        for c in found:
+            print(f"  {escape_text(c.path, 240)}: {c.winner or 'deleted'} wins over {', '.join(c.losers)}"
+                  + ("  (same bytes)" if c.identical else ""))
+        print(f"{len(found)} conflict(s)")
+        return 0
+    except OverlayError as e:
+        raise KAppError(str(e)) from None
+def _refuse_group(paths: Paths, name: str) -> None:
+    """A group of apps has no permissions, so there is nothing to permit on it: say which apps it
+    holds instead of failing with "no such file"."""
+    if (paths.apps / f"{name}.kapp").exists():
+        return
+    parts = sorted(a.name for a in AppStore(paths).installed() if a.name.startswith(name + "."))
+    if parts:
+        raise KAppError(f"{name} is a group of apps and has no permission of its own. "
+                        f"Permit an app: {', '.join(parts)}")
+
+
 def cmd_permit(args, paths: Paths) -> int:
     """A permit is separate from the password: it's your standing decision
     that an app may run at all. It never skips the password - `run`/`open`
@@ -512,6 +707,8 @@ def cmd_permit(args, paths: Paths) -> int:
         return 0
     if not args.name:
         raise KAppError("usage: kos permit NAME | kos permit --revoke NAME | kos permit --list")
+    if not args.revoke:
+        _refuse_group(paths, args.name)       # before any password: there is nothing to approve
     authority, _ = _authority(paths)
     action = "app.revoke" if args.revoke else "app.permit"
     with authority.authorize(action, args.name):
@@ -519,8 +716,9 @@ def cmd_permit(args, paths: Paths) -> int:
             PermitStore(paths).revoke(args.name)
             print(f"revoked: {args.name} may no longer run")
         else:
-            declared = KApp.from_file(paths.apps / f"{args.name}.kapp").manifest.permissions
-            PermitStore(paths).grant(args.name, declared)
+            app = KApp.from_file(paths.apps / f"{args.name}.kapp")
+            declared = app.manifest.permissions
+            PermitStore(paths).grant(args.name, declared, pin=app.sha256)
             print(f"permitted: {args.name} may now run (still asks for your password every time)")
             if declared:
                 print(f"  approved permissions: {', '.join(declared)}  (an update asking for more is refused until you permit again)")
@@ -554,6 +752,32 @@ def cmd_aios(args, paths: Paths) -> int:
     return 0 if status == "ran" else 4 if status == "held" else 1
 
 
+def cmd_ai(args, paths: Paths) -> int:
+    """`kos ai set|show|clear`: the one model endpoint the OS may send text to. Every form needs the
+    password. Asking the AI is not a command: it is the `ai` app, or any app with the `ai` permission."""
+    from . import ai
+    if args.what == "set":
+        ai.check_endpoint(args.url)                       # refuse a bad address before any prompt
+        key = os.environ.get("KOS_AI_KEY", "")         # never on the command line: argv is public
+        if not key and not args.url.startswith("http://") and sys.stdin.isatty():
+            import getpass
+            key = getpass.getpass("API key (hidden): ")
+        authority, _ = _authority(paths)
+        with authority.authorize("ai.config", "set"):
+            ep = ai.save(paths, args.url, args.provider, args.model, key.strip())
+        print(f"AI set: {ep.provider} {ep.model} at {ep.host} ({'this computer' if ep.local else 'https'})")
+        return 0
+    authority, _ = _authority(paths)
+    if args.what == "clear":
+        with authority.authorize("ai.config", "clear"):
+            print("AI removed" if ai.clear(paths) else "no AI was set up")
+        return 0
+    with authority.authorize("ai.config", "show"):
+        ep = ai.load(paths)
+    print(f"{ep.provider} {ep.model} at {ep.url} (key {'set' if ep.key else 'none'})")
+    return 0
+
+
 def cmd_scan(args, paths: Paths) -> int:
     """`kos scan watch DIR...` scans every file written under those directories until you stop it. Starting it
     needs the password, the same as starting a kernel cell, because from that point on it keeps running and
@@ -579,12 +803,121 @@ def cmd_scan(args, paths: Paths) -> int:
         run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
     except KeyboardInterrupt:
         print("\nstopped")
+def cmd_optimize(args, paths: Paths) -> int:
+    from .optimize import optimize
+    authority, _ = _authority(paths)
+    report = optimize(paths, authority)
+    print(report.summary())
+    return 0
+
+
+def cmd_cell(args, paths: Paths) -> int:
+    from .cells import CellManager, CellSpec
+    mgr = CellManager(paths)
+    if args.cell_cmd == "list":
+        _view(paths, "cells")
+        for c in mgr.cells():
+            state = "running" if c["running"] else "dead"
+            print(f"{c['name']:16} cid={c['cid']:<4} cpus={c['cpus']} {c['memory_mb']}M {state}")
+        return 0
+    authority, _ = _authority(paths)
+    if args.cell_cmd == "start":
+        spec = CellSpec(name=args.name, kernel=args.kernel, initrd=args.initrd,
+                        memory_mb=args.memory, cpus=[int(c) for c in args.cpus.split(",")])
+        rec = mgr.start(spec, authority)
+        print(f"cell {rec['name']} started: its own kernel on cores {rec['cpus']}, "
+              f"vsock cid {rec['cid']}")
+    else:
+        mgr.stop(args.name, authority)
+        print(f"cell {args.name} stopped")
     return 0
 
 
 def cmd_usb(args, paths: Paths) -> int:
     from . import usb
     return usb.cmd_usb(args, paths)
+
+
+def cmd_doctor(args, paths: Paths) -> int:
+    r = report()
+    ok = lambda b: "yes" if b else "NO"
+    print(f"Landlock ABI          : {r['landlock_abi'] or 'NOT AVAILABLE (apps will refuse to run)'}")
+    print(f"seccomp filter (apps) : {ok(r['seccomp_filter'])}" if r["seccomp_filter"]
+          else "seccomp filter (apps) : not built for this CPU architecture (Landlock + namespaces still apply)")
+    print(f"user namespaces       : {ok(r['user_namespaces'])}")
+    print(f"KVM (kernel cells)    : {ok(r['kvm'])}")
+    print(f"vhost-vsock (cells)   : {ok(r['vhost_vsock'])}")
+    print(f"framebuffer /dev/fb0  : {ok(r['framebuffer'])}")
+    print(f"evdev /dev/input      : {ok(r['evdev'])}")
+    from . import firmware
+    fw = firmware.probe()
+    running = ", ".join(f.name for f in fw.blocking)
+    print(f"firmware control      : {'NO - ' + running + ' running' if running else 'yes'}")
+    print(f"password configured   : {ok(PasswordStore(paths).exists())}")
+    return 0
+
+
+def cmd_firmware(args, paths: Paths) -> int:
+    """Read-only: what management processors are visible and what the boot
+    gate would do. Needs no password and changes nothing."""
+    from . import firmware
+    v = firmware.probe()
+    print(f"policy: kos.firmware={v.policy}")
+    print("\n".join(v.lines()))
+    print("boot: " + ("allowed" if v.ok else "REFUSED - " + (v.reason() or "")))
+    if getattr(args, "fw_cmd", None) == "plan":
+        print("\n" + firmware.platform_firmware())
+        items = firmware.plan(verdict=v)
+        for i in items:
+            print(f"\n- {i.name} [{i.state}] open replacement: {i.open_replacement}\n    {i.advice}")
+        print("\n" + firmware.plan_summary(items))
+        print("\nThis plan is read-only. KOS never writes to a chip; flashing is an offline job.")
+        return 0 if v.ok else 1
+    print("\nwhat the chips we cannot remove can still see:")
+    for name, status, note in firmware.protections():
+        print(f"  {name:24} {status}\n      {note}")
+    return 0 if v.ok else 1
+
+
+def cmd_audit(args, paths: Paths) -> int:
+    import time
+    from .auth import AuditLog
+    from .protocol import escape_text
+    log = AuditLog(paths)
+    if args.verify:
+        return _audit_verify(log, paths)
+    _view(paths, "audit log")
+    for e in log.tail(args.n):
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["t"]))
+        # targets can hold names that came from disks and zips: print them escaped
+        print(f"{t}  {escape_text(e['outcome']):13} {escape_text(e['action']):15} {escape_text(e['target'])}")
+    return 0
+
+
+def cmd_security(args, paths: Paths) -> int:
+    """`kos security`: every check KOS can run on itself without your password."""
+    from .secure import FAIL, render, run_checks
+    checks = run_checks(paths)
+    print(render(checks))
+    return 3 if any(c.level == FAIL for c in checks) else 0
+
+
+def _audit_verify(log, paths: Paths) -> int:
+    """`kos audit --verify`: check the hash chain, and with the password every anchor."""
+    from .auth import AUDIT_KEY_LABEL
+    authority, _ = _authority(paths)
+    with authority.authorize("audit.verify") as grant:
+        rep = log.verify(grant.key(AUDIT_KEY_LABEL))
+    print(f"{rep.entries} line(s): {rep.chained} chained, {rep.anchored} anchored to your password, "
+          f"{rep.legacy} older unprotected")
+    if rep.trimmed:
+        print("note: older lines were trimmed by 'kos optimize'; the chain is checked from the first one left")
+    if not rep.ok:
+        print(f"TAMPERED at line {rep.bad_line}: {rep.problem}")
+        return 3
+    print("intact: no line was edited, deleted or reordered, and every anchor matches your password")
+    print("(a log cut short at the very end cannot be detected - nothing else remembers its length)")
+    return 0
 
 
 def cmd_admin(args, paths: Paths) -> int:
@@ -609,6 +942,27 @@ def cmd_admin(args, paths: Paths) -> int:
     print(kb.status())
     if lease.weak:
         eprint("WARNING: KOS_DEV_ADMIN_WEAK=1 - not on the KOS kernel; keyboard is not exclusive.")
+    return 0
+
+
+def cmd_owed(args, paths: Paths) -> int:
+    from .requires import Ledger
+    _view(paths, "owed work")
+    owed = Ledger(paths).owed()
+    if not owed:
+        print("nothing is owed")
+    for e in owed:
+        print(f"{e['target']}  ({e['trigger']}) still owes: {', '.join(e['pending'])}")
+    return 0
+
+
+def cmd_settle(args, paths: Paths) -> int:
+    """Do what earlier writes still owe: the security scan and the disk optimize."""
+    from .admin import settle
+    authority, prompter = _authority(paths)
+    for line in settle(paths, authority):
+        print(line)
+    prompter.close()
     return 0
 
 
@@ -638,6 +992,7 @@ def cmd_backup(args, paths: Paths) -> int:
     """Deduplicated backups. Every action asks for the password; a restore is a
     guarded write (admin keyboard, scan, optimize) and asks again for that."""
     from . import backup
+    from .summary import SummaryStore
     authority, prompter = _authority(paths)
     action = args.bkact or "list"
     if action == "add":
@@ -654,6 +1009,9 @@ def cmd_backup(args, paths: Paths) -> int:
         items, stats = backup.snapshot(paths, authority)
         for it in items:
             print(f"  {it.id}  {it.size:>10,}  {it.sha256[:12]}  {it.path}")
+            note = SummaryStore(paths).get(it.sha256)
+            if note:
+                print(f"      {note}")
         print(stats.summary())
         return 0
     if action == "remove":
@@ -675,7 +1033,128 @@ def cmd_backup(args, paths: Paths) -> int:
                 devices.close()
         print(f"restored {item.id} -> {report.summary()}")
         return 0
+    if action in ("link", "links", "unlink", "fetch"):
+        return _cmd_applinks(args, paths, authority, action)
     raise KAppError(f"unknown backup action {action!r}")
+
+
+def _cmd_applinks(args, paths: Paths, authority, action: str) -> int:
+    """Apps backed up as an address and a hash. Fetching only downloads and verifies; the install
+    that follows scans the app and asks for the password again."""
+    import tempfile
+    from . import applinks
+    if action == "link":
+        link = applinks.add(paths, authority, args.app, args.url)
+        print(f"linked {link.name} {link.version} -> {link.url}")
+        print(f"  pinned sha256 {link.sha256[:16]}...; {link.size:,} bytes are not stored")
+        return 0
+    if action == "links":
+        links = applinks.snapshot(paths, authority)
+        for l in links:
+            print(f"  {l.name:20} {l.version:10} {l.sha256[:12]}  {l.size:>12,}  {l.url}")
+        print(applinks.stats(links))
+        return 0
+    if action == "unlink":
+        link = applinks.remove(paths, authority, args.app)
+        print(f"forgot the link for {link.name} (the installed app is untouched)")
+        return 0
+    link, data = applinks.fetch(paths, authority, args.app)
+    print(f"downloaded {link.name} {link.version} from {link.host}: sha256 matches")
+    paths.ensure()
+    with tempfile.TemporaryDirectory(dir=paths.state) as tmp:
+        src = Path(tmp) / f"{link.name}.kapp"
+        src.write_bytes(data)
+        store = AppStore(paths)
+        if any(a.name == link.name for a in store.installed()):
+            raise KAppError(f"{link.name} is already installed; remove it first (kos remove {link.name})")
+        m = store.install(src, authority)
+    print(f"installed {m.name} {m.version} - kept zipped, sealed")
+    return 0
+
+
+def cmd_folders(args, paths: Paths) -> int:
+    """The standard data folders: one permissioned shared folder per kind of data."""
+    from . import folders
+    if args.folders_cmd == "create":
+        authority, _ = _authority(paths)
+        created, kept = folders.create(paths, authority)
+        print(f"created {len(created)} folder(s); {len(kept)} already there")
+        for n in created:
+            print(f"  + {n}")
+        return 0
+    state = {s.folder.name: s for s in folders.status(paths)}
+    for key, title in folders.GROUPS.items():
+        print(f"{title}:")
+        for f in (f for f in folders.FOLDERS if f.group == key):
+            s = state[f.name]
+            who = ", ".join(f"{a}({lv})" for a, lv in s.access) or "nobody"
+            mark = "sensitive" if f.sensitive else ""
+            print(f"  {f.name:18} {'made' if s.exists else 'not made':9} owner {s.owner or '-':8} "
+                  f"items {s.items:<4} access: {who:24} {mark}")
+    if not any(s.exists for s in state.values()):
+        print("none made yet: kos folders create")
+    return 0
+def cmd_convert(args, paths: Paths) -> int:
+    """Convert a Debian .deb into a .kapp. The package is analysed and scanned
+    first (a bad or unconvertible one is refused before any password prompt);
+    then the password is needed to write the result. Nothing is installed."""
+    from .debconv import MAX_DEB, DebError, convert
+    src, out = Path(args.file), Path(args.output)
+    if os.path.lexists(out):
+        raise KAppError(f"{out} already exists; refusing to overwrite it")
+    with open(src, "rb") as f:
+        data = f.read(MAX_DEB + 1)
+    try:
+        kapp, report = convert(data, args.exe)
+    except DebError as e:
+        raise KAppError(str(e)) from None
+    authority, prompter = _authority(paths)
+    authority.authorize("app.convert", report.kapp_name).close()
+    prompter.close()
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(kapp)
+    print(report.summary())
+    print(f"wrote {out}. Next: kos install {out}   (scans again, asks for the password, seals)")
+    return 0
+
+
+def cmd_skills(args, paths: Paths) -> int:
+    """Make agent skills from the installed apps and the commands. One password
+    (``skill.make``) verifies every app's seal. Printing writes nothing; with
+    --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
+    from .skillmaker import collect_apps, command_inventory, make_skills
+    authority, prompter = _authority(paths)
+    helps: dict = {}
+    manifests, skipped = collect_apps(paths, authority, helps)
+    prompter.close()
+    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
+    for line in skipped + refused:
+        print(line, file=sys.stderr)
+    if not args.out:
+        for rel, text in files.items():
+            print(f"=== {rel}\n{text}")
+        return 0
+    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
+    out = Path(os.path.abspath(args.out))
+    if not out.is_dir() or out.is_symlink():
+        raise KAppError(f"{out} must be an existing directory (not a symlink)")
+    kb = AdminKeyboard(paths)
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)
+    try:
+        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        wauth = Authority(paths, wprompter)
+        for rel, text in files.items():
+            target = out / rel
+            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
+            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
+    finally:
+        if devices is not None:
+            devices.close()
+    return 0
+
+
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -719,6 +1198,29 @@ def cmd_exec(args, paths: Paths) -> int:
             prompter.close()
 
 
+def cmd_runtimes(args, paths: Paths) -> int:
+    """`kos runtimes` lists the languages code can run in; `add` and `remove` change that list.
+    All three need the password: a language is a program the OS will start for you."""
+    from . import runtimes
+    if args.rt_cmd == "add":
+        name, real, rargs = runtimes.prepare_add(args.name, args.program, args.arg or runtimes.DEFAULT_ARGS)
+        authority, _ = _authority(paths)
+        with authority.authorize("runtime.add", f"{name}: {real}"):
+            digest = runtimes.add(paths, name, real, rargs)
+        print(f"added {name}: {real} (pinned sha256 {digest[:16]}...)")
+        return 0
+    authority, _ = _authority(paths)
+    if args.rt_cmd == "remove":
+        with authority.authorize("runtime.remove", args.name):
+            ok = runtimes.remove(paths, args.name)
+        print(f"removed {args.name}" if ok else f"{args.name} was not added by you")
+        return 0 if ok else 1
+    authority.authorize("state.view", "languages").close()
+    for name, program, state in runtimes.describe(paths):
+        print(f"{name:12} {state:28} {program}")
+    return 0
+
+
 def cmd_line(args, paths: Paths) -> int:
     """The line shell. Every line is a command - in any language in the
     lexicon - or it is refused. Code is never run here."""
@@ -754,10 +1256,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
     s = sub.add_parser("passwd", help="change your password")
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
-    s = sub.add_parser("pack", help="build a .kapp from a directory")
+    s = sub.add_parser("pack", help="build a .kapp from a directory; a group of apps: -o FOLDER gets one .kapp per app")
     s.add_argument("dir")
     s.add_argument("-o", "--output", required=True)
-    s = sub.add_parser("install", help="install a .kapp")
+    s = sub.add_parser("install", help="install a .kapp, or every .kapp in a folder (each asks for the password)")
     s.add_argument("file")
     s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
     s.add_argument("file", help="a .kapp path, or the literal word 'all'")
@@ -779,6 +1281,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--revoke", action="store_true", help="switch it off")
     s.add_argument("--list", action="store_true", help="list what is switched on")
+    s = sub.add_parser("overlay", help="mod file layers: order | show | conflicts")
+    os_ = s.add_subparsers(dest="ovact", required=True)
+    o = os_.add_parser("order", help="set the load order (last wins); password")
+    o.add_argument("mods", nargs="*")
+    o.add_argument("--rule", action="append", metavar="PREFIX/=mod,mod",
+                   help="under PREFIX these mods win, last listed first priority")
+    o = os_.add_parser("show", help="the merged files and who provides each")
+    o.add_argument("folder", nargs="?")
+    o.add_argument("--deep", action="store_true", help="list every file, not one folder")
+    os_.add_parser("conflicts", help="files more than one mod provides")
     sub.add_parser("ps", help="list apps opened with 'kos open'")
     s = sub.add_parser("attach", help="attach your terminal to an open app")
     s.add_argument("id")
@@ -856,6 +1368,16 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("dest")
     b = bs.add_parser("remove", help="forget one item")
     b.add_argument("id")
+    b = bs.add_parser("link", help="back up an installed app as its https address + SHA-256 (not its bytes)")
+    b.add_argument("app")
+    b.add_argument("url")
+    bs.add_parser("links", help="the linked apps and the space saved")
+    b = bs.add_parser("unlink", help="forget an app link")
+    b.add_argument("app")
+    b = bs.add_parser("fetch", help="download a linked app, verify its hash, scan and install it")
+    b.add_argument("app")
+    s = sub.add_parser("folders", help="the standard data folders (create makes them; password)")
+    s.add_argument("folders_cmd", nargs="?", choices=["list", "create"], default="list")
     s = sub.add_parser("convert", help="convert a Debian .deb package into a .kapp (static programs only)")
     s.add_argument("file", help="the .deb to convert")
     s.add_argument("-o", "--output", required=True, help="the .kapp to create (must not exist)")
@@ -868,6 +1390,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
     s.add_argument("--lang", default="python")
     s.add_argument("--code", required=True)
+    s = sub.add_parser("runtimes", help="the programming languages code runs in: list | add NAME PROGRAM | remove NAME")
+    rs = s.add_subparsers(dest="rt_cmd")
+    rs.add_parser("list", help="every language and whether it is ready")
+    r = rs.add_parser("add", help="add a language: a trusted program that takes code after a flag (password)")
+    r.add_argument("name")
+    r.add_argument("program", help="absolute path of the interpreter")
+    r.add_argument("--arg", action="append", help="one argument, repeatable; {code} is the line (default: -e {code})")
+    r = rs.add_parser("remove", help="remove a language you added (password)")
+    r.add_argument("name")
     s = sub.add_parser("usb", help="boot KOS from a USB stick: list | check IMG | write IMG /dev/sdX | test IMG")
     us = s.add_subparsers(dest="usb_cmd", required=True)
     u = us.add_parser("list", help="USB disks it would be willing to write")
@@ -886,6 +1417,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("aios", help="AI OS: button clicker, app commands, kernel commands, skill maker")
     s.add_argument("layer", choices=["status", "gui", "app", "kernel", "skill"])
     s.add_argument("words", nargs="*")
+    s = sub.add_parser("ai", help="set up the AI connection: set, show, clear (password)")
+    s.add_argument("what", choices=["set", "show", "clear"])
+    s.add_argument("--url", default="", help="https://... or http://127.0.0.1:PORT/... (a model on this computer)")
+    s.add_argument("--provider", choices=["openai", "anthropic"], default="openai")
+    s.add_argument("--model", default="")
     s = sub.add_parser("help", help="list the commands, or explain one")
     s.add_argument("topic", nargs="?", help="a command name, e.g. install")
     s = sub.add_parser("line", help="the line shell: every line you type is a command")
@@ -958,6 +1494,31 @@ COMMANDS = {
     **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
                                   "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
 
+COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
+            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
+            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
+            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
+            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
+            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
+            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
+            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
+            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
+            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
+            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
+            "ai": cmd_ai}
+COMMANDS = {
+    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
+    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
+    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
+    "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
+    "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
+    "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
+    "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
+    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
+    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
+    "runtimes": cmd_runtimes}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -972,7 +1533,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, BackupError,
-            OSError) as e:
+            AIError, LanguageError, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

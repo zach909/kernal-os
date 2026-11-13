@@ -1,0 +1,9 @@
+{
+  "name": "backup.list",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["ask:backup"],
+  "description": "Shows what is backed up and what deduplication saved. It can only ask for the list."
+}
