@@ -1,12 +1,14 @@
 ---
 name: kos-rules
-description: The rules every change to kernal-os (KOS) must follow - everything needs verification, everything is an app, every connection is blocked by default and encrypted, and the graphics -> clicks -> app commands -> kernel -> hardware pipeline is encrypted. Use before adding or changing any command, app, protocol message, device, sandbox, network, firewall or browser code in this repo, and before calling such a change done.
+description: The rules every change to kernal-os (KOS) must follow - everything needs verification, everything is an app, everything is separate (one app per function and per screen), every connection is blocked by default and encrypted, and the graphics -> clicks -> app commands -> kernel -> hardware pipeline is encrypted. Use before adding or changing any command, app, protocol message, device, sandbox, network, firewall or browser code in this repo, and before calling such a change done.
 ---
 
 # KOS rules
 
 **This does:** sets the six rules every change to KOS must follow
 **This does:** sets the rules every change to KOS must follow
+(verification, everything is an app, everything is separate, connections blocked
+and encrypted, the pipeline encrypted).
 (verification, everything is an app, connections blocked and encrypted, the
 pipeline encrypted, fractions not decimals, proofs).
 
@@ -53,6 +55,27 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    no encrypted-to-plain redirect. The browser tells the user on every page
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
+6. **Everything is separate.** One app, one job. Every function is its own app;
+   anything with a different screen is a different app, not a tab, mode or page
+   inside another one. This covers the whole system, not only what is drawn:
+   mouse, keyboard, display, desktop background, taskbar parts, settings, status
+   views, each tool. A function with no screen is its own program (`kos pack`,
+   one `.kapp` per program).
+   - **`apps/` is where the OS's functions live: one folder per function, each
+     folder one app.** An app's code is in its own folder and nowhere else: no app
+     code in a shared folder, no logic shared between apps by importing it. An app
+     imports only `kos.sdk` from the OS; `tests/test_apps_folder.py` fails on
+     anything else.
+   - Before adding a screen, mode or setting to an app, make a new app.
+   - Separate apps never call each other: share through `owns:`/`uses:` spaces
+     and `kos grant`, not an app-to-app command (see the soft rule below).
+   - Only enforcement stays in the OS: password and its overlay, sandbox, reading
+     real devices, command validation, drawing to the framebuffer. An app for the
+     mouse, keyboard, screen or background *asks* the OS with `request`; it never
+     opens a device. The trusted overlay is never an app (an app could cover or
+     fake it).
+   - A non-enforcement built-in that is not yet an app is a gap: list it in the
+     README gaps table, do not add to it.
 6. **No decimals, only fractions.** Non-whole numbers are `Fraction`
    (`kos/exact.py`); no decimal literals, no `float()`, no `/` between numbers
    (use `//` or `Fraction`); show `7/2`, never `3.5`. A float handed to you by
@@ -125,6 +148,9 @@ hostile-input test.
 - [ ] New code uses whole numbers (`//`, no float); `tests/test_proof.py` ratchet passes.
       Anything new that can start code goes through `proof.require`.
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
+- [ ] New function or new screen is its own folder under `apps/` (rule 6), with its own
+      code, not a mode or page added to an existing app. Anything an app needs from the OS is a validated
+      `request`, and nothing in the app opens a device.
 - [ ] Anything new that connects, listens or fetches is blocked by default and
       logged; nothing opens a plain-text connection.
 - [ ] New app-facing message has schema validation and a test that hostile

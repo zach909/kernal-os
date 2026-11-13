@@ -72,7 +72,7 @@ def empty():
 
 class TestWhatShips(unittest.TestCase):
     def test_core_is_in_and_the_rest_is_out(self):
-        for p in ("bin/kos", "bin/run", "kos/auth.py", "kos/ai.py", "examples/system/taskbar/app.py"):
+        for p in ("bin/kos", "bin/run", "kos/auth.py", "kos/ai.py", "apps/taskbar/app.py"):
             self.assertTrue(lean.in_lean(p), p)
         for p in ("kos/office/sheet.py", "tests/test_kos.py", "docs/CATALOG.md", "README.md", "boot/cell-init",
                   "examples/web/web.py", "examples/ai/app.py", "suite/gen.py", "bin/suite", "packaging/build_deb.py"):

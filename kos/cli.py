@@ -23,7 +23,7 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
-    kos desktop install             pack, scan, install + permit the taskbar and App Library
+    kos desktop install             pack, scan, install + permit the taskbar, App Library, mouse, keyboard, display, wallpaper
     kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
@@ -280,6 +280,7 @@ def cmd_run(args, paths: Paths) -> int:
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            status_ok=_may_status(app.manifest.permissions))
                             services=_services_for(paths, name, app.manifest.permissions))
     finally:
         if cache_dir is not None:
@@ -288,6 +289,17 @@ def cmd_run(args, paths: Paths) -> int:
             policy.on_exit()
     print(f"{name} exited ({code})")
     return code
+
+
+def _may_status(permissions) -> bool:
+    """May this app ask the OS how its mouse, keyboard and screen stand? From the verified manifest."""
+    return "system" in permissions or "ask:status" in permissions
+
+
+def _bridge_for(paths: Paths, name: str, permissions):
+    """The bridge an app gets: only if its manifest has 'system' or 'ai', and only for those powers."""
+    perms = {p for p in permissions if p in ("system", "ai")}
+    return SystemBridge(paths, app=name, permissions=perms) if perms else None
 
 
 def cmd_open(args, paths: Paths) -> int:
@@ -344,6 +356,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
                         extensions=_extensions_for(paths, inst.name),
+                        status_ok=inst.system or _may_status(perms), **session_kwargs)
                         services=_services_for(paths, inst.name, perms), **session_kwargs)
 
 
@@ -420,15 +433,17 @@ def cmd_desktop(args, paths: Paths) -> int:
     apps are installed like any other (scanned, then a password each); the OS's own apps are installed together
     under one password, every one of them scanned first. Permitting asks once more."""
     import tempfile
+    from .desktop import FUNCTION_APPS, SYSTEM_APPS
+    every = SYSTEM_APPS + FUNCTION_APPS
     from . import sysapps
     from .desktop import SYSTEM_APPS
     from .permit import PermitStore
 
-    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "examples" / "system"
+    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "apps"
     authority, _ = _authority(paths)
     store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
     with tempfile.TemporaryDirectory() as tmp:
-        for name in SYSTEM_APPS:
+        for name in every:
             if name in have:
                 print(f"{name}: already installed")
                 continue
@@ -442,6 +457,7 @@ def cmd_desktop(args, paths: Paths) -> int:
             ms = store.install_bundle(files, authority, f"{len(files)} apps")
             print(f"installed {len(ms)} of the OS's own apps: {', '.join(m.name for m in ms)}")
     permits = PermitStore(paths)
+    need = [n for n in every if not permits.is_permitted(n)]
     names = [*SYSTEM_APPS, *(e.name for e in sysapps.entries())]
     need = [n for n in names if not permits.is_permitted(n)]
     if need:
@@ -1582,8 +1598,6 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "hardware": cmd_hardware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
     "runtimes": cmd_runtimes}
 

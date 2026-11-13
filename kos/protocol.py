@@ -25,6 +25,8 @@ OS -> app
                        what to do with it is up to the app. See extensions.py.
     {"cmd": "answer", "ok": bool, "lines": [str], "model": str, "detail": str}              (answer to request ask)
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
+    {"cmd": "status", "topic": "mouse"|"keyboard"|"display", "ok": true, "fields": [[name, value], ...]}
+                                                       (answer to request status; read-only, no password)
     {"cmd": "kernel", "protections": {name: bool|int}, "cells": [{name, cid, cpus, memory_mb, running}],
                       "admin": str}                              (answer to request kernel; read-only)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
@@ -44,6 +46,11 @@ app -> OS
     {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
     {"cmd": "request", "action": "open", "address": "kos://NAME[/path][?query]", "mode": ...}
                                          the same, as an address (see address.py); the app is told the path
+    {"cmd": "request", "action": "status", "topic": "mouse"|"keyboard"|"display"}
+                                         ask the OS how that part of THIS session stands (booted or not,
+                                         which backend, the screen size). Read-only; needs 'ask:status' or
+                                         'system'. This is how the mouse, keyboard and display apps work:
+                                         they never open a device, they ask.
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
     {"cmd": "request", "action": "kernel"}                     what the Linux kernel protects (needs ask:kernel)
@@ -97,6 +104,7 @@ _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = ID_RE
 _INSTANCE_RE = INSTANCE_RE
 REQUEST_MODES = ("tui", "graphical", "cmd")
+STATUS_TOPICS = ("mouse", "keyboard", "display")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
 
@@ -204,6 +212,14 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "ask", "text": clean_text(msg["text"], ai.MAX_QUESTION),
                 "context": clean_text(msg.get("context", ""), ai.MAX_CONTEXT),
                 "source": clean_text(msg.get("source", ""), ai.MAX_SOURCE)}
+    if action == "status":
+        extra = set(msg) - {"cmd", "action", "topic"}
+        if extra:
+            raise ProtocolError(f"request.status has no field {sorted(extra)[0]!r}")
+        topic = msg.get("topic")
+        if not isinstance(topic, str) or topic not in STATUS_TOPICS:
+            raise ProtocolError(f"request.topic must be one of {STATUS_TOPICS}")
+        return {"cmd": "request", "action": "status", "topic": topic}
     if action in ("kernel", "admin"):
         extra = set(msg) - {"cmd", "action"}
         if extra:
