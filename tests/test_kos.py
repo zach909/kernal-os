@@ -2618,8 +2618,11 @@ class TestDebConvert(Env):
                 kcli.cmd_convert(args, self.paths)
         finally:
             kcli._authority = orig
-        m = AppStore(self.paths).install(out, self.authority(PW))   # install scans, asks, seals
-        self.assertEqual(m.name, "hello")
+        # A converted program holds a compiled binary. Nothing can prove it, so it is refused at
+        # install, before any password: "if it is not proven, it does not run".
+        with self.assertRaises(ProofError):
+            AppStore(self.paths).install(out, self.authority(PW))
+        self.assertEqual(AppStore(self.paths).installed(), [])
 
     def test_unconvertible_package_is_refused_before_any_password_prompt(self):
         from kos.kapp import KAppError as KE
@@ -2649,43 +2652,16 @@ class TestDebConvert(Env):
         self.assertLessEqual(len(text), 8192)
         self.assertTrue(any("printed more than" in n for n in notes))
 
-    def test_converted_program_runs_in_the_real_sandbox_and_its_output_is_shown(self):
-        """Debian .deb -> .kapp -> install (scan, password, seal) -> verified load ->
-        real sandbox -> the shim runs the program -> its stdout arrives as a screen."""
+    def test_a_converted_binary_is_refused_because_it_cannot_be_proven(self):
+        """Debian .deb -> .kapp is built, but the ELF inside has no proof, so it is not
+        installed and never reaches the sandbox."""
         exe = self.need("hi")
         kapp, _ = self.conv(make_deb({"usr/bin/hello": (exe, 0o755)}))
         src = Path(self.tmp.name) / "conv.kapp"
         src.write_bytes(kapp)
-        store = AppStore(self.paths)
-        store.install(src, self.authority(PW))
-        with self.authority(PW).authorize("app.run", "hello") as g:
-            app = store.load_verified("hello", g)
-        a, b = socket.socketpair()
-        proc = loader.launch(loader.plan(app, b.fileno(), "tui"), SandboxPolicy(), None)
-        b.close()
-        a.settimeout(8)
-        rf = a.makefile("rb")
-        a.sendall(b'{"cmd":"hello","mode":"tui","width":80,"height":20}\n')
-        seen = []
-        try:
-            while True:
-                line = rf.readline()
-                if not line:
-                    break
-                msg = json.loads(line)
-                if msg.get("cmd") == "screen":
-                    seen = msg["lines"]
-                    if any("hello from debian" in l for l in seen):
-                        break
-        finally:
-            try:
-                a.sendall(b'{"cmd":"quit"}\n')
-            except OSError:
-                pass
-            a.close()
-            proc.wait(10)
-        self.assertTrue(any("hello from debian" in l for l in seen), seen)
-        self.assertTrue(any("[exit 3]" in l for l in seen), seen)
+        with self.assertRaises(ProofError) as cm:
+            AppStore(self.paths).install(src, self.authority(PW))
+        self.assertIn("proof", str(cm.exception))
 
 
 class TestDebBuild(unittest.TestCase):
@@ -2886,6 +2862,7 @@ def _addon_zip(name="ext-hello", kind="extension", extends="hello", contribution
     with zipfile.ZipFile(b, "w") as z:
         z.writestr("manifest.json", json.dumps(manifest))
         z.writestr("app.py", "def main():\n    pass\n")
+        z.writestr("proof.json", make_proof({"app.py": b"def main():\n    pass\n"}, "python", name))
         if with_file:
             z.writestr("extension.json", json.dumps(
                 contributions if contributions is not None
@@ -3007,6 +2984,7 @@ class AddOnEnv(Env):
 
 
 from kos.auth import AuditLog  # noqa: E402
+from kos.proof import ProofError, make_proof  # noqa: E402
 
 
 class TestExtensions(AddOnEnv):

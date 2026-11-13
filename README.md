@@ -13,7 +13,7 @@ sandboxed apps, malware scanner, multilingual command shell, Python OS.
 
 ## Rules
 
-These four rules govern every change to KOS. A change that breaks one is wrong.
+These rules govern every change to KOS. A change that breaks one is wrong.
 
 1. **Everything needs verification.**
    - In the OS: every action goes through `Authority.authorize(action, target)`
@@ -24,6 +24,15 @@ These four rules govern every change to KOS. A change that breaks one is wrong.
      replaces it.
    - In the work: nothing is called done until it has been run and checked.
      Tests pass, or the failure is reported as it is.
+   - **Nothing runs unproven.** Every app carries `proof.json`. At install and at
+     every launch the OS recomputes the proof from the app's own bytes (`kos/proof.py`);
+     no proof, a proof that does not match, code that breaks a rule, code that does not
+     compile, or a compiled binary (which cannot be checked) means the app does not
+     install and does not run. System apps are apps, so the rule covers them too.
+   - **No decimals.** Apps use whole numbers only: no float/complex literals or types,
+     no `/` (use `//`), no `Decimal`/`Fraction`, no float-returning `math`, clock or
+     random calls. The command protocol refuses any number with a point or exponent,
+     and NaN/Infinity.
 2. **Everything is an app.** Features ship as sandboxed `.kapp`s that talk to
    the OS only through the command protocol (`request` for system functions,
    with the `system` permission and a permit). The OS core stays small: auth,
@@ -67,6 +76,7 @@ Honest list, so nobody assumes these are covered:
 
 | Rule | Gap |
 |---|---|
+| Proof gate / no decimals | The "proof" is a **static check against a fixed rule set plus a successful compile, bound to the exact bytes**. It is not a formal proof that an app is secure or correct, and the sandbox is still what contains it. It cannot see: a float made by a standard-library call it does not list (`x ** -1`, `json.loads`, `os.stat` times), code reached by string tricks the banned names do not cover, or what an app imports from the `kos` package (OS code, not in the app's zip, not covered by its proof). Compiled binaries are refused outright, so `kos convert` output (a `.deb` binary) can no longer be installed, and an app installed before this change has no `proof.json` and must be re-packed. The OS's own code is **not** decimal-free: 1,111 uses remain in 64 files (clocks, throttle delays, the office packs). `tests/test_proof.py` holds that to a ratchet (`tests/nodecimal_baseline.json`): it may fall, never rise. OS-side modules are not proof-checked at all; they are what the proof gate is built from. |
 | Verification | `list`, `ps`, `activity`, `audit`, `owed` and `cell list` now need the password (`state.view`, refused before anything prints). Still run with no password: `scan file`, `ls`, `pack`, `doctor`, `security`, `firmware`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
 | Connections blocked | The AI is the first connection the OS makes on an app's behalf and it follows the rule: no endpoint configured means refused and logged (`net.ai` `blocked`), one endpoint only, password per ask, no redirects. Two honest limits: a model on this computer is reached over plain `http://` to a literal loopback address (the bytes never leave the machine, but it is not encrypted, and the rule as written says no plain text); and the API key sits in `<state>/ai.json` (mode 0600, refused if wider) with no cipher beyond the LUKS2 disk, because the standard library has none. The `ask` call blocks the session for up to 30 s. There is still no firewall for anything else. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
 | Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
