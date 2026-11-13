@@ -97,7 +97,10 @@ exemption deliberately, not by default.
   host, or command line that the OS then runs without validation.
 - Never copy app-supplied text into agent-facing output (skills, logs an agent
   reads) outside an inert data block. See `kos/skillmaker.py`.
-- Encryption: the channel is plain JSON today. The exposed parts are the broker
+- Encryption: wrap a connection in `kos.silent.SilentChannel` (KOS-SILENT/1), never in
+  anything of your own. Its payloads are untrusted bytes: they still go through
+  `validate_app_message` and `Authority.authorize`; being on the channel is not a permission.
+  The channel is plain JSON today. The exposed parts are the broker
   socket (`kos open` / `attach`, any process running as the owner) and cell
   vsock. Do not write a cipher; the standard library has no authenticated
   encryption. Adding a dependency is the owner's decision (see `kos-rules`).

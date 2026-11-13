@@ -18,6 +18,8 @@ from typing import Callable
 import z3
 
 from .crypt import COUNTER_LIMIT, MAX_PLAIN, MAX_RECORD, TAG_LEN
+from .silent import CELL_CAP, CELL_HEAD, CELL_PLAIN, CT_LEN, EK_LEN, HS_LEN, HS_PAD, HS_PLAIN, MAX_MESSAGE, SALT_LEN, X_LEN
+from .silent import TAG_LEN as SILENT_TAG
 
 _BITS64 = 64
 
@@ -73,6 +75,32 @@ def skip_is_refused() -> bool:
     return _proved(offered != expected, z3.UGT(offered, expected))
 
 
+def silent_length_field_round_trips() -> bool:
+    """KOS-SILENT: a record's length (at most CELL_CAP) written as 2 bytes and read back is the same number."""
+    n = z3.BitVec("n", 32)
+    back = z3.ZeroExt(16, z3.Extract(15, 0, n))
+    return _proved(back == n, z3.ULE(n, CELL_CAP)) and CELL_CAP + CELL_HEAD == CELL_PLAIN
+
+
+def silent_padding_fits_one_record() -> bool:
+    """KOS-SILENT: cutting a message of n bytes into the fewest records of CELL_CAP leaves padding
+    in the last record that is never negative and never more than one record (so exactly
+    ceil(n / CELL_CAP) records, and the number of records shows the size only to the nearest record)."""
+    n, c = z3.Ints("n c")
+    fewest = z3.And(c >= 1, c * CELL_CAP >= n, z3.Or(c == 1, (c - 1) * CELL_CAP < n))
+    pad = c * CELL_CAP - n
+    return _proved(z3.And(pad >= 0, pad <= CELL_CAP), z3.And(n >= 0, n <= MAX_MESSAGE), fewest)
+
+
+def silent_handshake_messages_are_one_size() -> bool:
+    """KOS-SILENT: the question (X25519 key + ML-KEM key) and the answer (X25519 key + ML-KEM
+    ciphertext + padding) are the same length, so neither side's message tells which it is."""
+    pad = z3.Int("pad")
+    answer = X_LEN + CT_LEN + pad
+    return (_proved(answer == HS_PLAIN, pad == HS_PAD) and HS_PAD >= 0 and HS_PLAIN == X_LEN + EK_LEN
+            and HS_LEN == SALT_LEN + HS_PLAIN + SILENT_TAG)
+
+
 PROOFS: dict[str, Callable[[], bool]] = {
     "nonce_is_injective": nonce_is_injective,
     "header_round_trips": header_round_trips,
@@ -80,6 +108,9 @@ PROOFS: dict[str, Callable[[], bool]] = {
     "counter_never_wraps": counter_never_wraps,
     "replay_is_refused": replay_is_refused,
     "skip_is_refused": skip_is_refused,
+    "silent_length_field_round_trips": silent_length_field_round_trips,
+    "silent_padding_fits_one_record": silent_padding_fits_one_record,
+    "silent_handshake_messages_are_one_size": silent_handshake_messages_are_one_size,
 }
 
 
