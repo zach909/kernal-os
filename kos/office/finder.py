@@ -21,6 +21,8 @@ Rules it holds to (kos-rules):
 * **Everything searched is untrusted text.** App descriptions, stored notes and shared-folder
   contents are written by someone else: every label that reaches the screen goes through ``plain``
   (control characters and escape sequences removed, one line, bounded).
+* **Every file has a text summary** (``kos/summary.py``) and search matches it: the summary is put
+  first in each file's indexed text, so it is also the first thing a file row and the open view show.
 * **Bounded.** At most ``MAX_FILES`` files per place and ``MAX_CHARS`` characters of each are read.
 """
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..summary import summarize
 from .cmdindex import COMMANDS
 from .search import Index, tokens
 
@@ -85,7 +88,10 @@ def gather_files(host) -> list:
                 continue
             v = host.get(k, space or None)
             if isinstance(v, str) and v:
-                out.append((space, k, v[:MAX_CHARS]))
+                # The text summary leads the indexed text, so a file is found by what it *is*
+                # ("png image", "text drawing") even when its body is base64 or box characters.
+                head = summarize(k, v.encode("utf-8", "replace")) + "\n"
+                out.append((space, k, head + v[:MAX_CHARS - len(head)]))
     return out
 
 

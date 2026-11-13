@@ -17,6 +17,8 @@ Everything is a command. Newline-delimited JSON over a socket
 step with the code.
 
 ```
+OS -> app   hello, key, pointer, button, scroll, device, apps, result, quit
+app -> OS   screen, frame, log, request, vault, service, exit
 OS -> app   hello, key, pointer, button, scroll, device, apps, result, answer, quit
 app -> OS   screen, frame, log, request, exit
 ```
@@ -37,11 +39,36 @@ permission, not `system`; the OS answers with an `answer` message of plain-text 
 3. for anything that starts or stops something, the owner types the password
    in the OS's own overlay.
 
+`service` is how an app asks the OS for one of its own functions (the audit log, the
+security check, the firewall, a directory listing ...): `{"cmd":"service","id":N,"name":
+"audit.tail","args":{..}}`, answered by `{"cmd":"service","id":N,"ok":..,"detail":..,"data":{..}}`.
+`kos/servicespec.py` is the whole list and the schema of each; `kos/services.py` is the
+implementations behind one door, `ServiceHost.call`. The manifest permission is
+`service:GROUP`, never available to an extension or a mod. The password is asked inside
+the handler, in the OS's own prompt, before it reads anything.
+
 ## Every app message is hostile
 
 `validate_app_message` size-limits, schema-checks and sanitizes. An unknown
 command, wrong type, out-of-range number, or bad name is a `ProtocolError`.
 Names must match the same regexes the store uses.
+
+## Adding a service (the usual way to give an app a new OS function)
+
+1. Add a `Spec` to `SPECS` in `kos/servicespec.py` with the tightest argument types
+   (`path`, `name`, `num(lo, hi)`, `one_of`, `flag`, `text(max)`); an argument called
+   `name` or `host` is fine, the callers take their own parameters positional-only.
+2. Add the handler in `kos/services.py` with `@service("group.name")`. Its parameters
+   must be exactly the spec's arguments (a test checks). Call `ctx.authority.authorize(
+   ACTION, target)` **before** reading anything private; add the action to `ACTIONS`.
+   Raise `ServiceError` for a refusal the app may show.
+3. Everything you return is scrubbed and size-bounded by the host; still return only
+   what the app needs.
+4. Tests in `tests/test_services.py`: the hostile arguments, the refusal with no
+   permission (and that no password is asked), a wrong password returning no data, and
+   the success. If a screen uses it, a `FakeHost` test in `tests/test_system_apps.py`.
+5. A refusal that can happen before the password (a bad address, a flagged file) must
+   happen before it, and the test asserts the prompter was never asked.
 
 ## Adding a command or request
 

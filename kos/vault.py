@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 
 from .paths import Paths, atomic_write
+from .summary import summarize
 
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MAX_ITEM = 400_000          # characters; keeps one message under the 1 MiB wire limit
@@ -81,10 +82,39 @@ class Vault:
         if total - existing + len(data) > MAX_TOTAL:
             raise VaultError("vault is out of space")
         atomic_write(p, data)
+        self._write_summary(key, value)
+
+    def _summary_path(self, key: str) -> Path:
+        self._path(key)                                   # same key check
+        return self.dir / ".summaries" / f"{key}.txt"
+
+    def _write_summary(self, key: str, value: str) -> None:
+        """Every item has a text summary next to it (see summary.py). It is a
+        dot-folder, so it is not an item: it is not listed and not counted."""
+        sp = self._summary_path(key)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(sp.parent, 0o700)
+        atomic_write(sp, (summarize(key, value.encode("utf-8")) + "\n").encode("utf-8"))
+
+    def summary(self, key: str):
+        """The text summary of an item, or None if there is no such item. An item
+        written before summaries existed gets one the first time it is asked for."""
+        value = self.get(key)
+        if value is None:
+            return None
+        try:
+            return self._summary_path(key).read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            self._write_summary(key, value)
+            return self._summary_path(key).read_text(encoding="utf-8").strip()
 
     def delete(self, key: str) -> bool:
         try:
             self._path(key).unlink()
-            return True
         except FileNotFoundError:
             return False
+        try:
+            self._summary_path(key).unlink()
+        except FileNotFoundError:
+            pass
+        return True

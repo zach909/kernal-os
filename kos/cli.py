@@ -3,7 +3,7 @@
     kos setup                       choose your password (first boot)
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
-    kos pack APPDIR -o FOLDER       an app made of programs: one .kapp per program, each with only its own permissions
+    kos pack APPDIR -o FOLDER       a group of apps: one .kapp per app (NAME.py + NAME.json, or a folder with a manifest), each with only its own permissions
     kos install APP.kapp            install (the zip is stored as-is, sealed); a folder installs every .kapp in it
     kos update APP.kapp             update to a newer version (no downgrades)
     kos view FILE                   view a file (password first)
@@ -47,6 +47,11 @@
     kos backup [list]               what is backed up and how much deduplication saved (password)
     kos backup restore ID DIR       put one item back in DIR; guarded write, never overwrites
     kos backup remove ID            forget one item (its body goes when nothing else uses it)
+    kos backup link APP URL         back up an app as its https address + SHA-256, not its bytes (password)
+    kos backup links                the linked apps and the space saved
+    kos backup fetch APP            download a linked app, verify the hash, scan, install (password)
+    kos backup unlink APP           forget a link
+    kos folders [create]            the standard data folders; create makes them (password)
     kos do WORDS...                 one line of human language, run as one command
     kos line [--explain]            the line shell: every line you type is a command
 """
@@ -138,20 +143,20 @@ def cmd_passwd(args, paths: Paths) -> int:
 
 def cmd_pack(args, paths: Paths) -> int:
     src = Path(args.dir)
-    if (src / MANIFEST).is_file() and not has_program_below(src):
+    if (src / MANIFEST).is_file() and not has_program_below(src, pairs=False):
         m = pack(src, Path(args.output))
         print(f"packed {m.name} {m.version} -> {args.output}")
         return 0
-    # An app made of programs (a folder with no manifest, or a program with sub-programs):
-    # one .kapp per program in the folder OUTPUT, each with only its own permissions.
+    # A group of apps (a folder with no manifest): one .kapp per app in the folder OUTPUT, each with
+    # only its own permissions. A folder app with an app inside it is refused by pack_tree.
     out = Path(args.output)
     if out.suffix == ".kapp":
-        raise KAppError(f"{src} is made of programs: give -o a folder, one .kapp is written per program")
+        raise KAppError(f"{src} is a group of apps: give -o a folder, one .kapp is written per app")
     for m in pack_tree(src, out):
         perms = ", ".join(m.permissions) or "none"
         print(f"packed {m.name} {m.version} -> {out / (m.name + '.kapp')}   permissions: {perms}")
     if not (src / MANIFEST).is_file():
-        print(f"{src.name} itself is not a program and has no permissions; install and permit each program")
+        print(f"{src.name} is a group, not an app, and has no permissions; install and permit each app")
     return 0
 
 
@@ -187,21 +192,6 @@ def cmd_update(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_view(args, paths: Paths) -> int:
-    """Show a file. Viewing files is an action like any other: password first."""
-    from .protocol import clean_text
-    path = os.path.realpath(args.file)
-    authority, _ = _authority(paths)
-    authority.authorize("file.view", path).close()
-    with open(path, "rb") as f:
-        data = f.read(4 << 20)
-    text = data.decode("utf-8", errors="replace")
-    # strip terminal escapes so a file can't take over your terminal
-    for line in text.splitlines():
-        print(clean_text(line.replace("\t", "    "), 10_000))
-    return 0
-
-
 def cmd_remove(args, paths: Paths) -> int:
     authority, _ = _authority(paths)
     AppStore(paths).remove(args.name, authority)
@@ -220,7 +210,7 @@ def cmd_list(args, paths: Paths) -> int:
         row = kinds.get(a.name, {})
         tag = f"  [{row['kind']} of {row['extends']}]" if row.get("kind", "app") != "app" else ""
         if "." in a.name:       # a program: show what IT may do, which is all that matters
-            tag += f"  [program of {a.name.rpartition('.')[0]}; permissions: {', '.join(row.get('permissions', [])) or 'none'}]"
+            tag += f"  [in group {a.name.rpartition('.')[0]}; permissions: {', '.join(row.get('permissions', [])) or 'none'}]"
         print(f"{a.name:20} {a.version:10} sha256:{a.sha256[:16]}{tag}")
     return 0
 
@@ -290,10 +280,13 @@ def cmd_run(args, paths: Paths) -> int:
         bridge = bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
+                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            services=_services_for(paths, name, app.manifest.permissions))
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
+        if policy.on_exit is not None:
+            policy.on_exit()
     print(f"{name} exited ({code})")
     return code
 
@@ -355,7 +348,8 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
-                        extensions=_extensions_for(paths, inst.name), **session_kwargs)
+                        extensions=_extensions_for(paths, inst.name),
+                        services=_services_for(paths, inst.name, perms), **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:
@@ -426,10 +420,12 @@ def cmd_boot(args, paths: Paths) -> int:
 
 
 def cmd_desktop(args, paths: Paths) -> int:
-    """`kos desktop install`: pack, scan, install and permit the two apps the
-    desktop is made of. Same gates as any other app: each install is scanned
-    first and asks for the password; permitting asks once more."""
+    """`kos desktop install`: pack, scan, install and permit the apps the desktop is made of - the taskbar,
+    the App Library - and the OS's own apps (kos/sysapps.py: audit log, firewall, files, ...). The two desktop
+    apps are installed like any other (scanned, then a password each); the OS's own apps are installed together
+    under one password, every one of them scanned first. Permitting asks once more."""
     import tempfile
+    from . import sysapps
     from .desktop import SYSTEM_APPS
     from .permit import PermitStore
 
@@ -445,12 +441,18 @@ def cmd_desktop(args, paths: Paths) -> int:
             pack(src / name, kapp)
             m = store.install(kapp, authority)
             print(f"installed {m.name} {m.version}")
+        todo = [e for e in sysapps.entries() if e.name not in have]
+        if todo:
+            files = [sysapps.build_one(e, Path(tmp)) for e in todo]
+            ms = store.install_bundle(files, authority, f"{len(files)} apps")
+            print(f"installed {len(ms)} of the OS's own apps: {', '.join(m.name for m in ms)}")
     permits = PermitStore(paths)
-    need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
+    names = [*SYSTEM_APPS, *(e.name for e in sysapps.entries())]
+    need = [n for n in names if not permits.is_permitted(n)]
     if need:
-        with authority.authorize("app.permit", " ".join(need)):
+        with authority.authorize("app.permit", f"{len(need)} apps"):
             for n in need:
-                permits.grant(n)
+                permits.grant(n, KApp.from_file(paths.apps / f"{n}.kapp").manifest.permissions)
         print(f"permitted: {', '.join(need)}")
     print("desktop ready: kos boot desktop   (or just say: desktop)")
     return 0
@@ -582,6 +584,14 @@ def _extensions_for(paths: Paths, name: str) -> dict:
     return Extensions(paths).payload(name)
 
 
+def _services_for(paths: Paths, name: str, permissions):
+    """The ServiceHost for an app whose manifest asked for 'service:GROUP' permissions, else None."""
+    from .kapp import SERVICE_PERM_RE
+    from .services import ServiceHost
+    groups = {m.group(1) for m in (SERVICE_PERM_RE.match(str(p)) for p in permissions) if m}
+    return ServiceHost(paths, name, frozenset(groups)) if groups else None
+
+
 def _vault_for(paths: Paths, name: str, permissions):
     from .spaces import AppStorage
     st = AppStorage(paths, name, permissions)
@@ -673,14 +683,14 @@ def cmd_overlay(args, paths: Paths) -> int:
     except OverlayError as e:
         raise KAppError(str(e)) from None
 def _refuse_group(paths: Paths, name: str) -> None:
-    """An app made of programs has no permissions, so there is nothing to permit on it: say which
-    programs it is made of instead of failing with "no such file"."""
+    """A group of apps has no permissions, so there is nothing to permit on it: say which apps it
+    holds instead of failing with "no such file"."""
     if (paths.apps / f"{name}.kapp").exists():
         return
     parts = sorted(a.name for a in AppStore(paths).installed() if a.name.startswith(name + "."))
     if parts:
-        raise KAppError(f"{name} is an app made of programs and has no permission of its own. "
-                        f"Permit a program: {', '.join(parts)}")
+        raise KAppError(f"{name} is a group of apps and has no permission of its own. "
+                        f"Permit an app: {', '.join(parts)}")
 
 
 def cmd_permit(args, paths: Paths) -> int:
@@ -708,55 +718,12 @@ def cmd_permit(args, paths: Paths) -> int:
             PermitStore(paths).revoke(args.name)
             print(f"revoked: {args.name} may no longer run")
         else:
-            declared = KApp.from_file(paths.apps / f"{args.name}.kapp").manifest.permissions
-            PermitStore(paths).grant(args.name, declared)
+            app = KApp.from_file(paths.apps / f"{args.name}.kapp")
+            declared = app.manifest.permissions
+            PermitStore(paths).grant(args.name, declared, pin=app.sha256)
             print(f"permitted: {args.name} may now run (still asks for your password every time)")
             if declared:
                 print(f"  approved permissions: {', '.join(declared)}  (an update asking for more is refused until you permit again)")
-    return 0
-
-
-def cmd_grant(args, paths: Paths) -> int:
-    """`kos grant APP space:NAME [--level read|write]` lets an app that *uses* a shared folder in.
-    Everyone holding a grant of at least the level asked for may do it - that is the whole rule."""
-    from .permissions import LEVELS, Permissions
-    if args.list or not args.app:
-        entries = Permissions(paths).list("space:")
-        if not entries:
-            print("no shared-folder access granted yet")
-        for e in sorted(entries, key=lambda e: (e["resource"], e["app"])):
-            print(f"{e['resource']:24} {e['app']:24} {e['level']}")
-        return 0
-    if not args.resource or not args.resource.startswith("space:"):
-        raise KAppError("usage: kos grant APP space:NAME [--level read|write]   |   kos grant --list")
-    if args.level not in ("read", "write"):
-        raise KAppError("--level must be read or write (only the app that creates a space owns it)")
-    authority, _ = _authority(paths)
-    with authority.authorize("space.revoke" if args.revoke else "space.grant", f"{args.app}:{args.resource}"):
-        if args.revoke:
-            n = Permissions(paths).revoke(args.app, args.resource)
-            print(f"revoked {args.app} from {args.resource}" if n else "nothing to revoke")
-        else:
-            if Permissions(paths).get(args.app, args.resource) and \
-                    Permissions(paths).get(args.app, args.resource)["level"] == "own":
-                raise KAppError(f"{args.app} owns {args.resource}")
-            Permissions(paths).grant(args.app, args.resource, args.level)
-            print(f"{args.app} may now {args.level} {args.resource}")
-    return 0
-
-
-def cmd_spaces(args, paths: Paths) -> int:
-    """Shared folders: who created each one and who else is let in."""
-    from .permissions import Permissions
-    entries = Permissions(paths).list("space:")
-    names = sorted({e["resource"] for e in entries})
-    if not names:
-        print("no shared folders yet (an app with 'owns:NAME' creates one the first time it uses it)")
-    for r in names:
-        owner = next((e["app"] for e in entries if e["resource"] == r and e["level"] == "own"), "(none)")
-        others = ", ".join(f"{e['app']}({e['level']})" for e in entries if e["resource"] == r and e["level"] != "own") or "nobody else"
-        n = len(list((paths.state / "spaces" / r[6:]).glob("*"))) if (paths.state / "spaces" / r[6:]).is_dir() else 0
-        print(f"{r[6:]:20} owner {owner:20} items {n:<4} access: {others}")
     return 0
 
 
@@ -814,44 +781,30 @@ def cmd_ai(args, paths: Paths) -> int:
 
 
 def cmd_scan(args, paths: Paths) -> int:
-    """`kos scan file PATH` checks one file or zip right now, no password
-    needed (it's read-only, like `kos list`). `kos scan watch DIR...` is
-    different: starting it needs the password, the same as starting a
-    kernel cell, because from that point on it keeps running and acting -
-    scanning every file written under those directories - until you stop
-    it."""
-    from .scan import scan_file
+    """`kos scan watch DIR...` scans every file written under those directories until you stop it. Starting it
+    needs the password, the same as starting a kernel cell, because from that point on it keeps running and
+    acting. `kos scan file` is the Scanner app now (see launchmap.py)."""
+    if args.scan_cmd == "file":
+        return _launcher("scan")(args, paths)
+    from .watch import ScanHit, run_watch
+    for d in args.dirs:
+        if not os.path.isdir(d):
+            raise KAppError(f"not a directory: {d}")
+    authority, prompter = _authority(paths)
+    authority.authorize("scan.watch", ", ".join(args.dirs)).close()
+    prompter.close()
+    print(f"watching {', '.join(args.dirs)} - every file written here is scanned. Ctrl-C to stop.")
 
-    if args.scan_cmd == "watch":
-        from .watch import ScanHit, run_watch
-        for d in args.dirs:
-            if not os.path.isdir(d):
-                raise KAppError(f"not a directory: {d}")
-        authority, prompter = _authority(paths)
-        authority.authorize("scan.watch", ", ".join(args.dirs)).close()
-        prompter.close()
-        print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
-              "Ctrl-C to stop.")
+    def on_hit(hit: "ScanHit") -> None:
+        print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
 
-        def on_hit(hit: "ScanHit") -> None:
-            print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
+    def on_scan(path: str) -> None:
+        print(f"scanned: {path}")
 
-        def on_scan(path: str) -> None:
-            print(f"scanned: {path}")
-
-        try:
-            run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
-        except KeyboardInterrupt:
-            print("\nstopped")
-        return 0
-
-    result = scan_file(Path(args.path))
-    print(f"{args.path}: {result.summary()}")
-    for f in result.findings:
-        print(f"  [{f.severity}] {f.rule} in {f.path}: {f.note}")
-    return 0 if result.clean else 3
-
-
+    try:
+        run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
+    except KeyboardInterrupt:
+        print("\nstopped")
 def cmd_optimize(args, paths: Paths) -> int:
     from .optimize import optimize
     authority, _ = _authority(paths)
@@ -1097,6 +1050,7 @@ def cmd_backup(args, paths: Paths) -> int:
     """Deduplicated backups. Every action asks for the password; a restore is a
     guarded write (admin keyboard, scan, optimize) and asks again for that."""
     from . import backup
+    from .summary import SummaryStore
     authority, prompter = _authority(paths)
     action = args.bkact or "list"
     if action == "add":
@@ -1113,6 +1067,9 @@ def cmd_backup(args, paths: Paths) -> int:
         items, stats = backup.snapshot(paths, authority)
         for it in items:
             print(f"  {it.id}  {it.size:>10,}  {it.sha256[:12]}  {it.path}")
+            note = SummaryStore(paths).get(it.sha256)
+            if note:
+                print(f"      {note}")
         print(stats.summary())
         return 0
     if action == "remove":
@@ -1134,7 +1091,67 @@ def cmd_backup(args, paths: Paths) -> int:
                 devices.close()
         print(f"restored {item.id} -> {report.summary()}")
         return 0
+    if action in ("link", "links", "unlink", "fetch"):
+        return _cmd_applinks(args, paths, authority, action)
     raise KAppError(f"unknown backup action {action!r}")
+
+
+def _cmd_applinks(args, paths: Paths, authority, action: str) -> int:
+    """Apps backed up as an address and a hash. Fetching only downloads and verifies; the install
+    that follows scans the app and asks for the password again."""
+    import tempfile
+    from . import applinks
+    if action == "link":
+        link = applinks.add(paths, authority, args.app, args.url)
+        print(f"linked {link.name} {link.version} -> {link.url}")
+        print(f"  pinned sha256 {link.sha256[:16]}...; {link.size:,} bytes are not stored")
+        return 0
+    if action == "links":
+        links = applinks.snapshot(paths, authority)
+        for l in links:
+            print(f"  {l.name:20} {l.version:10} {l.sha256[:12]}  {l.size:>12,}  {l.url}")
+        print(applinks.stats(links))
+        return 0
+    if action == "unlink":
+        link = applinks.remove(paths, authority, args.app)
+        print(f"forgot the link for {link.name} (the installed app is untouched)")
+        return 0
+    link, data = applinks.fetch(paths, authority, args.app)
+    print(f"downloaded {link.name} {link.version} from {link.host}: sha256 matches")
+    paths.ensure()
+    with tempfile.TemporaryDirectory(dir=paths.state) as tmp:
+        src = Path(tmp) / f"{link.name}.kapp"
+        src.write_bytes(data)
+        store = AppStore(paths)
+        if any(a.name == link.name for a in store.installed()):
+            raise KAppError(f"{link.name} is already installed; remove it first (kos remove {link.name})")
+        m = store.install(src, authority)
+    print(f"installed {m.name} {m.version} - kept zipped, sealed")
+    return 0
+
+
+def cmd_folders(args, paths: Paths) -> int:
+    """The standard data folders: one permissioned shared folder per kind of data."""
+    from . import folders
+    if args.folders_cmd == "create":
+        authority, _ = _authority(paths)
+        created, kept = folders.create(paths, authority)
+        print(f"created {len(created)} folder(s); {len(kept)} already there")
+        for n in created:
+            print(f"  + {n}")
+        return 0
+    state = {s.folder.name: s for s in folders.status(paths)}
+    for key, title in folders.GROUPS.items():
+        print(f"{title}:")
+        for f in (f for f in folders.FOLDERS if f.group == key):
+            s = state[f.name]
+            who = ", ".join(f"{a}({lv})" for a, lv in s.access) or "nobody"
+            mark = "sensitive" if f.sensitive else ""
+            print(f"  {f.name:18} {'made' if s.exists else 'not made':9} owner {s.owner or '-':8} "
+                  f"items {s.items:<4} access: {who:24} {mark}")
+    if not any(s.exists for s in state.values()):
+        print("none made yet: kos folders create")
+    return 0
 def cmd_convert(args, paths: Paths) -> int:
     """Convert a Debian .deb into a .kapp. The package is analysed and scanned
     first (a bad or unconvertible one is refused before any password prompt);
@@ -1166,9 +1183,10 @@ def cmd_skills(args, paths: Paths) -> int:
     --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
     from .skillmaker import collect_apps, command_inventory, make_skills
     authority, prompter = _authority(paths)
-    manifests, skipped = collect_apps(paths, authority)
+    helps: dict = {}
+    manifests, skipped = collect_apps(paths, authority, helps)
     prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
     for line in skipped + refused:
         print(line, file=sys.stderr)
     if not args.out:
@@ -1296,7 +1314,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
     s = sub.add_parser("passwd", help="change your password")
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
-    s = sub.add_parser("pack", help="build a .kapp from a directory; an app made of programs: -o FOLDER gets one .kapp per program")
+    s = sub.add_parser("pack", help="build a .kapp from a directory; a group of apps: -o FOLDER gets one .kapp per app")
     s.add_argument("dir")
     s.add_argument("-o", "--output", required=True)
     s = sub.add_parser("install", help="install a .kapp, or every .kapp in a folder (each asks for the password)")
@@ -1411,6 +1429,16 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("dest")
     b = bs.add_parser("remove", help="forget one item")
     b.add_argument("id")
+    b = bs.add_parser("link", help="back up an installed app as its https address + SHA-256 (not its bytes)")
+    b.add_argument("app")
+    b.add_argument("url")
+    bs.add_parser("links", help="the linked apps and the space saved")
+    b = bs.add_parser("unlink", help="forget an app link")
+    b.add_argument("app")
+    b = bs.add_parser("fetch", help="download a linked app, verify its hash, scan and install it")
+    b.add_argument("app")
+    s = sub.add_parser("folders", help="the standard data folders (create makes them; password)")
+    s.add_argument("folders_cmd", nargs="?", choices=["list", "create"], default="list")
     s = sub.add_parser("convert", help="convert a Debian .deb package into a .kapp (static programs only)")
     s.add_argument("file", help="the .deb to convert")
     s.add_argument("-o", "--output", required=True, help="the .kapp to create (must not exist)")
@@ -1462,6 +1490,83 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def cmd_skills(args, paths: Paths) -> int:
+    """`kos skills` is the Skill Maker app (a preview). `kos skills --out DIR` stays here: each SKILL.md is a
+    guarded write (administrator keyboard, scan, optimize), and the exclusive keyboard is not something an app
+    session can hold. One password (``skill.make``) verifies every app's seal."""
+    if not args.out:
+        return _launcher("skills")(args, paths)
+    from .skillmaker import collect_apps, command_inventory, make_skills
+    authority, prompter = _authority(paths)
+    manifests, skipped = collect_apps(paths, authority)
+    prompter.close()
+    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    for line in skipped + refused:
+        print(line, file=sys.stderr)
+    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
+    out = Path(os.path.abspath(args.out))
+    if not out.is_dir() or out.is_symlink():
+        raise KAppError(f"{out} must be an existing directory (not a symlink)")
+    kb = AdminKeyboard(paths)
+    lease = kb.require_booted()          # refuse before any password prompt
+    devices = open_admin_devices(lease)
+    try:
+        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
+        wauth = Authority(paths, wprompter)
+        for rel, text in files.items():
+            target = out / rel
+            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
+            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
+    finally:
+        if devices is not None:
+            devices.close()
+    return 0
+
+
+def _launcher(command: str):
+    """The command line's whole job for a command that is an app now: run that app (kos/launchmap.py).
+    The app is installed with `kos desktop install`; until it is, say so instead of doing the work here."""
+    from .launchmap import app_for
+
+    def go(args, paths: Paths) -> int:
+        name = app_for(command)
+        if not (paths.apps / f"{name}.kapp").exists():
+            eprint(f"'{command}' is the app '{name}' now, and it is not installed. "
+                   "Install the OS's own apps with: kos desktop install")
+            return 66
+        extra = [v for k, v in sorted(vars(args).items()) if k != "cmd" and v not in (None, False, [], "")]
+        if extra:
+            print(f"(opening the app '{name}'; it does not take command-line arguments - "
+                  f"type them there: {' '.join(map(str, extra))[:80]})")
+        return cmd_run(argparse.Namespace(target=[name], cell=None), paths)
+    go.__name__ = f"cmd_{command}"
+    return go
+
+
+COMMANDS = {
+    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
+    "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
+    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot,
+    "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
+    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
+    # the commands that are apps now: the command line only opens the app
+    "skills": cmd_skills,
+    **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
+                                  "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
+
+COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
+            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
+            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
+            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
+            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
+            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
+            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
+            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
+            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
+            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
+            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
+            "ai": cmd_ai}
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
@@ -1470,6 +1575,8 @@ COMMANDS = {
     "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
     "doctor": cmd_doctor, "firmware": cmd_firmware, "hardware": cmd_hardware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
+    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
     "runtimes": cmd_runtimes}

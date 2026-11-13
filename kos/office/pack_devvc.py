@@ -378,7 +378,7 @@ class VC(Menu):
         self.host, self.st, self.note = host, Store(host), ""
         self.repo = Repo(self.st.load("repo"))
         super().__init__("Version Control", [
-            ("Files (add, edit, delete)", self.files), ("Status", self.status), ("Commit", self.commit), ("Log", self.log),
+            ("Files (add, edit, delete)", self.files), ("Status", self.show_status), ("Commit", self.commit), ("Log", self.log),
             ("Diff against last commit", lambda: _tv("Diff", self.repo.diff_work() or ["no changes"])),
             ("Branches and tags", self.refs),
             ("Checkout a branch, tag or commit", lambda: self.ask("Checkout", "Branch, tag or commit id:", lambda r: self.do(self.repo.checkout, r))),
@@ -436,7 +436,7 @@ class VC(Menu):
             if ns: self.do(r.del_file, ns[i])
         return ("push", Lister("Files", rows, {"enter": edit, "a": new, "d": rm}, "Enter edit  a add  d delete from working copy (restore brings it back)", "(no files: press a)"))
 
-    def status(self):
+    def show_status(self):      # not "status": a Menu's status() is the footer line the runner draws
         s = self.repo.status()
         lines = [f"on {self.repo.head or 'detached'}"] + [f"{k}: {', '.join(s[k])}" for k in ("added", "modified", "deleted", "conflicts") if s[k]]
         return _tv("Status", lines if len(lines) > 1 else lines + ["clean"])
