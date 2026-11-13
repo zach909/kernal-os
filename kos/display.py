@@ -20,6 +20,8 @@ import fcntl
 import mmap
 import os
 import struct
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -95,17 +97,41 @@ class Framebuffer:
                     if bits & (0x10 >> col):
                         self.rect(gx + col * scale, y + row * scale, scale, scale, color)
 
+    def apply_op(self, op: list) -> None:
+        kind = op[0]
+        if kind == "clear":
+            self.clear(parse_color(op[1]))
+        elif kind == "rect":
+            self.rect(op[1], op[2], op[3], op[4], parse_color(op[5]))
+        elif kind == "line":
+            self.line(op[1], op[2], op[3], op[4], parse_color(op[5]))
+        elif kind == "text":
+            self.text(op[1], op[2], op[3], parse_color(op[4]), op[5])
+
     def apply(self, ops: list[list]) -> None:
         for op in ops:
-            kind = op[0]
-            if kind == "clear":
-                self.clear(parse_color(op[1]))
-            elif kind == "rect":
-                self.rect(op[1], op[2], op[3], op[4], parse_color(op[5]))
-            elif kind == "line":
-                self.line(op[1], op[2], op[3], op[4], parse_color(op[5]))
-            elif kind == "text":
-                self.text(op[1], op[2], op[3], parse_color(op[4]), op[5])
+            self.apply_op(op)
+
+    def op_area(self, op: list) -> int:
+        """How many screen pixels an op's bounding box covers once clipped to the screen.
+        This is the op's "size": it decides whether a change is big or small."""
+        kind = op[0]
+        if kind == "clear":
+            return self.width * self.height
+        if kind == "rect":
+            x, y, w, h = op[1:5]
+        elif kind == "line":
+            x, y = min(op[1], op[3]), min(op[2], op[4])
+            w, h = abs(op[1] - op[3]) + 1, abs(op[2] - op[4]) + 1
+        elif kind == "text":
+            scale = op[5]
+            x, y = op[1], op[2]
+            w, h = len(op[3]) * font.ADVANCE * scale, font.LINE_HEIGHT * scale
+        else:
+            return 0
+        w = min(self.width, x + w) - max(0, x)
+        h = min(self.height, y + h) - max(0, y)
+        return w * h if w > 0 and h > 0 else 0
 
 
 _CURSOR = [
@@ -286,8 +312,24 @@ class FbdevBackend:
 class GraphicalSurface:
     """What the session draws into in graphical mode."""
 
-    def __init__(self, backend, status_in_frame: bool = False):
+    # Frames are kept, not replaced. Each one is queued in the order it arrived and drawn
+    # onto the scene that is already on screen, so the picture is "the last frame, changed".
+    # Drawing is slow (pure Python), so each render() has a time budget. When the budget
+    # runs out, the rest of the queue is still applied, but only its big changes: an op
+    # whose clipped bounding box covers at least 1/BIG_FRACTION of the screen (a clear
+    # always does). Small ops past the deadline are dropped, not retried; the next full
+    # redraw from the app repairs whatever they would have changed.
+    FRAME_BUDGET = 0.03        # seconds of drawing per render() before small ops are dropped
+    BIG_FRACTION = 16          # "big" = covers >= 1/16 of the screen
+    MAX_QUEUED_FRAMES = 64     # memory bound: past this, queued frames are applied at once
+
+    def __init__(self, backend, status_in_frame: bool = False, *,
+                 budget: Optional[float] = None, clock=time.monotonic):
         self.backend = backend
+        self.budget = self.FRAME_BUDGET if budget is None else budget
+        self.clock = clock
+        self.queue: deque[list[list]] = deque()
+        self.dropped_ops = 0   # small changes ditched for lack of time (for tests / the audit view)
         self.scale = max(1, backend.width // 640)
         self.width, self.height = backend.width, backend.height
         self.scene = Framebuffer(self.width, self.height)
@@ -302,10 +344,22 @@ class GraphicalSurface:
         return self.width, self.height
 
     def present(self, msg: dict) -> None:
-        fb = Framebuffer(self.width, self.height)
-        fb.apply(msg["ops"])
-        self.scene = fb
+        """Queue a validated frame. Nothing is drawn here and no frame is thrown away."""
+        self.queue.append(msg["ops"])
         self.has_content = True
+        if len(self.queue) > self.MAX_QUEUED_FRAMES:
+            self._drain(0.0)   # out of room: keep every frame's big changes, ditch the small
+
+    def _drain(self, budget: float) -> None:
+        deadline = self.clock() + budget
+        big = max(1, self.width * self.height // self.BIG_FRACTION)
+        scene = self.scene
+        while self.queue:
+            for op in self.queue.popleft():
+                if self.clock() > deadline and scene.op_area(op) < big:
+                    self.dropped_ops += 1
+                    continue
+                scene.apply_op(op)
 
     def set_pointer(self, x: int, y: int) -> None:
         self.pointer = (max(0, min(self.width - 1, x)), max(0, min(self.height - 1, y)))
@@ -318,6 +372,7 @@ class GraphicalSurface:
         self.backend.set_status(text)
 
     def render(self) -> None:
+        self._drain(self.budget)   # app pixels first; the pointer and overlay are drawn after
         out = self.scene.copy()
         if self.status_in_frame and self.status:
             h = font.LINE_HEIGHT * self.scale + 2

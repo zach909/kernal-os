@@ -171,7 +171,7 @@ class TestTreeLayout(Env):
     def test_each_program_zip_holds_only_its_own_folder(self):
         pack_tree(BACKUP_TREE, self.dist)
         for ident in ("backup.list", "backup.add", "backup.remove"):
-            self.assertEqual(KApp.from_file(self.dist / f"{ident}.kapp").names(), ["app.py", "manifest.json"])
+            self.assertEqual(KApp.from_file(self.dist / f"{ident}.kapp").names(), ["app.py", "manifest.json", "proof.json"])
 
     def test_packing_is_reproducible(self):
         pack_tree(BACKUP_TREE, self.dist)
@@ -193,6 +193,11 @@ class TestTreeLayout(Env):
                          ["app.py", "assets/icon.txt", "manifest.json"])
         # nothing is inherited: each app has its own permissions only
         self.assertEqual(ms["mail.attach.inline"].permissions, ("storage",))
+                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
+        self.assertEqual(KApp.from_file(self.dist / "mail.compose.attach.kapp").names(), ["app.py", "manifest.json", "proof.json"])
+        # nothing is inherited: the child has the child's permissions only
+        self.assertEqual(ms["mail.compose.attach"].permissions, ("storage",))
+        self.assertEqual(ms["mail.compose.attach.inline"].permissions, ())
         self.assertEqual(ms["mail.compose"].permissions, ("network",))
         self.assertEqual(ms["mail.read"].permissions, ())
 
