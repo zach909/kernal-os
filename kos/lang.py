@@ -419,6 +419,11 @@ _STRONG_CODE: list[tuple[str, re.Pattern]] = [(name, re.compile(p, re.I if ci el
 ]]
 
 
+# ``@ruby puts 1+1``: say which language the rest of the line is in. Human commands never start
+# with "@", so this cannot be confused with one; the name is checked again by ``kos exec``.
+_TAGGED_CODE = re.compile(r"^@([a-z][a-z0-9+-]{0,15})\s+(\S.*)$", re.I | re.S)
+
+
 def detect_code(line: str) -> str | None:
     """Name the programming language a line looks like, or None for human text."""
     for name, pat in _STRONG_CODE:
@@ -543,6 +548,11 @@ def interpret(line: str) -> Line:
         return Line("empty")
     if _ADDRESS_LINE.match(text):
         return Line("command", argv=("open", text), verb="open", language="en", word="(address)")
+    tagged = _TAGGED_CODE.match(text)
+    if tagged:
+        lang = tagged.group(1).lower()
+        return Line("code", argv=("exec", f"--lang={lang}", f"--code={tagged.group(2)}"),
+                    verb="exec", language=lang)
     lang = detect_code(text)
     if lang:
         return Line("code", argv=("exec", f"--lang={lang}", f"--code={text}"),
@@ -625,6 +635,7 @@ Every line you type is a command. Say what you want, in your own language:
 
 Code is a command too: a line of code is run as a sandboxed one-shot app
 (scanned, password, time limit, no files, no network) - never on the host.
+  @ruby puts 1+1       say which language a line is in (see: kos runtimes)
 """
 
 

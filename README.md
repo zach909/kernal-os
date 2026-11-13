@@ -13,7 +13,7 @@ sandboxed apps, malware scanner, multilingual command shell, Python OS.
 
 ## Rules
 
-These four rules govern every change to KOS. A change that breaks one is wrong.
+These rules govern every change to KOS. A change that breaks one is wrong.
 
 1. **Everything needs verification.**
    - In the OS: every action goes through `Authority.authorize(action, target)`
@@ -24,6 +24,15 @@ These four rules govern every change to KOS. A change that breaks one is wrong.
      replaces it.
    - In the work: nothing is called done until it has been run and checked.
      Tests pass, or the failure is reported as it is.
+   - **Nothing runs unproven.** Every app carries `proof.json`. At install and at
+     every launch the OS recomputes the proof from the app's own bytes (`kos/proof.py`);
+     no proof, a proof that does not match, code that breaks a rule, code that does not
+     compile, or a compiled binary (which cannot be checked) means the app does not
+     install and does not run. System apps are apps, so the rule covers them too.
+   - **No decimals.** Apps use whole numbers only: no float/complex literals or types,
+     no `/` (use `//`), no `Decimal`/`Fraction`, no float-returning `math`, clock or
+     random calls. The command protocol refuses any number with a point or exponent,
+     and NaN/Infinity.
 2. **Everything is an app.** Features ship as sandboxed `.kapp`s that talk to
    the OS only through the command protocol (`request` for system functions,
    with the `system` permission and a permit). The OS core stays small: auth,
@@ -67,6 +76,7 @@ Honest list, so nobody assumes these are covered:
 
 | Rule | Gap |
 |---|---|
+| Proof gate / no decimals | The "proof" is a **static check against a fixed rule set plus a successful compile, bound to the exact bytes**. It is not a formal proof that an app is secure or correct, and the sandbox is still what contains it. It cannot see: a float made by a standard-library call it does not list (`x ** -1`, `json.loads`, `os.stat` times), code reached by string tricks the banned names do not cover, or what an app imports from the `kos` package (OS code, not in the app's zip, not covered by its proof). Compiled binaries are refused outright, so `kos convert` output (a `.deb` binary) can no longer be installed, and an app installed before this change has no `proof.json` and must be re-packed. The OS's own code is **not** decimal-free: 1,111 uses remain in 64 files (clocks, throttle delays, the office packs). `tests/test_proof.py` holds that to a ratchet (`tests/nodecimal_baseline.json`): it may fall, never rise. OS-side modules are not proof-checked at all; they are what the proof gate is built from. |
 | Verification | `list`, `ps`, `activity`, `audit`, `owed` and `cell list` now need the password (`state.view`, refused before anything prints). Still run with no password: `scan file`, `ls`, `pack`, `doctor`, `security`, `firmware`. `attach` asks for no new password. Some of these show private state (`audit`, `activity`). `doctor`, `setup` and `scan file` have a reason to be open (they run before a password exists, or are read-only). The rest do not. |
 | Connections blocked | The AI is the first connection the OS makes on an app's behalf and it follows the rule: no endpoint configured means refused and logged (`net.ai` `blocked`), one endpoint only, password per ask, no redirects. Two honest limits: a model on this computer is reached over plain `http://` to a literal loopback address (the bytes never leave the machine, but it is not encrypted, and the rule as written says no plain text); and the API key sits in `<state>/ai.json` (mode 0600, refused if wider) with no cipher beyond the LUKS2 disk, because the standard library has none. The `ask` call blocks the session for up to 30 s. There is still no firewall for anything else. An app's empty network namespace blocks it by default, but the `network` permission is one yes/no at launch that gives the app every host, every port and the ability to listen. Only apps are covered: nothing yet blocks or logs connections made by the OS itself or from outside the sandbox. Privileges are decided at launch, not when first used. Encryption and certificate checks are enforced only inside the `web` example (`check_url`, `fetch`); any other app with the `network` permission can still open plain sockets until connections go through the OS. |
 | Pipeline encrypted | Nothing is encrypted. The command channel is plain JSON lines over a socket (`Channel` in `kos/protocol.py`). The real exposure is the broker socket (`kos open`/`attach`: any process running as you can connect) and cell vsock. Encrypting needs a vetted library; the standard library has no authenticated encryption and KOS has no third-party dependencies yet. |
@@ -75,7 +85,9 @@ Honest list, so nobody assumes these are covered:
 | Modding layers | `kos/overlay.py` merges mod files over a base in an owner-chosen load order (see `docs/MODDING.md`). Nothing reads files through it yet, the CLI's base is empty because KOS has no core file set, and the writable `user` layer is memory only. Most of the wider "modding-centric OS" list (Wasm sandbox, hot-swap with state serialization, watchdog rollback, input hooks, driver processes) is **not built**; that doc says which items and why. |
 | Programs | `ask:ACTION` permissions only cover the four `request` actions that touch the backup vault and the app list (`apps`, `backup`, `backup_add`, `backup_remove`). `open`, `close` and `focus` stay inside `system`, which is still all-or-nothing (and all of them at once): a program that opens other apps holds the whole `system` permission. `network` is still one yes/no per program. Programs of one app get separate data folders and share only through `owns:`/`uses:` spaces, but nothing stops you permitting every program of an app, which gives that set of programs the union of their powers. The old single-app `examples/backup` (one program, `system`) still ships and is still the one the older tests cover. `kos install FOLDER` asks the password once per program. Only ordinary apps can be programs, not extensions or mods yet. Not tested: a graphical-mode run of the split backup programs (they have a text page only). |
 | Org blueprint | `docs/ORG_BLUEPRINT.md` maps the "organization-centric OS" blueprint to KOS. Only the parts that fit inside one sandboxed app exist: Semantic Graph and Rule Router (`kos/office/pack_org.py`). The semantic object kernel, graph file system, matrix workspaces, state snapshots, data bus, structured pipes, component apps and the kernel event router are **not built** (they need the kernel, a window manager or cross-app access). Both apps keep data in clear, bounded, and their hash chains are not signatures. |
+| Pictures | `kos/vectorize.py` turns pixels into `rect`/`line` ops, it is not an image codec. Small, flat pictures (icons, pixel art, diagrams) are exact; a photo is posterised and blocky because it must fit 5000 ops, and the cap on input is 512x512 pixels. No antialiasing or alpha, and no file decoding (PNG/JPEG): the app hands it rows of colours. Tested through the real `Framebuffer` and the protocol validator, never on `/dev/fb0` or the terminal backend, and no existing app uses it yet (the image editor still exports files only). |
 | Search box | The Ctrl-N box and the App Library's `/` search (`kos/office/finder.py`) only *show*: a command hit is the line to type, never a run, and an app hit is a `request` the OS still asks your password for. File search covers only what the app can already read (its own vault plus the shared folders it was granted), at most 200 items and 20,000 characters each per place, and never keys that look like credentials (`llm`, `api_key`, `token`, `password`, ...), the agent's chat history or exports. That filter is a **name pattern, not a classifier**: a secret stored under an ordinary key name (say `note-7`) would be searchable by that same app. The App Library has no files of its own, so it searches apps and commands only, and its "Ask the assistant" row opens the `ai-assistant` app but cannot hand it your question. The command list is a generated table (`python3 -m kos.office.cmdindex --write`); a test fails if it drifts from `kos help`. Not tested: the graphical-mode drawing of the Ctrl-N box. |
+| Graphics frames | `kos/display.py`: graphical frames are queued and drawn in order onto the scene already on screen (the last frame, changed), not swapped in whole. Each render has a 30 ms drawing budget; once it runs out, only *big* ops (clipped bounding box of at least 1/16 of the screen, a `clear` always) are applied and small ones are dropped for good, so a dropped small change stays missing until the app redraws that area. Lines and text count by bounding box, so a thin line is always "small". An app that relied on each frame starting blank must now send `clear`. Not tested: timing on real hardware (`/dev/fb0`) or the terminal backend, and the 30 ms budget is a guess, not measured. |
 | Local mesh | Design only, no code: `docs/MESH.md`. No pairing, peer transport, proximity sensing, camera or tether sharing exists, and the design conflicts with the firmware gate (radios are unbound at boot) and needs the same encryption dependency decision as the pipeline row above. |
 
 A section-by-section comparison with a "formally verified microkernel"
@@ -276,7 +288,8 @@ kos backup link APP URL      back up an app as its https address + SHA-256 inste
 kos backup links / fetch APP / unlink APP   list the links / download+verify+install one / forget one
 kos folders [create]         the 27 standard data folders (create needs the password)
 kos owed / kos settle        what earlier writes still owe / do it now
-kos exec --code LINE         run one line of code as a sandboxed command
+kos exec --code LINE         run one line of code as a sandboxed command (--lang=ruby etc.)
+kos runtimes                 which languages code can run in (password); add NAME PROGRAM / remove NAME
 kos do WORDS...              one line of human language, run as one command
 kos line [--explain]         the line shell: every line you type is a command
 kos cell start NAME --kernel K --initrd I --cpus 2,3
@@ -295,6 +308,16 @@ Three ways to run an app: `run NAME` (a text page), `run graphical NAME`
 (pixels), `run cmd NAME` (no drawing at all - the raw stream of commands the
 OS is sending the app and the app is sending back, for scripting or for
 seeing exactly what crosses the wire).
+
+**Pictures.** KOS has no image command: a frame is `clear`, `rect`, `line` and
+`text` only, at most 5000 ops. An app that wants to show a picture turns the
+pixels into geometry first, with `Canvas.image(rows_of_pixels, x, y, scale)`
+(`kos/vectorize.py`, standard library, app side; the OS core is unchanged and
+still validates every op). One background `rect`, then each row cut into runs
+of one colour, identical runs on consecutive rows merged into one box, boxes
+one pixel thin sent as `line`s. A picture too busy for the budget degrades
+(fewer colours, then blockier) instead of overflowing; the returned
+`Vectorized.lossless` says which you got.
 
 Several apps can be open at once: `kos open` launches one in the background
 and hands your shell straight back. `kos ps` lists what's open, `kos attach
@@ -372,6 +395,7 @@ kos> please scan notes.kapp     kos> lance l'app hello         kos> write notes.
 kos> print(6 * 7)               -> asks your password, runs in a sandbox, prints 42
 kos> run hello; rm -rf /        -> a command too: shell code, but there is no sandboxed
                                    shell runtime, so nothing runs (and it never touches the host)
+kos> @ruby puts 6*7             -> ruby, in the same sandbox: 42
 ```
 
 Human language: the words are only *names for existing commands*; each one
@@ -382,9 +406,21 @@ command" with a did-you-mean. Shell command names (`ls`, `cat`, `kill`) are
 not words in the lexicon - they are code.
 
 Code: detected by syntax, scanned, then run as a one-shot sandboxed app with a
-password and a 10 s limit. Only Python has a sandboxed runtime here; any
-other language is still a command - understood, scanned, logged - and says
-it has no runtime. `kos line --explain` shows how each line was understood.
+password and a 10 s limit. Python runs as an app; every other language is a
+**row in a table** (`kos/runtimes.py`): a trusted interpreter plus one argument
+list. Built in: JavaScript (node), Ruby, Perl, Lua - each only if its program is
+installed *and* trusted (a regular file, owned by root or you, that nobody else
+can change, in a directory nobody else can change). They run directly under the
+same sandbox (no files, no network, private scratch directory, 10 s limit,
+64 KiB of output, control characters shown as `\x1b` not obeyed, children
+killed with them), about 20-40 ms a line. Say which language with
+`@ruby puts 1+1` (the line shell guesses Python/JavaScript/SQL/C... by syntax).
+`kos runtimes` lists languages; `kos runtimes add NAME PROGRAM [--arg=-e --arg={code}]`
+adds one (password; the program's SHA-256 is pinned and checked on every run, and
+`{code}` must be one argument right after a flag so code can never be read as
+a flag); `kos runtimes remove NAME` removes it (password). A language with no
+runtime (C, SQL, shell...) is still a command - understood, scanned, logged - and
+says so. `kos line --explain` shows how each line was understood.
 Honest limits: it is a verb lexicon, not language understanding; the verb comes
 first; each code line is its own app, so variables do not persist.
 
@@ -538,6 +574,17 @@ Secure Boot: enroll the key you signed with, or the stick will be refused.
   including a forger who re-links it and concurrent appends/trims (nothing recorded is lost); hostile file and
   zip-entry names (no escape sequences reach the terminal); the broker sleeping with zero wakeups; `kos security`
   against eight deliberately broken installs.
+* **Programming languages (this round):** the language table (`kos/runtimes.py`) and its
+  guards (hostile argument lists, untrusted or swapped programs, a damaged registry), and
+  Perl run for real inside the sandbox (reads, writes and network refused; runaway, flooding and
+  terminal-escape output; children killed; a pinned custom language refused once its program
+  changes); node and ruby were also run by hand through the same path. **Not covered:** C, SQL,
+  shell, Java, Rust, Go (no sandboxed runtime: compiling needs a compiler inside the sandbox);
+  the interpreter's own bugs (a language runtime is a large attack surface and the sandbox is the
+  only wall); a program swapped *between* the SHA-256 check and its start (the check is by path,
+  not by file descriptor); running as an unprivileged user (the dev container runs as root, where
+  the sandbox drops to `nobody` and a scratch directory under root-only parents is unreachable for
+  both Python and these languages); lines do not share variables or state.
 * **Written but not yet booted:** exclusive evdev capture for the admin
 * **Written but not yet booted on real hardware or QEMU:** `kos usb` end to end on a real stick (its logic, refusals, byte-for-byte verify and the QEMU argv are unit-tested), the USB kernel options, exclusive evdev capture for the admin
   keyboard, the graphical desktop (`boot desktop --graphical`), the initramfs, kos-init as real PID 1, the

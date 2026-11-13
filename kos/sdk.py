@@ -50,6 +50,18 @@ class Canvas:
         self.ops.append(["text", int(x), int(y), s, color, int(scale)])
         return self
 
+    def image(self, pixels, x: int = 0, y: int = 0, scale: int = 1, max_ops: Optional[int] = None):
+        """Draw a picture. KOS has no image command, so the pixels (rows of
+        '#rrggbb' or (r, g, b)) are turned into rects and lines first; see
+        ``kos.vectorize``. Fits in what is left of the frame's op budget, and
+        degrades (fewer colours, then blockier) rather than overflow. Returns
+        the ``Vectorized`` result: check ``.lossless``. Raises ValueError."""
+        from .vectorize import DEFAULT_BUDGET, MAX_OPS, vectorize
+        room = MAX_OPS - len(self.ops)
+        v = vectorize(pixels, x, y, scale, min(max_ops or DEFAULT_BUDGET, room) if room >= 1 else 0)
+        self.ops.extend(v.ops)
+        return v
+
 
 class App:
     def __init__(self, sock: Optional[socket.socket] = None):

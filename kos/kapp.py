@@ -51,7 +51,6 @@ RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
 PERMISSIONS = {"network", "system", "storage", "ai"}
-PERMISSIONS = {"network", "system", "storage"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
@@ -262,9 +261,11 @@ class KApp:
         return out
 
 
-def pack(src: Path, out: Path, skip_dirs: frozenset = frozenset()) -> Manifest:
+def pack(src: Path, out: Path, skip_dirs: frozenset = frozenset(), prove: bool = True) -> Manifest:
     """Build a reproducible .kapp from a directory (same input → same bytes).
-    ``skip_dirs`` are sub-directories left out (the folders of a program's own sub-programs)."""
+    ``skip_dirs`` are sub-directories left out (the folders of a program's own sub-programs).
+    Packing adds ``proof.json`` (see proof.py) and refuses code that cannot be proven; ``prove=False``
+    is only for building an app that the OS must then refuse (tests)."""
     src = Path(src)
     files = []
     for root, dirs, names in os.walk(src):
@@ -277,15 +278,21 @@ def pack(src: Path, out: Path, skip_dirs: frozenset = frozenset()) -> Manifest:
             if p.is_symlink():
                 raise KAppError(f"refusing to pack symlink {p}")
             files.append(p)
+    contents = {p.relative_to(src).as_posix(): p.read_bytes() for p in files}
+    if prove:
+        from . import proof      # lazy: proof builds on this module
+        if proof.PROOF_FILE in contents:
+            raise KAppError(f"{proof.PROOF_FILE} is written by pack, not by hand")
+        m = Manifest.parse(contents.get(MANIFEST, b"")[:64 << 10])
+        contents[proof.PROOF_FILE] = proof.make_proof(contents, m.runtime, m.name)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        for p in files:
-            rel = p.relative_to(src).as_posix()
+        for rel in sorted(contents):
             zi = zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0))
             zi.compress_type = zipfile.ZIP_DEFLATED
-            mode = 0o755 if os.access(p, os.X_OK) else 0o644
+            mode = 0o755 if os.access(src / rel, os.X_OK) else 0o644
             zi.external_attr = (stat.S_IFREG | mode) << 16
-            z.writestr(zi, p.read_bytes())
+            z.writestr(zi, contents[rel])
     data = buf.getvalue()
     app = KApp(data)  # validate exactly what we are about to ship
     Path(out).write_bytes(data)
