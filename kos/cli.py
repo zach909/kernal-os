@@ -142,6 +142,8 @@ def cmd_passwd(args, paths: Paths) -> int:
 
 
 def cmd_pack(args, paths: Paths) -> int:
+    authority, _ = _authority(paths)
+    authority.authorize("app.pack", os.path.abspath(args.dir)).close()
     src = Path(args.dir)
     if (src / MANIFEST).is_file() and not has_program_below(src, pairs=False):
         m = pack(src, Path(args.output))
@@ -494,6 +496,8 @@ def _resolve_mixed(path: str):
 
 def cmd_ls(args, paths: Paths) -> int:
     from .protocol import escape_text
+    authority, _ = _authority(paths)
+    authority.authorize("file.view", os.path.abspath(args.path)).close()
     vfs, last = _resolve_mixed(args.path)
     vfs.cd(last)
     for e in vfs.list():
