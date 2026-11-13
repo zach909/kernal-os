@@ -56,6 +56,26 @@ Limits, stated plainly:
 * The HFSTS1 decoding follows coreboot/intelmetool and is untested on hardware here; the tests use
   synthetic config space. The kernel config also drops the in-kernel MEI, CCP and IPMI drivers.
 
+## The KOS kernel and the services (`kernel/`, `kos/kernel.py`, `kos/firewall.py`, `kos/services.py`)
+KOS runs on its own patched Linux (docs/KERNEL.md). PID 1 claims the **core** once per boot
+(`init.kernel_gate`); every app launch then gets a never-reused id from `kernel.AppIds` and its
+firewall rules from `firewall.prepare_launch` *before the fork*, and the child confines itself first
+thing in `SandboxPolicy.preexec` (one way: inherited, survives `exec`). On exit the owner's rules for
+that id are revoked and the kernel's log is copied into the audit log (`SandboxPolicy.on_exit`, run by
+whoever owns the process: `cmd_run` or the broker). On a boot with `kos.require_kernel=1` a missing
+module stops `init` and makes `SandboxPolicy.probe` refuse every app.
+Gap: the module governs only confined tasks, so the OS's own connections, processes outside the
+sandbox and kernel cells are unprotected; it cannot tell encrypted from plain traffic.
+
+An app asks the OS for its own functions with `{"cmd":"service",...}` (`servicespec.SPECS` is the whole
+list). `ServiceHost.call` runs, in this order, before any handler: the schema check, the manifest
+permission `service:GROUP`, and then the handler asks for the password in the OS's own prompt before it
+reads anything; the reply is scrubbed of control characters and size-bounded. The OS's own commands are
+apps built on this (`kos/office/pack_system.py`); `kos/launchmap.py` says where each of the 45 commands
+lives. Gap: the Python core (password check, seals, loader, protocol validation, session loop, audit chain,
+drawing and input) is still there; only the enforcement of apps' network, device and ptrace access is in
+the kernel.
+
 ## Keys
 `master = scrypt(password, salt)`. Stored: salt, params, `HMAC(master,
 "verifier")`. Derived: `HMAC(master, "kapp-seal")` seals apps. The master key
@@ -80,8 +100,11 @@ Every line is a command. Human language becomes one structured argv for
 nothing to attach to. Code is a command too (`kos exec`), but is never run on
 the host: it is scanned, needs `code.run` (the password), and runs as an
 in-memory one-shot `.kapp` under the normal sandbox with a timeout and a
-wiped cache dir. Only Python has a runtime in the sandbox; other languages
-report that and run nothing. Everything the shell can start still passes
+wiped cache dir. Python is the fast path. Other languages are rows in
+`kos/runtimes.py` (trusted interpreter + one argv template; custom ones are
+added with `kos runtimes add`, password, SHA-256 pinned); they run directly
+under the same `SandboxPolicy` with a scratch dir, timeout and output cap.
+A language with no row reports that and runs nothing. Everything the shell can start still passes
 through the same `Authority.authorize` gates.
 
 ## Requires (`kos/requires.py`)

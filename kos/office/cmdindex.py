@@ -9,6 +9,7 @@ COMMANDS = (
 # -- begin generated --
     ('activity', 'one feed: open apps + recent password decisions', 'kos activity [-h] [-n N]'),
     ('admin', 'the elevated administrator keyboard', 'kos admin [-h] [{status,boot,lock}]'),
+    ('ai', 'set up the AI connection: set, show, clear (password)', 'kos ai [-h] [--url URL] [--provider {openai,anthropic}] [--model MODEL] {set,show,clear}'),
     ('aios', 'AI OS: button clicker, app commands, kernel commands, skill maker', 'kos aios [-h] {status,gui,app,kernel,skill} [words ...]'),
     ('attach', 'attach your terminal to an open app', 'kos attach [-h] id'),
     ('audit', 'show the authorization log', 'kos audit [-h] [-n N] [--verify]'),
@@ -28,6 +29,7 @@ COMMANDS = (
     ('firmware', 'management processors (Intel ME, AMD PSP, BMC) and the boot gate', 'kos firmware [-h] [{status,plan}]'),
     ('go', "open an address, like a browser's address bar: go kos://NAME[/path][?query]", 'kos go [-h] address'),
     ('grant', 'let an app into a shared folder (space:NAME), or list who has access', 'kos grant [-h] [--level LEVEL] [--revoke] [--list] [app] [resource]'),
+    ('hardware', 'map every device and connection into the permission store: scan | show | links', 'kos hardware [-h] [{scan,show,links}] [match]'),
     ('help', 'list the commands, or explain one', 'kos help [-h] [topic]'),
     ('install', 'install a .kapp, or every .kapp in a folder (each asks for the password)', 'kos install [-h] file'),
     ('line', 'the line shell: every line you type is a command', 'kos line [-h] [--explain]'),
@@ -43,6 +45,7 @@ COMMANDS = (
     ('ps', "list apps opened with 'kos open'", 'kos ps [-h]'),
     ('remove', 'remove an app', 'kos remove [-h] name'),
     ('run', 'run an app: run [graphical|cmd] NAME', 'kos run [-h] [--cell CELL] target [target ...]'),
+    ('runtimes', 'the programming languages code runs in: list | add NAME PROGRAM | remove NAME', 'kos runtimes [-h] {list,add,remove} ...'),
     ('scan', 'scan a file/zip for known-bad patterns, or watch a directory', 'kos scan [-h] {file,watch} ...'),
     ('security', 'check everything KOS can verify about itself (no password, read-only)', 'kos security [-h]'),
     ('settle', 'do what is owed: security scan + disk optimize', 'kos settle [-h]'),

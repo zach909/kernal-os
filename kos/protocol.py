@@ -27,6 +27,8 @@ OS -> app
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
+    {"cmd": "service", "id": N, "ok": bool, "detail": str, "data": {..}}
+                                                       (answer to a service call; see servicespec.py)
     {"cmd": "quit"}
 
 app -> OS
@@ -45,9 +47,17 @@ app -> OS
     {"cmd": "request", "action": "ask", "text": str, "context": str?, "source": str?}
                                          ask the AI (needs the 'ai' permission; the OS asks for the
                                          password and says what leaves the computer). The answer is text.
-    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?}
+    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?, "store": "cookies"|"passwords"?}
                                          durable storage: the app's private data ('storage' permission) or a
                                          shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
+    {"cmd": "service", "id": N, "name": "audit.tail", "args": {..}}
+                                         ask the OS for one of the functions in servicespec.SPECS (the audit log, the
+                                         security check, the firewall, ...). Needs the manifest permission
+                                         ``service:GROUP``; the password, where one is needed, is typed in the OS's
+                                         own prompt. Every argument is checked against the spec; none is trusted.
+                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant), or - with "store" - the app's
+                                         cookie jar ('cookies' permission) or saved passwords ('passwords'
+                                         permission): separate stores, never reachable through 'storage'
     {"cmd": "exit", "code": int}
 
 ``request`` is how an app does anything beyond drawing: it *asks*. The OS only
@@ -65,7 +75,8 @@ import socket
 from typing import Any
 
 from .address import AddressError, parse as parse_address
-from .kapp import ID_PATTERN, ID_RE
+from .servicespec import SPECS, SpecError
+from .kapp import ID_RE, INSTANCE_RE
 
 MAX_LINE = 1 << 20
 MAX_LINES = 500
@@ -74,7 +85,7 @@ MAX_OPS = 5000
 MAX_COORD = 16384
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = ID_RE
-_INSTANCE_RE = re.compile(rf"^{ID_PATTERN}-[0-9a-f]{{6}}\Z")
+_INSTANCE_RE = INSTANCE_RE
 REQUEST_MODES = ("tui", "graphical", "cmd")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
@@ -199,6 +210,7 @@ def _request(msg: dict) -> dict:
 
 
 VAULT_OPS = ("put", "get", "list", "delete", "spaces")
+VAULT_STORES = ("cookies", "passwords")
 _SPACE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _VAULT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MAX_VAULT_VALUE = 400_000
@@ -214,6 +226,10 @@ def _vault(msg: dict) -> dict:
         if not isinstance(msg["space"], str) or not _SPACE_RE.match(msg["space"]) or op == "spaces":
             raise ProtocolError("vault.space must be a plain space name (and not used with 'spaces')")
         out["space"] = msg["space"]
+    if msg.get("store") is not None:
+        if msg["store"] not in VAULT_STORES or op == "spaces" or "space" in out:
+            raise ProtocolError(f"vault.store must be one of {VAULT_STORES} (not used with 'space' or 'spaces')")
+        out["store"] = msg["store"]
     if op not in ("list", "spaces"):
         key = msg.get("key")
         if not isinstance(key, str) or not _VAULT_KEY_RE.match(key):
@@ -225,6 +241,18 @@ def _vault(msg: dict) -> dict:
             raise ProtocolError("vault.value must be text")
         out["value"] = value        # data, never displayed by the OS: not stripped
     return out
+
+
+def _service(msg: dict) -> dict:
+    name, ident = msg.get("name"), _int(msg.get("id"), 0, 2**31)
+    spec = SPECS.get(name) if isinstance(name, str) else None
+    if spec is None:
+        raise ProtocolError("service.name is not a service")
+    try:
+        args = spec.check(msg.get("args", {}))
+    except SpecError as e:
+        raise ProtocolError(f"service.args: {e}") from None
+    return {"cmd": "service", "id": ident, "name": name, "args": args}
 
 
 def validate_app_message(msg: Any, mode: str) -> dict:
@@ -252,9 +280,17 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return _request(msg)
     if cmd == "vault":
         return _vault(msg)
+    if cmd == "service":
+        return _service(msg)
     if cmd == "exit":
         return {"cmd": "exit", "code": _int(msg.get("code", 0), 0, 255)}
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")
+
+
+def _no_decimal(token: str):
+    """The no-decimals rule on the wire: a number with a point or exponent, or NaN/Infinity,
+    is refused before any validator sees it (the protocol only ever carries whole numbers)."""
+    raise ValueError("decimal number")
 
 
 class Channel:
@@ -272,7 +308,7 @@ class Channel:
     def send(self, obj: dict) -> None:
         if self.closed:
             return
-        data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
+        data = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode() + b"\n"
         try:
             self.sock.setblocking(True)
             self.sock.settimeout(2.0)
@@ -303,7 +339,7 @@ class Channel:
             del self._buf[:i + 1]
             if line.strip():
                 try:
-                    out.append(json.loads(line))
+                    out.append(json.loads(line, parse_float=_no_decimal, parse_constant=_no_decimal))
                 except ValueError:
                     raise ProtocolError("app sent invalid JSON") from None
         if len(self._buf) > MAX_LINE:

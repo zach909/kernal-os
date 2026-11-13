@@ -24,6 +24,7 @@ from pathlib import Path
 from .auth import Authority, Grant
 from .kapp import ID_RE, MAX_ARCHIVE, KApp, KAppError, Manifest, compute_seal
 from .paths import Paths, atomic_write
+from . import proof
 from .scan import ScanResult, scan_bytes
 
 SEAL_KEY_LABEL = "kapp-seal"
@@ -64,6 +65,34 @@ class AppStore:
 
     def install(self, src: Path, authority: Authority) -> Manifest:
         return self._install(src, authority, update=False)
+
+    def install_bundle(self, srcs: list, authority: Authority, label: str) -> list[Manifest]:
+        """Install several apps under ONE password (action ``app.install.all``) - for the OS's own apps, which
+        are seventeen files that are installed together or not at all. Every file is checked and scanned
+        *before* the password is asked; one flagged file quarantines itself and stops the whole bundle."""
+        apps = [KApp.from_file(Path(p)) for p in srcs]
+        if len({a.manifest.name for a in apps}) != len(apps):
+            raise KAppError("the bundle names the same app twice")
+        for a in apps:
+            result = scan_bytes(a.data, label=a.manifest.name)
+            if not result.clean:
+                self.paths.ensure()
+                qdir = self.paths.state / "quarantine"
+                qdir.mkdir(parents=True, exist_ok=True)
+                import time
+                qpath = qdir / f"{a.manifest.name}-{int(time.time())}.kapp"
+                atomic_write(qpath, a.data)
+                raise VirusFoundError(a.manifest.name, result, qpath)
+        with authority.authorize("app.install.all", label) as grant:
+            seals = [compute_seal(grant.key(SEAL_KEY_LABEL), a.manifest.name, a.manifest.version, a.sha256) for a in apps]
+        self.paths.ensure()
+        for a, seal in zip(apps, seals):
+            kapp_path, seal_path = self._files(a.manifest.name)
+            atomic_write(kapp_path, a.data)
+            atomic_write(seal_path, json.dumps({
+                "format": 1, "name": a.manifest.name, "version": a.manifest.version,
+                "sha256": a.sha256, "seal": seal}, indent=2).encode())
+        return [a.manifest for a in apps]
 
     def update(self, src: Path, authority: Authority) -> tuple[str, Manifest]:
         """Replace an installed app with a newer version of the same app.
@@ -121,6 +150,7 @@ class AppStore:
             qpath = qdir / f"{m.name}-{int(time.time())}.kapp"
             atomic_write(qpath, app.data)
             raise VirusFoundError(m.name, result, qpath)
+        proof.require(app)       # no proof, no install - and before the password, like the scan
         with authority.authorize("app.update" if update else "app.install", m.name) as grant:
             seal = compute_seal(grant.key(SEAL_KEY_LABEL), m.name, m.version, app.sha256)
         self.paths.ensure()
@@ -161,7 +191,9 @@ class AppStore:
         if grant.action not in ("app.run", "app.graphical", "app.open", "app.extend", "app.mod") \
                 or grant.target != name:
             raise TamperedError("grant does not cover running this app")
-        return self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+        app = self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+        proof.require(app)       # the seal says these are the installed bytes; the proof says they may run
+        return app
 
     def verified_manifest(self, name: str, grant: Grant):
         """The manifest of an installed app, after the same seal check as a
@@ -171,6 +203,14 @@ class AppStore:
         if grant.action != "skill.make":
             raise TamperedError("grant does not cover describing apps")
         return self._read_sealed(name, grant.key(SEAL_KEY_LABEL)).manifest
+
+    def verified_help(self, name: str, grant: Grant):
+        """``(manifest, help)`` of an installed app, same seal check and same ``skill.make``
+        grant as ``verified_manifest``. ``help`` is the validated ``help.json`` or ``None``."""
+        if grant.action != "skill.make":
+            raise TamperedError("grant does not cover describing apps")
+        app = self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+        return app.manifest, app.help
 
     def _read_sealed(self, name: str, key: bytes) -> KApp:
         kapp_path, seal_path = self._files(name)

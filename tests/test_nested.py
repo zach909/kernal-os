@@ -26,7 +26,7 @@ from kos import layers as klayers  # noqa: E402
 from kos.address import AddressError, parse as parse_address  # noqa: E402
 from kos.appdirs import AppDirs  # noqa: E402
 from kos.auth import AuditLog, Authority, KdfParams, PasswordStore, Throttle  # noqa: E402
-from kos.kapp import (ASK_ACTIONS, ID_RE, MAX_DEPTH, KApp, KAppError, Manifest,  # noqa: E402
+from kos.kapp import (ASK_ACTIONS, ID_RE, MAX_ID_LEN, KApp, KAppError, Manifest,  # noqa: E402
                       find_programs, pack, pack_tree)
 from kos.paths import Paths  # noqa: E402
 from kos.permit import PermitError, PermitStore  # noqa: E402
@@ -75,13 +75,14 @@ class Env(unittest.TestCase):
 
 class TestProgramIds(unittest.TestCase):
     def test_ids_are_folder_paths_joined_with_dots(self):
-        for ok in ("backup", "backup.add", "a.b.c.d", "web-2.page"):
+        deep = ".".join("g" * 90)                           # ninety groups down: no depth limit
+        for ok in ("backup", "backup.add", "a.b.c.d", "web-2.page", "a.b.c.d.e.f.g.h.i.j", deep):
             self.assertTrue(ID_RE.match(ok), ok)
 
     def test_hostile_or_malformed_ids_are_refused_everywhere_an_id_is_taken(self):
-        too_deep = ".".join("a" * (MAX_DEPTH + 1))
+        too_long = ".".join("a" * (MAX_ID_LEN // 2 + 1))     # no depth limit, only a length one
         bad = ["a..b", ".a", "a.", "A.b", "a.1b", "a b", "a/b", "../x", "a.b/../c", "a\x00b",
-               "a.b\n", too_deep, "a." + "x" * 33, ""]
+               "a.b\n", too_long, "a." + "x" * 33, ""]
         for b in bad:
             self.assertFalse(ID_RE.match(b), repr(b))
             with self.assertRaises(KAppError, msg=repr(b)):
@@ -170,7 +171,7 @@ class TestTreeLayout(Env):
     def test_each_program_zip_holds_only_its_own_folder(self):
         pack_tree(BACKUP_TREE, self.dist)
         for ident in ("backup.list", "backup.add", "backup.remove"):
-            self.assertEqual(KApp.from_file(self.dist / f"{ident}.kapp").names(), ["app.py", "manifest.json"])
+            self.assertEqual(KApp.from_file(self.dist / f"{ident}.kapp").names(), ["app.py", "manifest.json", "proof.json"])
 
     def test_packing_is_reproducible(self):
         pack_tree(BACKUP_TREE, self.dist)
@@ -179,24 +180,34 @@ class TestTreeLayout(Env):
         for f in sorted(self.dist.glob("*.kapp")):
             self.assertEqual(f.read_bytes(), (again / f.name).read_bytes())
 
-    def test_sub_programs_nest_and_are_left_out_of_their_parent(self):
+    def test_groups_nest_and_an_app_keeps_only_its_own_files(self):
         t = self.root / "mail"
         program(t / "compose", "mail.compose", ["network"])
         (t / "compose" / "assets").mkdir()
         (t / "compose" / "assets" / "icon.txt").write_text("keep me")
-        program(t / "compose" / "attach", "mail.compose.attach", ["storage"])
-        program(t / "compose" / "attach" / "inline", "mail.compose.attach.inline")
+        program(t / "attach" / "inline", "mail.attach.inline", ["storage"])
         program(t / "read", "mail.read")
         ms = {m.name: m for m in pack_tree(t, self.dist)}
-        self.assertEqual(sorted(ms), ["mail.compose", "mail.compose.attach", "mail.compose.attach.inline",
-                                      "mail.read"])
+        self.assertEqual(sorted(ms), ["mail.attach.inline", "mail.compose", "mail.read"])
         self.assertEqual(KApp.from_file(self.dist / "mail.compose.kapp").names(),
                          ["app.py", "assets/icon.txt", "manifest.json"])
-        self.assertEqual(KApp.from_file(self.dist / "mail.compose.attach.kapp").names(), ["app.py", "manifest.json"])
+        # nothing is inherited: each app has its own permissions only
+        self.assertEqual(ms["mail.attach.inline"].permissions, ("storage",))
+                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
+        self.assertEqual(KApp.from_file(self.dist / "mail.compose.attach.kapp").names(), ["app.py", "manifest.json", "proof.json"])
         # nothing is inherited: the child has the child's permissions only
         self.assertEqual(ms["mail.compose.attach"].permissions, ("storage",))
         self.assertEqual(ms["mail.compose.attach.inline"].permissions, ())
         self.assertEqual(ms["mail.compose"].permissions, ("network",))
+        self.assertEqual(ms["mail.read"].permissions, ())
+
+    def test_an_app_has_no_apps_inside_it(self):
+        t = self.root / "mail"
+        program(t / "compose", "mail.compose", ["network"])
+        program(t / "compose" / "attach", "mail.compose.attach")
+        with self.assertRaises(KAppError) as cm:
+            pack_tree(t, self.dist)
+        self.assertIn("no apps inside", str(cm.exception))
 
     def test_a_program_folder_may_sit_under_a_folder_with_no_manifest(self):
         t = self.root / "docs"
@@ -214,7 +225,7 @@ class TestTreeLayout(Env):
             pack_tree(t2, self.dist)
         self.assertEqual(list(self.dist.glob("*.kapp")) if self.dist.exists() else [], [])
 
-    def test_the_app_folder_cannot_hold_code(self):
+    def test_the_group_folder_cannot_hold_code(self):
         t = self.root / "mail"
         program(t / "read", "mail.read")
         (t / "app.py").write_text("print('I would run with no permissions listed anywhere')")
@@ -226,14 +237,13 @@ class TestTreeLayout(Env):
         self.assertEqual(len(pack_tree(t, self.dist)), 1)
         self.assertEqual(sorted(p.name for p in self.dist.iterdir()), ["mail.read.kapp"])
 
-    def test_too_deep_an_empty_tree_and_symlinks_are_refused(self):
+    def test_depth_has_no_limit_and_an_empty_tree_and_symlinks_are_refused(self):
         t = self.root / "a"
         deep = t
-        for part in "bcde":
+        for part in "bcdefghij":
             deep = deep / part
-        program(deep, "a.b.c.d.e")
-        with self.assertRaises(KAppError):
-            pack_tree(t, self.dist)
+        program(deep, "a.b.c.d.e.f.g.h.i.j")
+        self.assertEqual([m.name for m in pack_tree(t, self.dist)], ["a.b.c.d.e.f.g.h.i.j"])
         with self.assertRaises(KAppError):
             pack_tree(self.root / "nothing-here-yet", self.dist)
         empty = self.root / "empty"
@@ -257,6 +267,143 @@ class TestTreeLayout(Env):
         self.assertEqual((self.root / "one.kapp").read_bytes(), (self.root / "one2.kapp").read_bytes())
 
 
+def page(group: Path, name, ident, permissions=(), **extra):
+    """A single-file app: NAME.py with its NAME.json beside it."""
+    group.mkdir(parents=True, exist_ok=True)
+    d = {"name": ident, "version": "1.0", "runtime": "python", "entry": "app:main",
+         "permissions": list(permissions), **extra}
+    (group / f"{name}.json").write_text(json.dumps(d))
+    (group / f"{name}.py").write_text("def main():\n    return 0\n")
+
+
+class TestFileApps(Env):
+    def test_a_page_is_one_file_and_becomes_its_own_kapp_with_its_own_permissions(self):
+        g = self.root / "docs"
+        page(g, "spell", "docs.spell", ["storage"])
+        page(g / "editor", "format", "docs.editor.format", ["network"])
+        page(g / "editor", "plain", "docs.editor.plain")
+        ms = {m.name: m for m in pack_tree(g, self.dist)}
+        self.assertEqual(sorted(ms), ["docs.editor.format", "docs.editor.plain", "docs.spell"])
+        self.assertEqual(ms["docs.spell"].permissions, ("storage",))
+        self.assertEqual(ms["docs.editor.format"].permissions, ("network",))
+        self.assertEqual(ms["docs.editor.plain"].permissions, ())
+        self.assertEqual(KApp.from_file(self.dist / "docs.spell.kapp").names(), ["app.py", "manifest.json"])
+        for m in ms.values():
+            self.assertTrue(scan_bytes((self.dist / f"{m.name}.kapp").read_bytes(), m.name).clean)
+
+    def test_packing_a_page_is_reproducible(self):
+        g = self.root / "docs"
+        page(g / "x", "y", "docs.x.y")
+        pack_tree(g, self.dist)
+        pack_tree(g, self.root / "again")
+        self.assertEqual((self.dist / "docs.x.y.kapp").read_bytes(), (self.root / "again" / "docs.x.y.kapp").read_bytes())
+
+    def test_groups_can_go_ninety_levels_down(self):
+        g = self.root / "g"
+        d, ident = g, "g"
+        for _ in range(89):
+            d, ident = d / "g", ident + ".g"
+        page(d, "leaf", ident + ".leaf")
+        self.assertEqual([m.name for m in pack_tree(g, self.dist)], [ident + ".leaf"])
+
+    def test_a_group_cannot_hold_code_without_a_manifest_beside_it(self):
+        g = self.root / "docs"
+        page(g, "ok", "docs.ok")
+        (g / "loose.py").write_text("print('no permissions listed anywhere')")
+        with self.assertRaises(KAppError) as cm:
+            pack_tree(g, self.dist)
+        self.assertIn("loose.py", str(cm.exception))
+        (g / "loose.py").unlink()
+        (g / "orphan.json").write_text(manifest("docs.orphan"))     # a manifest with no file to grant to
+        with self.assertRaises(KAppError):
+            pack_tree(g, self.dist)
+
+    def test_a_page_cannot_take_another_pages_name_or_hide_a_bad_entry(self):
+        g = self.root / "docs"
+        page(g, "a", "docs.b")
+        with self.assertRaises(KAppError):
+            pack_tree(g, self.dist)
+        g2 = self.root / "docs2"
+        page(g2, "a", "docs2.a", entry="other:main")
+        with self.assertRaises(KAppError) as cm:
+            pack_tree(g2, self.dist)
+        self.assertIn("entry", str(cm.exception))
+        g3 = self.root / "docs3"
+        page(g3, "a", "docs3.a", kind="extension", extends="web")
+        with self.assertRaises(KAppError):
+            pack_tree(g3, self.dist)
+
+    def test_an_app_and_a_group_cannot_share_a_name(self):
+        g = self.root / "docs"
+        page(g, "a", "docs.a")
+        page(g / "a", "b", "docs.a.b")
+        with self.assertRaises(KAppError) as cm:
+            pack_tree(g, self.dist)
+        self.assertIn("no apps inside", str(cm.exception))
+
+    def test_a_symlinked_page_is_refused(self):
+        g = self.root / "docs"
+        page(g, "real", "docs.real")
+        (g / "evil.py").symlink_to(g / "real.py")
+        (g / "evil.json").write_text(manifest("docs.evil"))
+        with self.assertRaises(KAppError):
+            pack_tree(g, self.dist)
+
+    def test_the_pack_command_writes_one_kapp_per_page(self):
+        g = self.root / "docs"
+        page(g, "spell", "docs.spell")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            kcli.cmd_pack(types.SimpleNamespace(dir=str(g), output=str(self.dist)), self.paths)
+        self.assertTrue((self.dist / "docs.spell.kapp").is_file())
+        self.assertIn("docs is a group, not an app", out.getvalue())
+
+
+class TestPermitBelongsToTheFile(Env):
+    def test_a_permit_is_pinned_to_one_file_and_a_different_file_does_not_inherit_it(self):
+        g = self.root / "docs"
+        page(g, "spell", "docs.spell", ["storage"])
+        pack_tree(g, self.dist)
+        data = (self.dist / "docs.spell.kapp").read_bytes()
+        sha = KApp(data).sha256
+        permits = PermitStore(self.paths)
+        permits.grant("docs.spell", ["storage"], pin=sha)
+        permits.check_pin("docs.spell", sha)
+        with self.assertRaises(PermitError):
+            permits.check_pin("docs.spell", "0" * 64)
+        # a permit made before pinning existed is not restricted
+        permits.grant("docs.spell", ["storage"])
+        permits.check_pin("docs.spell", "0" * 64)
+
+    def test_permitting_a_group_is_refused_and_names_its_apps(self):
+        g = self.root / "docs"
+        page(g, "spell", "docs.spell")
+        pack_tree(g, self.dist)
+        store = AppStore(self.paths)
+        with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(PW, PW), None)):
+            with redirect_stdout(io.StringIO()):
+                kcli.cmd_install(types.SimpleNamespace(file=str(self.dist)), self.paths)
+        with self.assertRaises(KAppError) as cm:
+            kcli.cmd_permit(types.SimpleNamespace(list=False, name="docs", revoke=False), self.paths)
+        self.assertIn("group of apps", str(cm.exception))
+        self.assertIn("docs.spell", str(cm.exception))
+        self.assertFalse(PermitStore(self.paths).is_permitted("docs"))
+
+    def test_the_permit_command_records_the_files_hash(self):
+        g = self.root / "docs"
+        page(g, "spell", "docs.spell")
+        pack_tree(g, self.dist)
+        with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(PW, PW), None)):
+            with redirect_stdout(io.StringIO()):
+                kcli.cmd_install(types.SimpleNamespace(file=str(self.dist)), self.paths)
+        with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(PW), None)):
+            with redirect_stdout(io.StringIO()):
+                kcli.cmd_permit(types.SimpleNamespace(list=False, name="docs.spell", revoke=False), self.paths)
+        installed = KApp.from_file(self.paths.apps / "docs.spell.kapp")
+        from kos.permissions import Permissions
+        self.assertEqual(Permissions(self.paths).get("docs.spell", "run")["pin"], installed.sha256)
+
+
 class TestCommandLine(Env):
     def setUp(self):
         super().setUp()
@@ -266,7 +413,7 @@ class TestCommandLine(Env):
         out = io.StringIO()
         with redirect_stdout(out):
             kcli.cmd_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.dist)), self.paths)
-        self.assertIn("backup itself is not a program and has no permissions", out.getvalue())
+        self.assertIn("backup is a group, not an app, and has no permissions", out.getvalue())
         with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(*answers), None)):
             with redirect_stdout(io.StringIO()):
                 kcli.cmd_install(types.SimpleNamespace(file=str(self.dist)), self.paths)
@@ -327,8 +474,8 @@ class TestCommandLine(Env):
         with redirect_stdout(out):
             kcli.cmd_list(types.SimpleNamespace(), self.paths)
         text = out.getvalue()
-        self.assertIn("[program of backup; permissions: ask:backup_add]", text)
-        self.assertIn("[program of backup; permissions: ask:backup, ask:backup_remove]", text)
+        self.assertIn("[in group backup; permissions: ask:backup_add]", text)
+        self.assertIn("[in group backup; permissions: ask:backup, ask:backup_remove]", text)
 
 
 class TestBridgeIsPerProgram(Env):
