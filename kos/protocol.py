@@ -25,6 +25,8 @@ OS -> app
                        what to do with it is up to the app. See extensions.py.
     {"cmd": "answer", "ok": bool, "lines": [str], "model": str, "detail": str}              (answer to request ask)
     {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
+    {"cmd": "kernel", "protections": {name: bool|int}, "cells": [{name, cid, cpus, memory_mb, running}],
+                      "admin": str}                              (answer to request kernel; read-only)
     {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
                                                        (answer to a vault command)
     {"cmd": "quit"}
@@ -42,6 +44,13 @@ app -> OS
                                          the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
     {"cmd": "request", "action": "close", "id": INSTANCE}
+    {"cmd": "request", "action": "kernel"}                     what the Linux kernel protects (needs ask:kernel)
+    {"cmd": "request", "action": "admin"}                      is the administrator keyboard on? (needs 'admin')
+    {"cmd": "request", "action": "write", "path": ABSOLUTE_PATH, "text": str}
+                                         write a file as the administrator (needs the 'admin' permission).
+                                         The OS refuses unless the administrator keyboard is booted, then asks
+                                         for the password naming the file and the app, then scans and
+                                         optimizes. The app never gets more than ok / not ok.
     {"cmd": "request", "action": "ask", "text": str, "context": str?, "source": str?}
                                          ask the AI (needs the 'ai' permission; the OS asks for the
                                          password and says what leaves the computer). The answer is text.
@@ -72,6 +81,7 @@ MAX_LINES = 500
 MAX_LINE_CHARS = 1000
 MAX_OPS = 5000
 MAX_COORD = 16384
+MAX_ADMIN_TEXT = 200_000      # one admin write from an app; a bigger file is written with `kos write`
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = ID_RE
 _INSTANCE_RE = re.compile(rf"^{ID_PATTERN}-[0-9a-f]{{6}}\Z")
@@ -183,6 +193,27 @@ def _request(msg: dict) -> dict:
         return {"cmd": "request", "action": "ask", "text": clean_text(msg["text"], ai.MAX_QUESTION),
                 "context": clean_text(msg.get("context", ""), ai.MAX_CONTEXT),
                 "source": clean_text(msg.get("source", ""), ai.MAX_SOURCE)}
+    if action in ("kernel", "admin"):
+        extra = set(msg) - {"cmd", "action"}
+        if extra:
+            raise ProtocolError(f"request.{action} has no field {sorted(extra)[0]!r}")
+        return {"cmd": "request", "action": action}
+    if action == "write":
+        extra = set(msg) - {"cmd", "action", "path", "text"}
+        if extra:
+            raise ProtocolError(f"request.write has no field {sorted(extra)[0]!r}")
+        path, text = msg.get("path"), msg.get("text")
+        # the path is shown in the password prompt: absolute, bounded, and no control characters
+        if (not isinstance(path, str) or not path.startswith("/") or len(path) > 1024
+                or _CONTROL_RE.search(path)):
+            raise ProtocolError("request.path must be an absolute file path")
+        if not isinstance(text, str) or len(text) > MAX_ADMIN_TEXT:
+            raise ProtocolError(f"request.text must be text of at most {MAX_ADMIN_TEXT} characters")
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ProtocolError("request.text must be valid text") from None
+        return {"cmd": "request", "action": "write", "path": path, "text": text}
     if action == "backup":
         return {"cmd": "request", "action": "backup"}
     if action == "backup_add":

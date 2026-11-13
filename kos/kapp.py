@@ -50,11 +50,14 @@ ID_RE = re.compile(rf"^{ID_PATTERN}\Z")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
-PERMISSIONS = {"network", "system", "storage", "ai"}
+# ``admin`` lets a program ask the OS for the administrator keyboard's one job, the guarded file
+# write (request ``admin`` / ``write``). It is not root: the OS still needs a live lease, the
+# password typed for exactly that write, a clean security scan and a disk optimize.
+PERMISSIONS = {"network", "system", "storage", "ai", "admin"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
-ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove")
+ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "kernel")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
@@ -185,8 +188,9 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
-            for power in ("system", "ai"):
-                # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
+            for power in ("system", "ai", "admin"):
+                # The power to open and close apps, to send text to a model, or to write files as the
+                # administrator must never ride in on an add-on.
                 if power in perms:
                     raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
             if "system" in perms or any(str(p).startswith(ASK_PREFIX) for p in perms):

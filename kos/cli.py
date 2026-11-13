@@ -289,7 +289,6 @@ def cmd_run(args, paths: Paths) -> int:
         child.close()
     prompter.close()
     try:
-        bridge = _bridge_for(paths, name, app.manifest.permissions)
         bridge = bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
@@ -299,12 +298,6 @@ def cmd_run(args, paths: Paths) -> int:
             cache.wipe(cache_dir)
     print(f"{name} exited ({code})")
     return code
-
-
-def _bridge_for(paths: Paths, name: str, permissions):
-    """The bridge an app gets: only if its manifest has 'system' or 'ai', and only for those powers."""
-    perms = {p for p in permissions if p in ("system", "ai")}
-    return SystemBridge(paths, app=name, permissions=perms) if perms else None
 
 
 def cmd_open(args, paths: Paths) -> int:
@@ -347,14 +340,16 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
         raise KAppError(f"could not attach to {inst.id}: {e}") from None
     log = open(inst.log_path, "a") if os.path.exists(inst.log_path) else None
     # what the bridge allows was recorded by the OS at open time, from the verified manifest
-    bridge = bridge_for(paths, inst.name, ["system"] if inst.system else [f"ask:{a}" for a in inst.asks])
     perms = ()
     try:
         perms = KApp.from_file(paths.apps / f"{inst.name}.kapp").manifest.permissions
     except (KAppError, OSError):
         pass
-    # 'system' was recorded by the OS at open time; the manifest (sealed, checked at launch) adds 'ai'
-    bridge = _bridge_for(paths, inst.name, set(perms) | ({"system"} if inst.system else set()))
+    # 'system', 'ask:*' and 'admin' were recorded by the OS at open time, from the verified manifest; the
+    # stored manifest adds only 'ai' (it is never what grants a power over the machine)
+    granted = ["system"] if inst.system else [f"ask:{a}" for a in inst.asks]
+    granted += (["admin"] if inst.admin else []) + (["ai"] if "ai" in perms else [])
+    bridge = bridge_for(paths, inst.name, granted)
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
@@ -1481,31 +1476,17 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
-    "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
-    "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
-    "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
-    "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
-    "runtimes": cmd_runtimes}
+    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
+    "boot": cmd_boot, "desktop": cmd_desktop, "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore,
+    "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
+    "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor, "firmware": cmd_firmware,
+    "audit": cmd_audit, "security": cmd_security, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
+    "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write, "skills": cmd_skills,
+    "convert": cmd_convert, "backup": cmd_backup, "folders": cmd_folders, "aios": cmd_aios, "usb": cmd_usb,
+    "help": cmd_help, "ai": cmd_ai, "runtimes": cmd_runtimes}
 
 
 def main(argv: list[str] | None = None) -> int:
