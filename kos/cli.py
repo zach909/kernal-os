@@ -1481,18 +1481,6 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
@@ -1502,8 +1490,6 @@ COMMANDS = {
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
     "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
     "runtimes": cmd_runtimes}
 
