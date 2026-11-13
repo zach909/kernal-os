@@ -50,6 +50,9 @@ ID_RE = re.compile(rf"^{ID_PATTERN}\Z")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
+# ``cookies`` and ``passwords`` each unlock one separate, OS-owned store (see vault.py / spaces.py).
+# They are not part of ``storage``: an app that keeps notes cannot read a cookie jar or saved logins.
+PERMISSIONS = {"network", "system", "storage", "ai", "cookies", "passwords"}
 PERMISSIONS = {"network", "system", "storage", "ai"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions

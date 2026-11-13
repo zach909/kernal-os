@@ -268,7 +268,10 @@ class Session:
             if msg["op"] == "spaces":
                 reply["spaces"] = self.vault.visible_spaces()
             else:
-                v = self.vault.vault(msg.get("space"), msg["op"])
+                store = msg.get("store")
+                v = self.vault.vault(msg.get("space"), msg["op"], store)
+                if store:       # cookies and passwords are sensitive: every use is logged (never the value)
+                    self._log(f"{store}: {msg['op']} {msg.get('key', '')}".rstrip())
                 if msg["op"] == "put":
                     v.put(msg["key"], msg["value"])
                 elif msg["op"] == "get":
@@ -285,6 +288,8 @@ class Session:
             reply["ok"] = True
         except (StorageError, VaultError, OSError) as e:
             reply["detail"] = str(e)[:200]
+            if msg.get("store"):
+                self._log(f"{msg['store']}: {msg['op']} refused: {reply['detail']}")
         self._send(reply)
 
     def _on_request(self, msg: dict) -> None:
