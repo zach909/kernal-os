@@ -28,6 +28,11 @@ from typing import Optional
 from . import font
 
 
+def _now_ms() -> int:
+    """A monotonic clock in whole milliseconds (the OS keeps no decimals)."""
+    return time.monotonic_ns() // 1_000_000
+
+
 def parse_color(c: str) -> bytes:
     """'#rrggbb' -> the 4 bytes of a BGRX pixel (the common fbdev layout)."""
     r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
@@ -319,12 +324,12 @@ class GraphicalSurface:
     # whose clipped bounding box covers at least 1/BIG_FRACTION of the screen (a clear
     # always does). Small ops past the deadline are dropped, not retried; the next full
     # redraw from the app repairs whatever they would have changed.
-    FRAME_BUDGET = 0.03        # seconds of drawing per render() before small ops are dropped
+    FRAME_BUDGET = 30          # whole milliseconds of drawing per render() before small ops are dropped
     BIG_FRACTION = 16          # "big" = covers >= 1/16 of the screen
     MAX_QUEUED_FRAMES = 64     # memory bound: past this, queued frames are applied at once
 
     def __init__(self, backend, status_in_frame: bool = False, *,
-                 budget: Optional[float] = None, clock=time.monotonic):
+                 budget: Optional[int] = None, clock=_now_ms):
         self.backend = backend
         self.budget = self.FRAME_BUDGET if budget is None else budget
         self.clock = clock
@@ -348,9 +353,9 @@ class GraphicalSurface:
         self.queue.append(msg["ops"])
         self.has_content = True
         if len(self.queue) > self.MAX_QUEUED_FRAMES:
-            self._drain(0.0)   # out of room: keep every frame's big changes, ditch the small
+            self._drain(0)     # out of room: keep every frame's big changes, ditch the small
 
-    def _drain(self, budget: float) -> None:
+    def _drain(self, budget: int) -> None:
         deadline = self.clock() + budget
         big = max(1, self.width * self.height // self.BIG_FRACTION)
         scene = self.scene

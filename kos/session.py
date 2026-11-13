@@ -116,6 +116,7 @@ class Session:
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
                  status_ok: bool = False):
+                 services=None):
         self.name, self.mode = name, mode
         self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
         self.channel = channel
@@ -129,6 +130,7 @@ class Session:
         self.bridge = bridge
         self.vault = vault
         self.status_ok = status_ok       # from the verified manifest ('ask:status' or 'system'), never the app
+        self.services = services           # a services.ServiceHost, or None: no 'service:' permission
         self.right_click_to = right_click_to
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
@@ -244,6 +246,8 @@ class Session:
                 self._on_request(msg)
             elif msg["cmd"] == "vault":
                 self._on_vault(msg)
+            elif msg["cmd"] == "service":
+                self._on_service(msg)
             elif msg["cmd"] == "exit":
                 self.exit_code = msg["code"]
                 self.stop_requested = True
@@ -270,7 +274,10 @@ class Session:
             if msg["op"] == "spaces":
                 reply["spaces"] = self.vault.visible_spaces()
             else:
-                v = self.vault.vault(msg.get("space"), msg["op"])
+                store = msg.get("store")
+                v = self.vault.vault(msg.get("space"), msg["op"], store)
+                if store:       # cookies and passwords are sensitive: every use is logged (never the value)
+                    self._log(f"{store}: {msg['op']} {msg.get('key', '')}".rstrip())
                 if msg["op"] == "put":
                     v.put(msg["key"], msg["value"])
                 elif msg["op"] == "get":
@@ -287,6 +294,8 @@ class Session:
             reply["ok"] = True
         except (StorageError, VaultError, OSError) as e:
             reply["detail"] = str(e)[:200]
+            if msg.get("store"):
+                self._log(f"{msg['store']}: {msg['op']} refused: {reply['detail']}")
         self._send(reply)
 
     def status_fields(self, topic: str) -> list:
@@ -312,6 +321,15 @@ class Session:
             return
         self._send({"cmd": "status", "topic": msg["topic"], "ok": True,
                     "fields": self.status_fields(msg["topic"])})
+    def _on_service(self, msg: dict) -> None:
+        """An app asks the OS for one of its functions (services.py). The password, where the service
+        needs one, is typed in the OS's own prompt; this app can neither see nor answer it."""
+        if self.services is None:
+            self._send({"cmd": "service", "id": msg["id"], "ok": False, "data": {},
+                        "detail": "this app has no 'service:' permission in its manifest"})
+            return
+        self._send(self.services.call(msg, self.authority))
+        self.surface_dirty = True
 
     def _on_request(self, msg: dict) -> None:
         if msg["action"] == "status":

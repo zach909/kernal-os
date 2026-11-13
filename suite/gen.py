@@ -24,19 +24,14 @@ from kos.office.packs import entries as pack_entries  # noqa: E402
 
 
 def every():
-    """The 149 core products, then the pack products."""
-    return list(CATALOG) + pack_entries()
+    """The 149 core products, then the pack products, then the OS's own apps (the converted commands)."""
+    from kos.office.pack_system import ENTRIES as system
+    for e in system:
+        e.pack = "pack_system"
+    return list(CATALOG) + pack_entries() + list(system)
 
 
-LAUNCHER = 'from kos.office.launch import entry\n\n\ndef main():\n    entry({name!r}{pack})\n'
-
-
-def manifest(e) -> dict:
-    perms = ["storage"] + [f"owns:{x}" for x in e.owns] + [f"uses:{x}" for x in e.uses] + (["network"] if e.network else [])
-    modes = ["tui", "graphical"] if e.graphical else ["tui"]
-    desc = f"{e.title}" + (f" - {e.note}" if e.note else "")
-    return {"name": e.name, "version": "1.0", "runtime": "python", "entry": "app:main", "modes": modes,
-            "permissions": perms, "description": desc[:200]}
+from kos.sysapps import LAUNCHER, manifest  # noqa: E402  (one way to build an app, shared with `kos desktop install`)
 
 
 def build(out: Path) -> list:
@@ -89,6 +84,19 @@ def catalog_md() -> str:
     for e in packs:
         app = f"`{e.name}`" if e.scope != "none" else "-"
         lines.append(f"| {e.title} | {app}{' (network)' if e.network else ''} | {e.scope} | {e.note.replace('|', '/') or '-'} |")
+    from kos import sysapps
+    from kos.launchmap import APP_FOR_COMMAND, BOOTSTRAP
+    own = sysapps.entries()
+    lines += ["", "## The OS's own apps", "",
+              "The OS's own commands, as apps (`kos/office/pack_system.py`, and five titles in `pack_os`). Each asks the OS for what it "
+              "shows or changes through the service layer (`kos/servicespec.py`); the permission it asks for is in the third column, "
+              "and the password is typed in the OS's own prompt every time. `kos desktop install` installs them together.", "",
+              f"**{len(own)} apps.** The commands that now open them: `kos/launchmap.py`.", "",
+              "| App | Title | Asks the OS for | Opens for these commands | What it is / what it is not |", "|---|---|---|---|---|"]
+    for e in own:
+        cmds = ", ".join(f"`{c}`" for c, a in {**APP_FOR_COMMAND, **BOOTSTRAP}.items() if a == e.name) or "-"
+        asks = ", ".join(f"`service:{g}`" for g in e.services) + (" + `system`" if getattr(e, "system", False) else "")
+        lines.append(f"| `{e.name}` | {e.title} | {asks or '-'} | {cmds} | {e.note.replace('|', '/')} |")
     return "\n".join(lines) + "\n"
 
 

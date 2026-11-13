@@ -66,6 +66,34 @@ class AppStore:
     def install(self, src: Path, authority: Authority) -> Manifest:
         return self._install(src, authority, update=False)
 
+    def install_bundle(self, srcs: list, authority: Authority, label: str) -> list[Manifest]:
+        """Install several apps under ONE password (action ``app.install.all``) - for the OS's own apps, which
+        are seventeen files that are installed together or not at all. Every file is checked and scanned
+        *before* the password is asked; one flagged file quarantines itself and stops the whole bundle."""
+        apps = [KApp.from_file(Path(p)) for p in srcs]
+        if len({a.manifest.name for a in apps}) != len(apps):
+            raise KAppError("the bundle names the same app twice")
+        for a in apps:
+            result = scan_bytes(a.data, label=a.manifest.name)
+            if not result.clean:
+                self.paths.ensure()
+                qdir = self.paths.state / "quarantine"
+                qdir.mkdir(parents=True, exist_ok=True)
+                import time
+                qpath = qdir / f"{a.manifest.name}-{int(time.time())}.kapp"
+                atomic_write(qpath, a.data)
+                raise VirusFoundError(a.manifest.name, result, qpath)
+        with authority.authorize("app.install.all", label) as grant:
+            seals = [compute_seal(grant.key(SEAL_KEY_LABEL), a.manifest.name, a.manifest.version, a.sha256) for a in apps]
+        self.paths.ensure()
+        for a, seal in zip(apps, seals):
+            kapp_path, seal_path = self._files(a.manifest.name)
+            atomic_write(kapp_path, a.data)
+            atomic_write(seal_path, json.dumps({
+                "format": 1, "name": a.manifest.name, "version": a.manifest.version,
+                "sha256": a.sha256, "seal": seal}, indent=2).encode())
+        return [a.manifest for a in apps]
+
     def update(self, src: Path, authority: Authority) -> tuple[str, Manifest]:
         """Replace an installed app with a newer version of the same app.
 

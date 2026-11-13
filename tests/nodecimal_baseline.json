@@ -9,7 +9,6 @@
  "kos/cache.py": 3,
  "kos/cells.py": 5,
  "kos/cli.py": 18,
- "kos/coderun.py": 4,
  "kos/debconv.py": 1,
  "kos/debshim.py": 2,
  "kos/extensions.py": 1,
