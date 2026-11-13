@@ -54,6 +54,11 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    mouse, keyboard, display, desktop background, taskbar parts, settings, status
    views, each tool. A function with no screen is its own program (`kos pack`,
    one `.kapp` per program).
+   - **`apps/` is where the OS's functions live: one folder per function, each
+     folder one app.** An app's code is in its own folder and nowhere else: no app
+     code in a shared folder, no logic shared between apps by importing it. An app
+     imports only `kos.sdk` from the OS; `tests/test_apps_folder.py` fails on
+     anything else.
    - Before adding a screen, mode or setting to an app, make a new app.
    - Separate apps never call each other: share through `owns:`/`uses:` spaces
      and `kos grant`, not an app-to-app command (see the soft rule below).
@@ -124,8 +129,8 @@ hostile-input test.
 - [ ] New code uses whole numbers (`//`, no float); `tests/test_proof.py` ratchet passes.
       Anything new that can start code goes through `proof.require`.
 - [ ] New action is in `ACTIONS` and `authorize` runs first.
-- [ ] New function or new screen is its own app (rule 6), not a mode or page added
-      to an existing app. Anything an app needs from the OS is a validated
+- [ ] New function or new screen is its own folder under `apps/` (rule 6), with its own
+      code, not a mode or page added to an existing app. Anything an app needs from the OS is a validated
       `request`, and nothing in the app opens a device.
 - [ ] Anything new that connects, listens or fetches is blocked by default and
       logged; nothing opens a plain-text connection.

@@ -23,7 +23,7 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
-    kos desktop install             pack, scan, install + permit the taskbar and App Library
+    kos desktop install             pack, scan, install + permit the taskbar, App Library, mouse, keyboard, display, wallpaper
     kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
@@ -293,12 +293,18 @@ def cmd_run(args, paths: Paths) -> int:
         bridge = bridge_for(paths, name, app.manifest.permissions)
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
-                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name))
+                            bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            status_ok=_may_status(app.manifest.permissions))
     finally:
         if cache_dir is not None:
             cache.wipe(cache_dir)
     print(f"{name} exited ({code})")
     return code
+
+
+def _may_status(permissions) -> bool:
+    """May this app ask the OS how its mouse, keyboard and screen stand? From the verified manifest."""
+    return "system" in permissions or "ask:status" in permissions
 
 
 def _bridge_for(paths: Paths, name: str, permissions):
@@ -358,7 +364,8 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
-                        extensions=_extensions_for(paths, inst.name), **session_kwargs)
+                        extensions=_extensions_for(paths, inst.name),
+                        status_ok=inst.system or _may_status(perms), **session_kwargs)
 
 
 def cmd_attach(args, paths: Paths) -> int:
@@ -433,14 +440,15 @@ def cmd_desktop(args, paths: Paths) -> int:
     desktop is made of. Same gates as any other app: each install is scanned
     first and asks for the password; permitting asks once more."""
     import tempfile
-    from .desktop import SYSTEM_APPS
+    from .desktop import FUNCTION_APPS, SYSTEM_APPS
+    every = SYSTEM_APPS + FUNCTION_APPS
     from .permit import PermitStore
 
-    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "examples" / "system"
+    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "apps"
     authority, _ = _authority(paths)
     store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
     with tempfile.TemporaryDirectory() as tmp:
-        for name in SYSTEM_APPS:
+        for name in every:
             if name in have:
                 print(f"{name}: already installed")
                 continue
@@ -449,7 +457,7 @@ def cmd_desktop(args, paths: Paths) -> int:
             m = store.install(kapp, authority)
             print(f"installed {m.name} {m.version}")
     permits = PermitStore(paths)
-    need = [n for n in SYSTEM_APPS if not permits.is_permitted(n)]
+    need = [n for n in every if not permits.is_permitted(n)]
     if need:
         with authority.authorize("app.permit", " ".join(need)):
             for n in need:

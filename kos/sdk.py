@@ -221,6 +221,11 @@ class App:
                 return []
             self._queue.append(ev)
 
+    def request_status(self, topic: str) -> None:
+        """Ask how 'mouse', 'keyboard' or 'display' stands (needs 'ask:status'). The answer is an event:
+        {"cmd": "status", "topic": T, "ok": true, "fields": [[name, value], ...]} or a "result" refusal."""
+        self.send({"cmd": "request", "action": "status", "topic": topic})
+
     def request_backup(self) -> None:
         self.send({"cmd": "request", "action": "backup"})
 

@@ -114,7 +114,8 @@ class Session:
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
-                 outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None):
+                 outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
+                 status_ok: bool = False):
         self.name, self.mode = name, mode
         self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
         self.channel = channel
@@ -127,6 +128,7 @@ class Session:
         self.booted: set[str] = set()
         self.bridge = bridge
         self.vault = vault
+        self.status_ok = status_ok       # from the verified manifest ('ask:status' or 'system'), never the app
         self.right_click_to = right_click_to
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
@@ -287,7 +289,34 @@ class Session:
             reply["detail"] = str(e)[:200]
         self._send(reply)
 
+    def status_fields(self, topic: str) -> list:
+        """What the OS tells an app about one part of this session. Read-only, made here, never
+        taken from the app. Values are short plain text."""
+        backend = str(getattr(self.devices, "kind", "unknown"))
+        if topic == "mouse":
+            return [["state", "booted" if "mouse" in self.booted else "not booted"],
+                    ["backend", backend],
+                    ["right button", "App Library (the OS keeps it)" if self.right_click_to else "sent to the app"]]
+        if topic == "keyboard":
+            return [["state", "booted" if "keyboard" in self.booted else "not booted"],
+                    ["backend", backend],
+                    ["Ctrl-C", "always the OS's"]]
+        w, h = self.surface.hello_size()
+        return [["mode", self.mode], ["width", str(w)], ["height", str(h)],
+                ["surface", type(self.surface).__name__.lower()]]
+
+    def _on_status(self, msg: dict) -> None:
+        if not self.status_ok:
+            self._send({"cmd": "result", "action": "status", "ok": False,
+                        "detail": "this app does not have the 'ask:status' or 'system' permission"})
+            return
+        self._send({"cmd": "status", "topic": msg["topic"], "ok": True,
+                    "fields": self.status_fields(msg["topic"])})
+
     def _on_request(self, msg: dict) -> None:
+        if msg["action"] == "status":
+            self._on_status(msg)
+            return
         if self.bridge is None:
             self._send({"cmd": "result", "action": msg["action"], "ok": False,
                         "detail": "this app does not have the 'system' permission"})

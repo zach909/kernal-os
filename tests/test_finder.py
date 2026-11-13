@@ -221,7 +221,7 @@ def _load(path, name):
 class TestAppLibrarySearch(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.lib = _load("examples/system/app-library/app.py", "lib_search")
+        cls.lib = _load("apps/app-library/app.py", "lib_search")
 
     def state(self, installed=None, query=""):
         apps = installed if installed is not None else [

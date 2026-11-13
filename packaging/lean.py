@@ -2,8 +2,8 @@
 
 Three cuts, none of which changes what the code does:
 
-1. Only the OS core ships: ``bin/kos``, ``bin/run``, ``kos/*.py`` and ``examples/system`` (the two
-   system apps ``kos desktop install`` packs). The productivity suite (``kos/office``), the apps in
+1. Only the OS core ships: ``bin/kos``, ``bin/run``, ``kos/*.py`` and ``apps/`` (the apps
+   ``kos desktop install`` packs: one folder per function of the OS). The productivity suite (``kos/office``), the apps in
    ``examples/``, the tests, the docs and the image-building scripts are separate; everything else is
    an app you install, which is the point.
 2. Docstrings and comments are removed from the shipped Python (``strip_source``). Nothing in KOS
@@ -21,7 +21,7 @@ from __future__ import annotations
 import ast
 
 LEAN_FILES_TOP = ("bin/kos", "bin/run")
-LEAN_PREFIXES = ("examples/system/",)
+LEAN_PREFIXES = ("apps/",)
 
 
 def in_lean(path: str) -> bool:

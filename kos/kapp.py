@@ -54,7 +54,7 @@ PERMISSIONS = {"network", "system", "storage", "ai"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
-ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove")
+ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "status")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
