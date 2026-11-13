@@ -176,6 +176,14 @@ class AppStore:
             raise TamperedError("grant does not cover describing apps")
         return self._read_sealed(name, grant.key(SEAL_KEY_LABEL)).manifest
 
+    def verified_help(self, name: str, grant: Grant):
+        """``(manifest, help)`` of an installed app, same seal check and same ``skill.make``
+        grant as ``verified_manifest``. ``help`` is the validated ``help.json`` or ``None``."""
+        if grant.action != "skill.make":
+            raise TamperedError("grant does not cover describing apps")
+        app = self._read_sealed(name, grant.key(SEAL_KEY_LABEL))
+        return app.manifest, app.help
+
     def _read_sealed(self, name: str, key: bytes) -> KApp:
         kapp_path, seal_path = self._files(name)
         try:

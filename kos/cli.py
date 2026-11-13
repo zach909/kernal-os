@@ -1044,6 +1044,7 @@ def cmd_backup(args, paths: Paths) -> int:
     """Deduplicated backups. Every action asks for the password; a restore is a
     guarded write (admin keyboard, scan, optimize) and asks again for that."""
     from . import backup
+    from .summary import SummaryStore
     authority, prompter = _authority(paths)
     action = args.bkact or "list"
     if action == "add":
@@ -1060,6 +1061,9 @@ def cmd_backup(args, paths: Paths) -> int:
         items, stats = backup.snapshot(paths, authority)
         for it in items:
             print(f"  {it.id}  {it.size:>10,}  {it.sha256[:12]}  {it.path}")
+            note = SummaryStore(paths).get(it.sha256)
+            if note:
+                print(f"      {note}")
         print(stats.summary())
         return 0
     if action == "remove":
@@ -1173,9 +1177,10 @@ def cmd_skills(args, paths: Paths) -> int:
     --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
     from .skillmaker import collect_apps, command_inventory, make_skills
     authority, prompter = _authority(paths)
-    manifests, skipped = collect_apps(paths, authority)
+    helps: dict = {}
+    manifests, skipped = collect_apps(paths, authority, helps)
     prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
     for line in skipped + refused:
         print(line, file=sys.stderr)
     if not args.out:
