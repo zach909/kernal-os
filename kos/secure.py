@@ -184,7 +184,7 @@ def _permissions(paths: Paths) -> list[Check]:
                             f"approved before permissions were recorded, so an update could add network "
                             f"or system access unasked: {_names(unpinned)} (re-approve: kos permit NAME)"))
     permitted = sorted(g["app"] for g in grants if g["resource"] == "run" and g["app"] in installed)
-    wide: dict[str, list[str]] = {"network": [], "system": []}
+    wide: dict[str, list[str]] = {"network": [], "system": [], "cookies": [], "passwords": []}
     for name in permitted:
         for perm in _manifest_permissions(paths, name) & set(wide):
             wide[perm].append(name)
@@ -194,6 +194,10 @@ def _permissions(paths: Paths) -> list[Check]:
             summary += f"; can use the network: {_names(wide['network'])}"
         if wide["system"]:
             summary += f"; can open/close other apps: {_names(wide['system'])}"
+        if wide["cookies"]:
+            summary += f"; can keep cookies: {_names(wide['cookies'])}"
+        if wide["passwords"]:
+            summary += f"; can keep saved passwords: {_names(wide['passwords'])}"
         checks.append(Check(PASS, "permissions", summary))
     return checks
 

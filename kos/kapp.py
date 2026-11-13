@@ -35,21 +35,29 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import servicespec
+
 MANIFEST = "manifest.json"
 MAX_ARCHIVE = 512 << 20
 MAX_ENTRIES = 4096
 MAX_UNCOMPRESSED = 1 << 30
 MAX_RATIO = 200
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")   # \Z, not $: "$" lets a trailing newline through
-# A program's id is its folder path under the app, joined with dots: ``backup.add`` is the program
-# in ``apps/backup/add/``. A plain app name can never contain a dot, so a program id can never
-# collide with, or pass for, an ordinary app. The id is identity only: it confers no authority.
-MAX_DEPTH = 4
-ID_PATTERN = r"[a-z][a-z0-9-]{0,31}(?:\.[a-z][a-z0-9-]{0,31}){0,%d}" % (MAX_DEPTH - 1)
-ID_RE = re.compile(rf"^{ID_PATTERN}\Z")
+# An id is the path of groups down to the app, joined with dots: ``backup.add`` is the app
+# ``add`` in the group ``backup``. Groups nest as deep as you like - there is no level limit. The
+# only bound is the id's total length (it becomes a file name, ``<id>.kapp``, and an instance
+# id adds 7 more characters). A plain app name can never contain a dot, so a grouped app can
+# never collide with, or pass for, an ordinary app. The id is identity only: it confers no authority.
+MAX_ID_LEN = 200
+ID_PATTERN = r"[a-z][a-z0-9-]{0,31}(?:\.[a-z][a-z0-9-]{0,31})*"
+ID_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN}}}\Z){ID_PATTERN}\Z")      # length first: no regex work on a huge string
+INSTANCE_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN + 7}}}\Z){ID_PATTERN}-[0-9a-f]{{6}}\Z")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
+# ``cookies`` and ``passwords`` each unlock one separate, OS-owned store (see vault.py / spaces.py).
+# They are not part of ``storage``: an app that keeps notes cannot read a cookie jar or saved logins.
+PERMISSIONS = {"network", "system", "storage", "ai", "cookies", "passwords"}
 PERMISSIONS = {"network", "system", "storage", "ai"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
@@ -57,6 +65,7 @@ PERMISSIONS = {"network", "system", "storage", "ai"}
 ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
+SERVICE_PERM_RE = re.compile(r"^service:([a-z]+)$")      # ask the OS for one group of functions (servicespec.py)
 _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions", "description",
                   "kind", "extends"}
 
@@ -154,6 +163,13 @@ class Manifest:
             raise KAppError(f"modes must be a non-empty subset of {sorted(MODES)}")
         perms = tuple(d.get("permissions", []))
         for perm in perms:
+            m = SERVICE_PERM_RE.match(str(perm))
+            if m and m.group(1) not in servicespec.GROUPS:
+                raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
+            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)) and not m:
+                raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
+                                "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
+                                "or 'service:GROUP' (ask the OS for a group of functions)")
             if perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)):
                 continue
             if isinstance(perm, str) and perm.startswith(ASK_PREFIX) and perm[len(ASK_PREFIX):] in ASK_ACTIONS:
@@ -185,6 +201,10 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
+                # The power to open and close apps, or to ask the OS for its own state, must never
+                # ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
             for power in ("system", "ai"):
                 # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
                 if power in perms:
@@ -341,20 +361,25 @@ def compute_seal(key: bytes, name: str, version: str, sha256_hex: str) -> str:
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-# --- apps made of programs -------------------------------------------------------------------
+# --- groups of apps -------------------------------------------------------------------------
 #
-#   apps/backup/               the app: a folder with NO manifest, so it has no permissions
-#       list/manifest.json     a program: its own KOS requirements, its own permissions
-#       add/manifest.json      another program: asks for different things
-#       remove/
-#           manifest.json
-#           confirm/manifest.json   a program of a program: backup.remove.confirm
+#   apps/docs/                    a GROUP: a folder with no manifest. No code, no permissions.
+#       spell.py                  an APP: one file ...
+#       spell.json                ... and its manifest, which is where that file's permissions are asked for
+#       editor/                   a group inside the group - groups nest with no level limit
+#           format.py
+#           format.json           the app ``docs.editor.format``
+#       old-style/manifest.json   a folder app (several files) is still an app; it is a leaf, not a group
 #
-# Every folder with a manifest.json is packed into its own .kapp, without the folders of its
-# own sub-programs. Nothing is inherited down the tree or up it: a program holds exactly the
-# permissions its own manifest asks for, and each is approved (``kos permit``) on its own.
+# Every page is an app. A group only holds apps and other groups, so it has nothing to grant a
+# permission to; an app's permissions are asked for in its own manifest, approved on that one file
+# (``kos permit``, pinned to the file's hash) and never inherited, up or down the tree.
+#
+# A single-file app ships as its own ``.kapp``: ``NAME.py`` becomes ``app.py`` and ``NAME.json``
+# becomes ``manifest.json``, so the manifest's entry must be ``app`` or ``app:FUNCTION``.
 
 _GROUP_OK_FILES = ("README", "README.md", "README.txt")
+FILE_ENTRY = "app"
 
 
 def _walk_dirs(d: Path) -> list[Path]:
@@ -362,15 +387,33 @@ def _walk_dirs(d: Path) -> list[Path]:
                   if c.is_dir() and not c.is_symlink() and c.name != "__pycache__" and not c.name.startswith("."))
 
 
-def has_program_below(d: Path) -> bool:
-    return any((c / MANIFEST).is_file() or has_program_below(c) for c in _walk_dirs(d))
+def has_program_below(d: Path, pairs: bool = True) -> bool:
+    """Is there any app (a folder with a manifest, or a ``NAME.py``/``NAME.json`` pair) below ``d``?
+    With ``pairs=False`` only folders with a manifest count (inside a folder app a .py/.json pair is
+    just one of its own resource files). Walks with a stack, not recursion, so a hostile tree cannot overflow the interpreter."""
+    stack = [d]
+    while stack:
+        cur = stack.pop()
+        for c in cur.iterdir():
+            if c.is_symlink() or c.name.startswith("."):
+                continue
+            if c.is_dir():
+                if c.name == "__pycache__":
+                    continue
+                if (c / MANIFEST).is_file():
+                    return True
+                stack.append(c)
+            elif pairs and c.suffix == ".json" and c.name != MANIFEST and (cur / (c.stem + ".py")).is_file():
+                return True                       # a NAME.py / NAME.json pair
+    return False
 
 
 def find_programs(root: Path) -> list[tuple[str, Path]]:
-    """Every program under the app folder ``root`` as ``(id, folder)``, parents before children.
-    An id is the folder path joined with dots. Refuses a tree that cannot be one app: a folder
-    that has code but no manifest (an app has no permissions, so there is nowhere for its code
-    to run), an invalid or too deep name, or a symlink."""
+    """Every app under the group folder ``root`` as ``(id, path)``: ``path`` is the ``.py`` file of a
+    single-file app or the folder of a folder app. Parents before children, names in order.
+    Refuses a tree that cannot be a group: a group that holds code with no manifest (a group has no
+    permissions, so nowhere for code to run), a ``.py`` without its ``.json`` or the reverse, an app
+    and a group with the same name, an invalid or too long id, or a symlink."""
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise KAppError(f"{root} is not a directory")
@@ -378,46 +421,82 @@ def find_programs(root: Path) -> list[tuple[str, Path]]:
 
     def visit(d: Path, ident: str) -> None:
         if not ID_RE.match(ident):
-            raise KAppError(f"{ident!r} is not a valid program id (names are lowercase letters, digits and -, "
-                            f"at most {MAX_DEPTH} levels deep)")
-        has = (d / MANIFEST).is_file()
-        if has:
-            out.append((ident, d))
-        else:
-            stray = sorted(c.name for c in d.iterdir()
-                           if not c.is_dir() and c.name not in _GROUP_OK_FILES and not c.name.startswith("."))
-            if stray:
-                raise KAppError(f"{d} has no {MANIFEST}, so it is an app, not a program, and has no permissions "
-                                f"and cannot hold code: move {', '.join(stray)} into a program folder")
-            if not has_program_below(d):
-                return
-        for c in _walk_dirs(d):
-            if has and not (c / MANIFEST).is_file() and not has_program_below(c):
-                continue                        # plain resources of this program (assets/, data/ ...)
-            visit(c, f"{ident}.{c.name}")
+            raise KAppError(f"{ident!r} is not a valid id (names are lowercase letters, digits and -, "
+                            f"at most {MAX_ID_LEN} characters in all)")
+        if (d / MANIFEST).is_file():
+            if has_program_below(d, pairs=False):
+                raise KAppError(f"{d} is an app, and an app has no apps inside it: make {d.name}/ a group "
+                                f"(no {MANIFEST}) and put the apps in it")
+            out.append((ident, d))               # a folder app: a leaf, its own folder is all it owns
+            return
+        files = {c.name for c in d.iterdir() if not c.is_dir() and not c.name.startswith(".")}
+        pairs = sorted(n[:-3] for n in files if n.endswith(".py") and n[:-3] + ".json" in files)
+        paired = {f"{n}.py" for n in pairs} | {f"{n}.json" for n in pairs}
+        stray = sorted(files - paired - set(_GROUP_OK_FILES))
+        if stray:
+            raise KAppError(f"{d} is a group, not an app, so it has no permissions and cannot hold code: "
+                            f"{', '.join(stray)} must be an app (NAME.py with its NAME.json) or move out")
+        dirs = {c.name: c for c in _walk_dirs(d)}
+        for n in pairs:
+            if n in dirs:
+                raise KAppError(f"{d}: {n!r} is both an app ({n}.py) and a group ({n}/); an app has no apps inside it")
+            if not ID_RE.match(f"{ident}.{n}"):
+                raise KAppError(f"{ident}.{n!r} is not a valid id")
+            out.append((f"{ident}.{n}", d / f"{n}.py"))
+        for n, c in dirs.items():
+            if (c / MANIFEST).is_file() or has_program_below(c):
+                visit(c, f"{ident}.{n}")
 
     visit(root, root.name)
     return out
 
 
+def _pack_file_app(py: Path, out: Path) -> Manifest:
+    """One ``NAME.py`` and its ``NAME.json`` become one reproducible ``.kapp``."""
+    side = py.with_suffix(".json")
+    if py.is_symlink() or side.is_symlink():
+        raise KAppError(f"refusing to pack symlink {py}")
+    try:
+        raw, code = side.read_bytes()[:64 << 10], py.read_bytes()
+    except OSError as e:
+        raise KAppError(f"{py}: {e}") from None
+    m = Manifest.parse(raw)
+    if m.runtime != "python" or m.entry.split(":")[0] != FILE_ENTRY:
+        raise KAppError(f"{side}: a single-file app is python and its entry must be "
+                        f"'{FILE_ENTRY}' or '{FILE_ENTRY}:FUNCTION' (the file is packed as {FILE_ENTRY}.py)")
+    if m.kind != "app":
+        raise KAppError(f"{side}: only an ordinary app can be a single file inside a group")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, body in ((MANIFEST, raw), (f"{FILE_ENTRY}.py", code)):
+            zi = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = (stat.S_IFREG | 0o644) << 16
+            z.writestr(zi, body)
+    data = buf.getvalue()
+    KApp(data)                                   # validate exactly what we are about to ship
+    Path(out).write_bytes(data)
+    return m
+
+
 def pack_tree(root: Path, out_dir: Path) -> list[Manifest]:
-    """Pack every program under ``root`` into ``out_dir/<id>.kapp``. Each manifest's ``name`` must
-    be the id its folder gives it, so a program cannot take another program's (or app's) name."""
+    """Pack every app under the group ``root`` into ``out_dir/<id>.kapp``. Each manifest's ``name``
+    must be the id its place in the tree gives it, so an app cannot take another app's name."""
     root, out_dir = Path(root), Path(out_dir)
     programs = find_programs(root)
     if not programs:
-        raise KAppError(f"{root} holds no program (a folder with a {MANIFEST})")
-    folders = {d for _, d in programs}
-    for ident, d in programs:
+        raise KAppError(f"{root} holds no app (a NAME.py with its NAME.json, or a folder with a {MANIFEST})")
+    for ident, p in programs:
+        mf = p / MANIFEST if p.is_dir() else p.with_suffix(".json")
         try:
-            m = Manifest.parse((d / MANIFEST).read_bytes()[:64 << 10])
+            m = Manifest.parse(mf.read_bytes()[:64 << 10])
         except OSError as e:
-            raise KAppError(f"{d / MANIFEST}: {e}") from None
+            raise KAppError(f"{mf}: {e}") from None
         if m.name != ident:
-            raise KAppError(f"{d / MANIFEST} says name {m.name!r} but its folder makes it {ident!r}")
+            raise KAppError(f"{mf} says name {m.name!r} but its place in the tree makes it {ident!r}")
     out_dir.mkdir(parents=True, exist_ok=True)
     result = []
-    for ident, d in programs:
-        below = frozenset(c for c in folders if c != d and d in c.parents)
-        result.append(pack(d, out_dir / f"{ident}.kapp", skip_dirs=below))
+    for ident, p in programs:
+        dest = out_dir / f"{ident}.kapp"
+        result.append(pack(p, dest) if p.is_dir() else _pack_file_app(p, dest))
     return result
