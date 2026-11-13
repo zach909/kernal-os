@@ -83,7 +83,7 @@ Honest list, so nobody assumes these are covered:
 | Everything is an app | Asking for "everything an app" is **not** met: this change added the AI as an app (`examples/ai`) and the browser's `ask`, and made the core smaller to ship, but did not move any existing built-in out of the OS. `kos ai set|show|clear` is OS code (it holds the endpoint and key, which an app must never see). `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
 | Everything is an app | `kos convert` is built into the OS, not an app, and like `pack` it writes its output with a plain create rather than the guarded `file.write` path. Converted programs have no stdin, no network and no arguments yet, so only simple non-interactive programs are useful. `kos skills` is built into the OS, not an app (an app can't write files, and it needs the command list, which no `request` returns yet). With `--out`, every file is a separate guarded write, so it asks for the password once per file; the empty `kos-app-NAME/` directories are created without the guarded path. The line shell (`kos line`), `ls`/`cat`/`explore`, `scan`, `audit`, `activity`, `optimize` and `settle` are built into the OS, not apps. Only the taskbar and App Library are apps today. |
 | Modding layers | `kos/overlay.py` merges mod files over a base in an owner-chosen load order (see `docs/MODDING.md`). Nothing reads files through it yet, the CLI's base is empty because KOS has no core file set, and the writable `user` layer is memory only. Most of the wider "modding-centric OS" list (Wasm sandbox, hot-swap with state serialization, watchdog rollback, input hooks, driver processes) is **not built**; that doc says which items and why. |
-| Programs | `ask:ACTION` permissions only cover the four `request` actions that touch the backup vault and the app list (`apps`, `backup`, `backup_add`, `backup_remove`). `open`, `close` and `focus` stay inside `system`, which is still all-or-nothing (and all of them at once): a program that opens other apps holds the whole `system` permission. `network` is still one yes/no per program. Programs of one app get separate data folders and share only through `owns:`/`uses:` spaces, but nothing stops you permitting every program of an app, which gives that set of programs the union of their powers. The old single-app `examples/backup` (one program, `system`) still ships and is still the one the older tests cover. `kos install FOLDER` asks the password once per program. Only ordinary apps can be programs, not extensions or mods yet. Not tested: a graphical-mode run of the split backup programs (they have a text page only). |
+| Programs | `ask:ACTION` permissions only cover the four `request` actions that touch the backup vault and the app list (`apps`, `backup`, `backup_add`, `backup_remove`). `open`, `close` and `focus` stay inside `system`, which is still all-or-nothing (and all of them at once): a program that opens other apps holds the whole `system` permission. `network` is still one yes/no per program. Apps of one group get separate data folders and share only through `owns:`/`uses:` spaces, but nothing stops you permitting every app of a group, which gives that set of apps the union of their powers. Single-file apps are covered by packing, install and permit tests, but **no single-file app has been run in the real sandbox yet**, and a single-file app must be Python (`app` / `app:FUNCTION`). Permits are now pinned to the file's hash, so updating an app (new bytes) means `kos permit` again; permits made earlier have no pin and are unrestricted. The 200-character id limit is the only bound on group depth. The old single-app `examples/backup` (one program, `system`) still ships and is still the one the older tests cover. `kos install FOLDER` asks the password once per app. Only ordinary apps can live in a group, not extensions or mods yet. Nesting apps inside a folder app (the older `mail.compose.attach` layout) is now refused; use a group. Not tested: a graphical-mode run of the split backup programs (they have a text page only). |
 | Org blueprint | `docs/ORG_BLUEPRINT.md` maps the "organization-centric OS" blueprint to KOS. Only the parts that fit inside one sandboxed app exist: Semantic Graph and Rule Router (`kos/office/pack_org.py`). The semantic object kernel, graph file system, matrix workspaces, state snapshots, data bus, structured pipes, component apps and the kernel event router are **not built** (they need the kernel, a window manager or cross-app access). Both apps keep data in clear, bounded, and their hash chains are not signatures. |
 | Cookies and passwords | `cookies` and `passwords` are manifest permissions (`kos/kapp.py`). Each unlocks its own OS-kept store (`<state>/appdata/<app>/cookies/`, `.../passwords/`) through the `vault` command's `store` field (`secret_put/get/keys/delete` in the SDK). `storage` does not reach them and they do not reach `storage`; an app without the permission is refused and the refusal is logged, as is every use (the key name, never the value). `kos secure` lists which permitted apps hold them, and a manifest update that adds one is refused until you permit again. **Not covered:** values are stored **in clear** on the LUKS2 volume (the same gap as the vault): there is no password-sealed encryption, because KOS has no vetted authenticated cipher and adding one is the owner's decision. Reading them does not ask for the password (the run permit and the password at launch still apply). Nothing in the browser (`examples/web`) uses them yet, so there is no cookie handling or login filling. Not tested: a real sandboxed app using them. |
 | File summaries | Every user file has a text summary (`kos/summary.py`): vault and shared-folder items (a `.summaries/` folder beside them, rewritten on each put, removed on delete, created on first ask for older items), `kos write` (printed, stored by content hash under `<state>/summaries/`), and backed-up files (stored the same way, shown by `kos backup list`). File search indexes the summary and shows it first. The summary is the kind, size, shape and a quoted start ("PNG image, 64x48 pixels", "text drawing, 3 lines"): it does **not** describe what a picture shows, which would need a model. Text is summarised too, with no exemption; the quoted start is untrusted and cleaned. **Not covered:** apps cannot ask for a summary (no `vault` protocol op, so no new message to validate yet); files an app only ever saw through `kos ls`/`cat`/`explore`, or anything written outside these three paths (for example `kos convert`, `pack`, and the OS's own plain writes), get none; summaries of removed backups and overwritten `kos write` files are not pruned; a summary is only as old as the last write, so a file edited outside KOS is stale until it is written again. |
@@ -142,45 +142,45 @@ power on
 | Mod file overlay | `kos/overlay.py`, `kos overlay`: mods ship files under `overlay/`; the OS merges them over a read-only base at read time, last in the load order wins, `X.kos-delete` hides a file, writes are copy-on-write in memory, `core/` is protected. Order changes need the password (`overlay.order`). |
 | Extensions and mods, still apps | `kos/extensions.py`: two kinds of app, both ordinary sealed, scanned, permitted `.kapp`s. An **extension** adds to an ordinary app, like a browser extension (bookmarks for `web`). A **mod** modifies a system app (pins and a new accent for the taskbar, a shelf for the App Library). They are *data*, not code injected into another app: the host's zip and seal are never touched, and the OS hands the host the validated entries after `hello`. Nothing happens until you switch one on with `kos extend NAME` (password; a mod is a separate `app.mod` action); the switch pins the exact build you approved, so an updated or tampered add-on stops contributing until you approve it again. |
 | Every app action passes gui, app, kernel | `kos/layers.py`: opening, running, closing, switching to and extending an app all go through one door, `layers.traverse`, which sends the request through the **graphical button clicker** (is there a button for it?), then **app commands** (is it permitted?), then **kernel commands** (the password, the seal, the sandbox), in that order. A layer that says no stops the rest, so an unpermitted app is refused before any password is asked. Every layer's `pass` or `refused` is in `kos audit`. A test fails if any other code asks for the password to use an app. |
-| Apps made of programs | `kos/kapp.py` (`find_programs`, `pack_tree`), `apps/backup/`: an app is a folder with **no manifest**, so it has no permissions; each sub-folder with a `manifest.json` is a **program**, packed into its own `.kapp` with its own permissions, and programs nest (`mail.compose.attach`). A program's id is its folder path joined with dots (`backup.add`); a plain app name cannot contain a dot, so a program can never pass for another app. Nothing is inherited, up or down the tree, and each program is installed, permitted and sealed on its own. See [Apps made of programs](#apps-made-of-programs). |
+| Groups of apps | `kos/kapp.py` (`find_programs`, `pack_tree`), `kos/permit.py`, `apps/backup/`: **every page is an app, and an app is a file** (`NAME.py` with its `NAME.json`; a folder with a `manifest.json` is also still an app). A **group** is a folder with no manifest: it holds only apps and other groups, so it has no code and no permissions to give. Groups nest with **no level limit**; an app has no apps inside it. An app's id is the group path joined with dots (`docs.editor.format`). Permissions are asked for in the app's own manifest and approved on that one file: `kos permit` pins the permit to the file's sha256, so a different file under the same name needs a new permit. Nothing is inherited, up or down the tree. See [Groups of apps](#groups-of-apps). |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
 
-## Apps made of programs
+## Groups of apps
 
-An app can be split into tiny pieces so that no piece has complete control. The **app is a folder
-with no `manifest.json`**; every folder inside it that has one is a **program**, and the program,
-not the app, holds the permissions:
-
-```
-apps/backup/                    the app: no manifest, so no permissions; it cannot hold code
-    list/manifest.json          backup.list    permissions: ask:backup
-    add/manifest.json           backup.add     permissions: ask:backup_add
-    remove/manifest.json        backup.remove  permissions: ask:backup, ask:backup_remove
-        confirm/manifest.json   (a program of a program would be backup.remove.confirm)
-```
+Every page is an app, and an app is a file. Apps live in **groups**: folders that hold only apps
+and other groups. Permissions go to the file, never to a group:
 
 ```
-kos pack apps/backup -o dist/backup     # one .kapp per program; -o is a folder
-kos install dist/backup                 # every program, each with its own password
-kos permit backup.list                  # one program at a time
-kos permit backup                       # refused: "an app made of programs has no permission of its own"
-run backup.list                         # kos://backup.list opens it too (kos://backup/list is the app backup, path /list)
+apps/docs/                      a group: no manifest, no code, no permissions
+    spell.py + spell.json       the app docs.spell        (one file + its manifest)
+    editor/                     a group inside the group; groups nest as deep as you like
+        format.py + format.json     the app docs.editor.format
+apps/backup/list/manifest.json  a folder app (several files) is still an app: backup.list
 ```
 
-* **Where the requirements live:** a program's `manifest.json` (name, modes, permissions) sits in its own
-  folder. Its `name` must be exactly its folder path with dots (`apps/backup/add/` is `backup.add`), or
-  packing is refused, so a program cannot take another program's or app's name. Up to four levels.
-* **A program's zip holds only its own folder.** The folders of its sub-programs are left out. Plain
-  resource folders (`assets/`) stay in.
-* **Permissions are per program.** `kos permit` records what *that* program's manifest asked for; an
-  update that asks for more is refused until you permit again. Permitting one program permits no
-  other. Beyond `network` and the shared-folder permissions, a program may ask the OS for single
-  things with `ask:ACTION`: the OS gives it a bridge that answers only those and refuses the rest
-  (audited as `bridge.ask`) before any password prompt. `system` is every request and stays for apps
-  like the taskbar; an extension or a mod cannot hold `system` or any `ask:`.
-* **Programs do not share anything by name.** Each has its own cache, data and run folders
-  (`kos dirs backup.list`). They meet only in shared folders (`owns:` / `uses:`), which still need a
-  grant for each program.
+```
+kos pack apps/docs -o dist/docs         # one .kapp per app; -o is a folder
+kos install dist/docs                   # every app, each with its own password
+kos permit docs.editor.format           # one file at a time; `kos permit docs` is refused (a group)
+run docs.editor.format                  # kos://docs.editor.format opens it too
+```
+
+* **One file, one manifest.** `NAME.json` is an ordinary manifest (name, modes, permissions); its `name`
+  must be exactly the group path plus `NAME`, or packing is refused. The file is packed as `app.py`, so
+  the entry must be `app` or `app:FUNCTION`. A `.py` with no `.json`, a `.json` with no `.py`, or any
+  other loose file in a group is refused: code with no manifest would run with no permissions listed.
+* **An app has no apps inside it.** A folder with a `manifest.json` that holds another app is refused;
+  make it a group. A name cannot be both an app and a group.
+* **No depth limit.** The only bound is an id of at most 200 characters, because the id becomes the
+  file name `<id>.kapp`.
+* **Permissions belong to the file.** `kos permit` records what that file's manifest asked for and the
+  file's sha256. An update that asks for more, or a different file with the same name, is refused until you
+  permit again (permits made before pinning have no pin and are not restricted). Permitting one app
+  permits no other. Beyond `network` and the shared-folder permissions, an app may ask the OS for single
+  things with `ask:ACTION`; `system` is every request and stays for apps like the taskbar; an
+  extension or a mod cannot hold `system` or any `ask:`.
+* **Apps do not share anything by name.** Each has its own cache, data and run folders
+  (`kos dirs docs.spell`). They meet only in shared folders (`owns:` / `uses:`), each needing its own grant.
 
 ## Install as a Debian package
 
@@ -252,7 +252,7 @@ anything that needs two *people* or two *machines* to share live data - every ap
 ```
 kos setup                  choose your password
 kos install app.kapp       install (kept zipped, sealed); a folder installs every .kapp in it
-kos pack APPDIR -o FOLDER  an app made of programs: one .kapp per program (see below)
+kos pack GROUP -o FOLDER   a group of apps: one .kapp per app (see Groups of apps)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list
 run [graphical|cmd] NAME   run in the foreground: text page, graphical, or raw command stream

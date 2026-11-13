@@ -3,7 +3,7 @@
     kos setup                       choose your password (first boot)
     kos passwd                      change it (re-seals every installed app)
     kos pack DIR -o APP.kapp        build an app zip from a directory
-    kos pack APPDIR -o FOLDER       an app made of programs: one .kapp per program, each with only its own permissions
+    kos pack APPDIR -o FOLDER       a group of apps: one .kapp per app (NAME.py + NAME.json, or a folder with a manifest), each with only its own permissions
     kos install APP.kapp            install (the zip is stored as-is, sealed); a folder installs every .kapp in it
     kos update APP.kapp             update to a newer version (no downgrades)
     kos view FILE                   view a file (password first)
@@ -141,20 +141,20 @@ def cmd_passwd(args, paths: Paths) -> int:
 
 def cmd_pack(args, paths: Paths) -> int:
     src = Path(args.dir)
-    if (src / MANIFEST).is_file() and not has_program_below(src):
+    if (src / MANIFEST).is_file() and not has_program_below(src, pairs=False):
         m = pack(src, Path(args.output))
         print(f"packed {m.name} {m.version} -> {args.output}")
         return 0
-    # An app made of programs (a folder with no manifest, or a program with sub-programs):
-    # one .kapp per program in the folder OUTPUT, each with only its own permissions.
+    # A group of apps (a folder with no manifest): one .kapp per app in the folder OUTPUT, each with
+    # only its own permissions. A folder app with an app inside it is refused by pack_tree.
     out = Path(args.output)
     if out.suffix == ".kapp":
-        raise KAppError(f"{src} is made of programs: give -o a folder, one .kapp is written per program")
+        raise KAppError(f"{src} is a group of apps: give -o a folder, one .kapp is written per app")
     for m in pack_tree(src, out):
         perms = ", ".join(m.permissions) or "none"
         print(f"packed {m.name} {m.version} -> {out / (m.name + '.kapp')}   permissions: {perms}")
     if not (src / MANIFEST).is_file():
-        print(f"{src.name} itself is not a program and has no permissions; install and permit each program")
+        print(f"{src.name} is a group, not an app, and has no permissions; install and permit each app")
     return 0
 
 
@@ -223,7 +223,7 @@ def cmd_list(args, paths: Paths) -> int:
         row = kinds.get(a.name, {})
         tag = f"  [{row['kind']} of {row['extends']}]" if row.get("kind", "app") != "app" else ""
         if "." in a.name:       # a program: show what IT may do, which is all that matters
-            tag += f"  [program of {a.name.rpartition('.')[0]}; permissions: {', '.join(row.get('permissions', [])) or 'none'}]"
+            tag += f"  [in group {a.name.rpartition('.')[0]}; permissions: {', '.join(row.get('permissions', [])) or 'none'}]"
         print(f"{a.name:20} {a.version:10} sha256:{a.sha256[:16]}{tag}")
     return 0
 
@@ -676,14 +676,14 @@ def cmd_overlay(args, paths: Paths) -> int:
     except OverlayError as e:
         raise KAppError(str(e)) from None
 def _refuse_group(paths: Paths, name: str) -> None:
-    """An app made of programs has no permissions, so there is nothing to permit on it: say which
-    programs it is made of instead of failing with "no such file"."""
+    """A group of apps has no permissions, so there is nothing to permit on it: say which apps it
+    holds instead of failing with "no such file"."""
     if (paths.apps / f"{name}.kapp").exists():
         return
     parts = sorted(a.name for a in AppStore(paths).installed() if a.name.startswith(name + "."))
     if parts:
-        raise KAppError(f"{name} is an app made of programs and has no permission of its own. "
-                        f"Permit a program: {', '.join(parts)}")
+        raise KAppError(f"{name} is a group of apps and has no permission of its own. "
+                        f"Permit an app: {', '.join(parts)}")
 
 
 def cmd_permit(args, paths: Paths) -> int:
@@ -711,8 +711,9 @@ def cmd_permit(args, paths: Paths) -> int:
             PermitStore(paths).revoke(args.name)
             print(f"revoked: {args.name} may no longer run")
         else:
-            declared = KApp.from_file(paths.apps / f"{args.name}.kapp").manifest.permissions
-            PermitStore(paths).grant(args.name, declared)
+            app = KApp.from_file(paths.apps / f"{args.name}.kapp")
+            declared = app.manifest.permissions
+            PermitStore(paths).grant(args.name, declared, pin=app.sha256)
             print(f"permitted: {args.name} may now run (still asks for your password every time)")
             if declared:
                 print(f"  approved permissions: {', '.join(declared)}  (an update asking for more is refused until you permit again)")
@@ -1308,7 +1309,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
     s = sub.add_parser("passwd", help="change your password")
     s.add_argument("--fast-kdf", action="store_true", help=argparse.SUPPRESS)
-    s = sub.add_parser("pack", help="build a .kapp from a directory; an app made of programs: -o FOLDER gets one .kapp per program")
+    s = sub.add_parser("pack", help="build a .kapp from a directory; a group of apps: -o FOLDER gets one .kapp per app")
     s.add_argument("dir")
     s.add_argument("-o", "--output", required=True)
     s = sub.add_parser("install", help="install a .kapp, or every .kapp in a folder (each asks for the password)")
