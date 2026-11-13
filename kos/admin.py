@@ -362,9 +362,11 @@ class WriteReport:
     bytes_written: int
     scan: ScanResult
     optimize_summary: str
+    file_summary: str = ""
 
     def summary(self) -> str:
         return (f"wrote {self.bytes_written:,} bytes to {self.path}\n"
+                f"  file summary: {self.file_summary}\n"
                 f"  security scan: {self.scan.summary()}\n"
                 f"  disk optimize: {self.optimize_summary}")
 
@@ -431,7 +433,9 @@ def write_file(paths: Paths, authority: Authority, keyboard: AdminKeyboard, targ
                              optimize_once=optimize_once, audit=audit)
     if flagged is not None:
         raise WriteBlocked(flagged)
-    return WriteReport(str(final), len(data), scan_bytes(data), summary["opt"])
+    from .summary import SummaryStore
+    return WriteReport(str(final), len(data), scan_bytes(data), summary["opt"],
+                       SummaryStore(paths).put(final.name, data))
 
 
 def settle(paths: Paths, authority: Authority, *, scanner=scan_bytes,
