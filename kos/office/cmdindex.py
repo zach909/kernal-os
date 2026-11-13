@@ -9,6 +9,7 @@ COMMANDS = (
 # -- begin generated --
     ('activity', 'one feed: open apps + recent password decisions', 'kos activity [-h] [-n N]'),
     ('admin', 'the elevated administrator keyboard', 'kos admin [-h] [{status,boot,lock}]'),
+    ('ai', 'set up the AI connection: set, show, clear (password)', 'kos ai [-h] [--url URL] [--provider {openai,anthropic}] [--model MODEL] {set,show,clear}'),
     ('aios', 'AI OS: button clicker, app commands, kernel commands, skill maker', 'kos aios [-h] {status,gui,app,kernel,skill} [words ...]'),
     ('attach', 'attach your terminal to an open app', 'kos attach [-h] id'),
     ('audit', 'show the authorization log', 'kos audit [-h] [-n N] [--verify]'),
@@ -43,6 +44,7 @@ COMMANDS = (
     ('ps', "list apps opened with 'kos open'", 'kos ps [-h]'),
     ('remove', 'remove an app', 'kos remove [-h] name'),
     ('run', 'run an app: run [graphical|cmd] NAME', 'kos run [-h] [--cell CELL] target [target ...]'),
+    ('runtimes', 'the programming languages code runs in: list | add NAME PROGRAM | remove NAME', 'kos runtimes [-h] {list,add,remove} ...'),
     ('scan', 'scan a file/zip for known-bad patterns, or watch a directory', 'kos scan [-h] {file,watch} ...'),
     ('security', 'check everything KOS can verify about itself (no password, read-only)', 'kos security [-h]'),
     ('settle', 'do what is owed: security scan + disk optimize', 'kos settle [-h]'),

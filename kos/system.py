@@ -171,11 +171,13 @@ class SystemBridge:
     ``None`` means every action (the ``system`` permission). A request outside it is refused
     before anything happens - no password is asked - and goes in the audit log."""
 
-    def __init__(self, paths: Paths, spawner: Callable = spawn, *, app: str = "",
-                 permissions=None):
+    def __init__(self, paths: Paths, spawner: Callable = spawn, allowed: Optional[frozenset] = None,
+                 who: str = "", *, app: str = "", permissions=None):
         self.paths = paths
         self._spawner = spawner
-        self.app = app
+        self.allowed = allowed
+        self.who = who
+        self.app = app or who
         # None = the original behaviour (system actions only). The 'ai' permission is separate:
         # an app that may ask the AI gets no power to open, close or back up anything.
         self.permissions = frozenset(permissions) if permissions is not None else frozenset({"system"})
@@ -210,13 +212,6 @@ class SystemBridge:
     def _answer(self, ok: bool, lines: list, *, detail: str = "", model: str = "") -> None:
         self._reply({"cmd": "answer", "ok": ok, "lines": lines, "model": clean_text(model, 100),
                      "detail": clean_text(detail, 300)})
-    def __init__(self, paths: Paths, spawner: Callable = spawn, allowed: Optional[frozenset] = None,
-                 who: str = ""):
-        self.paths = paths
-        self._spawner = spawner
-        self.allowed = allowed
-        self.who = who
-
     def handle(self, req: dict, reply: Callable[[dict], None],
                authority: Authority) -> Optional[tuple[str, str]]:
         action = req["action"]

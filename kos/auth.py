@@ -68,6 +68,8 @@ ACTIONS: dict[str, str] = {
     "cell.stop": "stop kernel cell",
     "file.write": "write file",
     "code.run": "run code",
+    "runtime.add": "add a programming language to run code in",
+    "runtime.remove": "remove a programming language you added",
     "admin.boot": "boot the administrator keyboard",
     "backup.add": "back up",
     "backup.list": "list backups",
