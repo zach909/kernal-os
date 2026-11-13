@@ -11,9 +11,12 @@ private scratch directory is wiped when it ends.
 
 Each line is its own app: nothing carries over to the next line.
 
-Only Python has a sandboxed runtime here. A line in any other language is
-still a command - it is understood, scanned and logged - but there is no
-interpreter in the sandbox for it, so it reports that and does nothing.
+Python runs as an app (the host interpreter, isolated mode). Every other
+language is a row in ``runtimes.py``: its trusted interpreter is run directly
+under the very same sandbox, in a private scratch directory, with the same time
+limit and a cap on how much output it may produce. A language with no row, or
+whose program is missing or untrusted, is still understood, scanned and logged -
+it reports that and runs nothing.
 """
 
 from __future__ import annotations
@@ -22,23 +25,26 @@ import io
 import os
 import select
 import socket
+import subprocess
 import time
 import zipfile
 from pathlib import Path
 from typing import Callable
 
-from . import cache, loader
+from . import cache, loader, runtimes
 from .auth import Authority
 from .kapp import KApp
 from .paths import Paths
-from .protocol import Channel, ProtocolError, validate_app_message
+from .protocol import Channel, ProtocolError, escape_text, validate_app_message
 from .sandbox import SandboxPolicy
 from .scan import scan_bytes
 
 PYTHON_LIKE = {"python", "assignment", "code call", "comment"}
 MAX_LINE_CODE = 4000
+MAX_OUTPUT = 64 << 10           # bytes a foreign-language line may print before it is stopped
 NO_RUNTIME = 66
 TIMED_OUT = 124
+OUTPUT_LIMIT = 123
 
 _RUNNER = '''\
 import contextlib, io, traceback
@@ -82,15 +88,23 @@ def run_code(paths: Paths, get_authority: Callable[[], Authority], code: str, la
     if not result.clean:
         out(f"blocked by the security scan: {result.summary()}")
         return 3
-    runnable = language in PYTHON_LIKE
+    runnable = language in PYTHON_LIKE or runtimes.canonical(language) == "python"
     if runnable:
         try:
             compile(code, "<line>", "exec")
         except SyntaxError:
             runnable = False
     if not runnable:
-        out(f"understood as {language} code, but there is no sandboxed {language} runtime "
-            "here (only Python) - nothing was run.")
+        try:
+            rt = runtimes.find(paths, language) if runtimes.canonical(language) != "python" else None
+        except runtimes.LanguageError as e:
+            out(f"refused: {e}")
+            return NO_RUNTIME
+        if rt is not None:
+            return _run_foreign(paths, get_authority, rt, code, timeout, out)
+        have = ", ".join(runtimes.available(paths))
+        out(f"understood as {language} code, but there is no sandboxed {language} runtime here "
+            f"(available: {have}; see 'kos runtimes') - nothing was run.")
         return NO_RUNTIME
     label = code if len(code) <= 40 else code[:37] + "..."
     with get_authority().authorize("code.run", label) as _grant:
@@ -137,3 +151,75 @@ def run_code(paths: Paths, get_authority: Callable[[], Authority], code: str, la
         channel.close()
         cache.wipe(cache_dir)
     return code_out
+
+
+def _text(raw: bytes) -> str:
+    """Output of a program we do not trust: visible escapes for control and bidi characters,
+    so it cannot move the cursor, clear the screen or pass for the OS's own prompt."""
+    text = raw.decode("utf-8", "replace").replace("\t", "    ").replace("\r\n", "\n")
+    return "\n".join(escape_text(line, 2000) for line in text.split("\n"))
+
+
+def _run_foreign(paths: Paths, get_authority: Callable[[], Authority], rt: runtimes.Runtime,
+                 code: str, timeout: float, out: Callable[[str], None]) -> int:
+    """Run one line in another language: its trusted interpreter, directly, in the sandbox.
+    Same order as Python: scan (done by the caller), then the password, then launch."""
+    try:
+        argv = rt.argv(code)
+    except runtimes.LanguageError as e:
+        out(f"refused: {e}")
+        return NO_RUNTIME
+    label = code if len(code) <= 40 else code[:37] + "..."
+    with get_authority().authorize("code.run", f"{rt.name}: {label}") as _grant:
+        pass
+    paths.ensure()
+    cache_dir = cache.alloc(paths, "codeline")
+    policy = SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+    policy.read_paths = sorted({*policy.read_paths, *rt.read_paths})
+    policy.rw_dirs = [*policy.rw_dirs, str(cache_dir)]
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(cache_dir), "TMPDIR": str(cache_dir),
+           **dict(rt.env)}
+    reader, writer = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            argv, executable=rt.exe, env=env, stdin=subprocess.DEVNULL, stdout=writer, stderr=writer,
+            cwd=str(cache_dir), start_new_session=True, close_fds=True, preexec_fn=policy.preexec())
+    except BaseException:
+        os.close(reader)
+        cache.wipe(cache_dir)
+        raise
+    finally:
+        os.close(writer)
+    status, buf, deadline = None, bytearray(), time.monotonic() + timeout
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                out(f"stopped: ran longer than {timeout:.0f}s")
+                status = TIMED_OUT
+                break
+            ready, _, _ = select.select([reader], [], [], min(left, 0.25))
+            if not ready and proc.poll() is not None:
+                break                              # done, and nothing left to read
+            if ready:
+                chunk = os.read(reader, 65536)
+                if not chunk:                      # every writer closed: the program is done
+                    break
+                buf += chunk
+                if len(buf) > MAX_OUTPUT:
+                    del buf[MAX_OUTPUT:]
+                    out(f"stopped: printed more than {MAX_OUTPUT >> 10} KiB")
+                    status = OUTPUT_LIMIT
+                    break
+    finally:
+        try:
+            os.killpg(proc.pid, 9)                # also anything it started
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+        os.close(reader)
+        cache.wipe(cache_dir)
+    text = _text(bytes(buf)).rstrip("\n")
+    if text:
+        out(text)
+    return proc.returncode if status is None else status

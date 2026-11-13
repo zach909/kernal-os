@@ -7,16 +7,16 @@ from kos.sdk import App
 def human(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
-            return f"{n:,.0f} {unit}" if unit == "B" else f"{n:,.1f} {unit}"
-        n /= 1024
+            return f"{n:,} {unit}"
+        n //= 1024      # whole numbers only: sizes are shown rounded down
 
 
 def ratio_line(stats):
     if not stats or not stats["logical"]:
         return "nothing backed up yet"
-    pct = 100 * stats["saved"] / stats["logical"]
+    pct = 100 * stats["saved"] // stats["logical"]
     return (f"{stats['items']} item(s), {stats['unique']} unique - "
-            f"{human(stats['logical'])} backed up, {human(stats['stored'])} stored, {pct:.0f}% saved")
+            f"{human(stats['logical'])} backed up, {human(stats['stored'])} stored, {pct}% saved")
 
 
 def lines(state, height):

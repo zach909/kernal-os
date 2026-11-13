@@ -45,6 +45,11 @@
     kos backup [list]               what is backed up and how much deduplication saved (password)
     kos backup restore ID DIR       put one item back in DIR; guarded write, never overwrites
     kos backup remove ID            forget one item (its body goes when nothing else uses it)
+    kos backup link APP URL         back up an app as its https address + SHA-256, not its bytes (password)
+    kos backup links                the linked apps and the space saved
+    kos backup fetch APP            download a linked app, verify the hash, scan, install (password)
+    kos backup unlink APP           forget a link
+    kos folders [create]            the standard data folders; create makes them (password)
     kos do WORDS...                 one line of human language, run as one command
     kos line [--explain]            the line shell: every line you type is a command
 """
@@ -69,6 +74,7 @@ from .paths import Paths
 from .permit import PermitError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
+from .runtimes import LanguageError
 from .sandbox import SandboxError, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
 from .system import SystemBridge, bridge_for, close_instance, open_background
@@ -1079,7 +1085,67 @@ def cmd_backup(args, paths: Paths) -> int:
                 devices.close()
         print(f"restored {item.id} -> {report.summary()}")
         return 0
+    if action in ("link", "links", "unlink", "fetch"):
+        return _cmd_applinks(args, paths, authority, action)
     raise KAppError(f"unknown backup action {action!r}")
+
+
+def _cmd_applinks(args, paths: Paths, authority, action: str) -> int:
+    """Apps backed up as an address and a hash. Fetching only downloads and verifies; the install
+    that follows scans the app and asks for the password again."""
+    import tempfile
+    from . import applinks
+    if action == "link":
+        link = applinks.add(paths, authority, args.app, args.url)
+        print(f"linked {link.name} {link.version} -> {link.url}")
+        print(f"  pinned sha256 {link.sha256[:16]}...; {link.size:,} bytes are not stored")
+        return 0
+    if action == "links":
+        links = applinks.snapshot(paths, authority)
+        for l in links:
+            print(f"  {l.name:20} {l.version:10} {l.sha256[:12]}  {l.size:>12,}  {l.url}")
+        print(applinks.stats(links))
+        return 0
+    if action == "unlink":
+        link = applinks.remove(paths, authority, args.app)
+        print(f"forgot the link for {link.name} (the installed app is untouched)")
+        return 0
+    link, data = applinks.fetch(paths, authority, args.app)
+    print(f"downloaded {link.name} {link.version} from {link.host}: sha256 matches")
+    paths.ensure()
+    with tempfile.TemporaryDirectory(dir=paths.state) as tmp:
+        src = Path(tmp) / f"{link.name}.kapp"
+        src.write_bytes(data)
+        store = AppStore(paths)
+        if any(a.name == link.name for a in store.installed()):
+            raise KAppError(f"{link.name} is already installed; remove it first (kos remove {link.name})")
+        m = store.install(src, authority)
+    print(f"installed {m.name} {m.version} - kept zipped, sealed")
+    return 0
+
+
+def cmd_folders(args, paths: Paths) -> int:
+    """The standard data folders: one permissioned shared folder per kind of data."""
+    from . import folders
+    if args.folders_cmd == "create":
+        authority, _ = _authority(paths)
+        created, kept = folders.create(paths, authority)
+        print(f"created {len(created)} folder(s); {len(kept)} already there")
+        for n in created:
+            print(f"  + {n}")
+        return 0
+    state = {s.folder.name: s for s in folders.status(paths)}
+    for key, title in folders.GROUPS.items():
+        print(f"{title}:")
+        for f in (f for f in folders.FOLDERS if f.group == key):
+            s = state[f.name]
+            who = ", ".join(f"{a}({lv})" for a, lv in s.access) or "nobody"
+            mark = "sensitive" if f.sensitive else ""
+            print(f"  {f.name:18} {'made' if s.exists else 'not made':9} owner {s.owner or '-':8} "
+                  f"items {s.items:<4} access: {who:24} {mark}")
+    if not any(s.exists for s in state.values()):
+        print("none made yet: kos folders create")
+    return 0
 def cmd_convert(args, paths: Paths) -> int:
     """Convert a Debian .deb into a .kapp. The package is analysed and scanned
     first (a bad or unconvertible one is refused before any password prompt);
@@ -1181,6 +1247,29 @@ def cmd_exec(args, paths: Paths) -> int:
     finally:
         for prompter in opened:
             prompter.close()
+
+
+def cmd_runtimes(args, paths: Paths) -> int:
+    """`kos runtimes` lists the languages code can run in; `add` and `remove` change that list.
+    All three need the password: a language is a program the OS will start for you."""
+    from . import runtimes
+    if args.rt_cmd == "add":
+        name, real, rargs = runtimes.prepare_add(args.name, args.program, args.arg or runtimes.DEFAULT_ARGS)
+        authority, _ = _authority(paths)
+        with authority.authorize("runtime.add", f"{name}: {real}"):
+            digest = runtimes.add(paths, name, real, rargs)
+        print(f"added {name}: {real} (pinned sha256 {digest[:16]}...)")
+        return 0
+    authority, _ = _authority(paths)
+    if args.rt_cmd == "remove":
+        with authority.authorize("runtime.remove", args.name):
+            ok = runtimes.remove(paths, args.name)
+        print(f"removed {args.name}" if ok else f"{args.name} was not added by you")
+        return 0 if ok else 1
+    authority.authorize("state.view", "languages").close()
+    for name, program, state in runtimes.describe(paths):
+        print(f"{name:12} {state:28} {program}")
+    return 0
 
 
 def cmd_line(args, paths: Paths) -> int:
@@ -1330,6 +1419,16 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("dest")
     b = bs.add_parser("remove", help="forget one item")
     b.add_argument("id")
+    b = bs.add_parser("link", help="back up an installed app as its https address + SHA-256 (not its bytes)")
+    b.add_argument("app")
+    b.add_argument("url")
+    bs.add_parser("links", help="the linked apps and the space saved")
+    b = bs.add_parser("unlink", help="forget an app link")
+    b.add_argument("app")
+    b = bs.add_parser("fetch", help="download a linked app, verify its hash, scan and install it")
+    b.add_argument("app")
+    s = sub.add_parser("folders", help="the standard data folders (create makes them; password)")
+    s.add_argument("folders_cmd", nargs="?", choices=["list", "create"], default="list")
     s = sub.add_parser("convert", help="convert a Debian .deb package into a .kapp (static programs only)")
     s.add_argument("file", help="the .deb to convert")
     s.add_argument("-o", "--output", required=True, help="the .kapp to create (must not exist)")
@@ -1342,6 +1441,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("exec", help="run one line of code as a sandboxed command")
     s.add_argument("--lang", default="python")
     s.add_argument("--code", required=True)
+    s = sub.add_parser("runtimes", help="the programming languages code runs in: list | add NAME PROGRAM | remove NAME")
+    rs = s.add_subparsers(dest="rt_cmd")
+    rs.add_parser("list", help="every language and whether it is ready")
+    r = rs.add_parser("add", help="add a language: a trusted program that takes code after a flag (password)")
+    r.add_argument("name")
+    r.add_argument("program", help="absolute path of the interpreter")
+    r.add_argument("--arg", action="append", help="one argument, repeatable; {code} is the line (default: -e {code})")
+    r = rs.add_parser("remove", help="remove a language you added (password)")
+    r.add_argument("name")
     s = sub.add_parser("usb", help="boot KOS from a USB stick: list | check IMG | write IMG /dev/sdX | test IMG")
     us = s.add_subparsers(dest="usb_cmd", required=True)
     u = us.add_parser("list", help="USB disks it would be willing to write")
@@ -1381,7 +1489,7 @@ COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install
             "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
             "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
             "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
+            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
             "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
             "ai": cmd_ai}
 COMMANDS = {
@@ -1392,8 +1500,11 @@ COMMANDS = {
     "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
     "doctor": cmd_doctor, "firmware": cmd_firmware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
     "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
+    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
+    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
+    "runtimes": cmd_runtimes}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1408,7 +1519,7 @@ def main(argv: list[str] | None = None) -> int:
         eprint(f"denied: {e}")
         return 2
     except (KAppError, SandboxError, CellError, RegistryError, VFSError, NoTTY, BackupError,
-            AIError, OSError) as e:
+            AIError, LanguageError, OSError) as e:
         eprint(f"error: {e}")
         return 1
     except KeyboardInterrupt:

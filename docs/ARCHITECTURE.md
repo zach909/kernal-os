@@ -80,8 +80,11 @@ Every line is a command. Human language becomes one structured argv for
 nothing to attach to. Code is a command too (`kos exec`), but is never run on
 the host: it is scanned, needs `code.run` (the password), and runs as an
 in-memory one-shot `.kapp` under the normal sandbox with a timeout and a
-wiped cache dir. Only Python has a runtime in the sandbox; other languages
-report that and run nothing. Everything the shell can start still passes
+wiped cache dir. Python is the fast path. Other languages are rows in
+`kos/runtimes.py` (trusted interpreter + one argv template; custom ones are
+added with `kos runtimes add`, password, SHA-256 pinned); they run directly
+under the same `SandboxPolicy` with a scratch dir, timeout and output cap.
+A language with no row reports that and runs nothing. Everything the shell can start still passes
 through the same `Authority.authorize` gates.
 
 ## Requires (`kos/requires.py`)
