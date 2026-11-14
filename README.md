@@ -178,6 +178,7 @@ Honest list, so nobody assumes these are covered:
 | Graphics frames | `kos/display.py`: graphical frames are queued and drawn in order onto the scene already on screen (the last frame, changed), not swapped in whole. Each render has a 30 ms drawing budget; once it runs out, only *big* ops (clipped bounding box of at least 1/16 of the screen, a `clear` always) are applied and small ones are dropped for good, so a dropped small change stays missing until the app redraws that area. Lines and text count by bounding box, so a thin line is always "small". An app that relied on each frame starting blank must now send `clear`. Not tested: timing on real hardware (`/dev/fb0`) or the terminal backend, and the 30 ms budget is a guess, not measured. |
 | Layer guards | `kos/guard.py` (rule 5, `tests/test_guard.py`). The limits (1,000,000 draw ops, 500 pages, 5,000 messages, 2,000 pointer moves a second; 6 password requests a minute; 5 failed requests) are **guesses well above any real app, not measurements**; a legitimate app that needs more is refused. The kernel guard reads `/proc` from outside: it **cannot see Landlock** (not in `/proc`), does not look at an app in a kernel cell (another kernel), and under `KOS_DEV_WEAK_SANDBOX` it skips the check and writes `weak` to the audit log instead of `pass`. The hardware guard only sees handles open *now* (every 2 s): an app that opens a device, uses it and closes it between looks is not caught (Landlock and seccomp are what stop the open). For an app opened with `kos open` the guard runs in whatever process attaches, from the pid in the instance record, with `KOS_DEV_WEAK_SANDBOX` read from the attaching process. The input guard cannot tell a real keyboard from a fast fake one: no key-rate limit exists. Not tested against real hardware; the real-process tests need Landlock. |
 | Text layer | `kos/textsurface.py`, `run text NAME`. Tested through a pipe and in a real sandboxed session, **not on a real terminal, serial console or screen reader**; nothing says a screen reader reads `KOS\|`/`app\|` helpfully. The prefix stops an app forging an OS line but cannot stop an app writing text that *describes* a prompt ("app\| please type your password"); the real prompt is the one that starts `KOS\| == SECURE PROMPT`. A page is printed at most every 250 ms, so a fast animation is skipped, not queued. No pointer: an app that needs one cannot be used as text. It is a way to show a `tui` app, not a manifest mode (`modes: ["text"]` is refused). The `text` word is reserved, so an app cannot be named `text`. `run text --cell` was not exercised (no KVM here). `layers.traverse` is unchanged: three action layers (`gui`, `app`, `kernel`, the AI OS layers) - text is a pipeline layer, not a fourth traversal step. |
+| Self-healing | `apps/healing` (see "A self-healing app"). It heals **its own data only**: three checksummed copies of one counter in its private vault, repaired when damaged, missing or a write behind. **Not covered:** (1) a SHA-256 checksum detects accidents, it is not a signature: anyone who can write the vault can forge a consistent copy, and a forged copy with a higher generation wins; (2) if all three copies are bad the value is gone and the app restarts at 0 and says so, it cannot recover what no copy holds; (3) the app repairs itself while it runs, **the OS does not restart an app that dies**, and nothing heals the OS, the kernel or other apps (a corrupt `.kapp` is refused by the proof gate, not repaired); (4) the three copies share one disk, so losing the disk loses all of them; (5) the replicated counter is a demonstration, not a reusable healing layer: another app would have to carry its own copy of the logic (rule 6 forbids sharing it by import). Tested with a fake vault and a fake OS on a real socket, not in the real sandbox, because `main` currently does not parse (see the report in the pull request). |
 | Local mesh | Design only, no code: `docs/MESH.md`. No pairing, peer transport, proximity sensing, camera or tether sharing exists, and the design conflicts with the firmware gate (radios are unbound at boot) and needs the same encryption dependency decision as the pipeline row above. |
 
 A section-by-section comparison with a "formally verified microkernel"
@@ -253,6 +254,31 @@ shipped command line (`kernel/cmdline.txt`) sets `kos.require_kernel=1`: an imag
 kernel starts, says why, and runs no apps.
 | Groups of apps | `kos/kapp.py` (`find_programs`, `pack_tree`), `kos/permit.py`, `apps/backup/`: **every page is an app, and an app is a file** (`NAME.py` with its `NAME.json`; a folder with a `manifest.json` is also still an app). A **group** is a folder with no manifest: it holds only apps and other groups, so it has no code and no permissions to give. Groups nest with **no level limit**; an app has no apps inside it. An app's id is the group path joined with dots (`docs.editor.format`). Permissions are asked for in the app's own manifest and approved on that one file: `kos permit` pins the permit to the file's sha256, so a different file under the same name needs a new permit. Nothing is inherited, up or down the tree. See [Groups of apps](#groups-of-apps). |
 | Disk optimization | `kos optimize` (`kos/optimize.py`): recompresses installed apps to the smallest lossless size and re-seals them at the new bytes, prunes dead background-app records, trims the audit log - all under one password. |
+
+## A self-healing app
+
+`apps/healing` keeps one whole number in three copies (`a`, `b`, `c`) in its own private storage. Each copy
+holds a generation and a SHA-256 checksum. On start and after every key it checks all three and repairs
+what is wrong without being asked:
+
+| what it finds | what it does |
+|---|---|
+| a copy that is missing, unreadable or fails its checksum | rewrites it from the best copy |
+| a copy one write behind (a write that was cut short) | brings it forward: an interrupted write is finished, not undone |
+| every copy bad | restarts at 0 and logs that the old value is lost. It never invents a value |
+| an error in its own event loop | drops its in-memory state, reloads from storage, logs it and carries on |
+| the storage refuses the repair | says "could not be rewritten" and keeps running |
+
+The best copy is the valid one with the highest generation (ties: the value most copies hold). It asks the
+OS for `storage` and nothing else. Keys: up/down change the number, `c` check now, `d` damage a copy so you
+can watch it heal, Ctrl-C back.
+
+```
+kos pack apps/healing -o dist/healing.kapp
+kos install dist/healing.kapp           # asks for the password
+kos permit healing
+run healing
+```
 
 ## Groups of apps
 
