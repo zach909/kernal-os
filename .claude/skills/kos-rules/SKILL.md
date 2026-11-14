@@ -5,9 +5,10 @@ description: The rules every change to kernal-os (KOS) must follow - everything 
 
 # KOS rules
 
-**This does:** sets the six rules every change to KOS must follow
+**This does:** sets the rules every change to KOS must follow
 (verification, everything is an app, everything is separate, connections blocked
-and encrypted, the pipeline encrypted, fractions not decimals, proofs).
+and encrypted, the pipeline encrypted, fractions not decimals, proofs, data
+encrypted at rest with an error on any break).
 
 **So the AI:** reads the README rules first, applies the checklist at the
 bottom to its change, runs the tests against a baseline, and reports what is
@@ -88,6 +89,24 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
 7. **Proofs for everything that can be proved.** Maths-shaped claims go in
    `kos/proofs.py` (Z3) with a negative control in `tests/test_proofs.py`.
    Everything else gets a test that tries to break it. Say which is which.
+8. **Data is encrypted where it sleeps; a broken defence yields only an error.**
+   Must hold with the device off, stolen, or the OS/sandbox/kernel broken.
+   - Everything KOS keeps (disk, vault, spaces, cookies, passwords, AI key, audit log,
+     backups, sync folders, swap, hibernation, crash dumps) is ciphertext when the device is
+     off, locked, or the key is absent. Authenticated encryption from the vetted
+     `cryptography` library only; never your own cipher, never decrypt-then-check.
+   - The key is never stored beside the data: a memory-hard derivation (scrypt/Argon2id) from
+     the password and/or a TPM/secure-element secret released only to an unchanged boot chain.
+     Never on disk in clear, never given to an app, in memory only while unlocked
+     (`SecretBytes`), zeroed on lock and shutdown.
+   - A wrong key, tampered or foreign data, a changed boot chain or missing hardware gives
+     ONE uniform error (same text, no partial plaintext, no hint which check failed), logged.
+     No fallback to plain, no recovery path that skips the key, no "continue anyway".
+   - Quantum-resistant: 256-bit symmetric keys; anything wrapped or exchanged uses the
+     X25519 + ML-KEM-768 hybrid (`kos/silent.py`). No RSA/EC-only wrapping, no 128-bit keys.
+   - Never claim more than it does: unlocked data is readable by whatever holds the key's
+     rights, a stolen or weak password is a stolen key. Today only the LUKS2 root volume is
+     encrypted at rest; the README gaps table row "Encrypted at rest" says the rest.
 
 ## Soft rules (a strong default, not a hard rule)
 
@@ -162,6 +181,10 @@ hostile-input test.
 - [ ] New function or new screen is its own folder under `apps/` (rule 6), with its own
       code, not a mode or page added to an existing app. Anything an app needs from the OS is a validated
       `request`, and nothing in the app opens a device.
+- [ ] Anything new that writes to disk (file, vault item, log, cache, dump) is encrypted at
+      rest under a key that is not stored beside it (rule 8), and a wrong key or tampered
+      data gives the one uniform error, with a test that opens it with the wrong key and
+      with a flipped byte. If it cannot be encrypted yet, it is a row in the gaps table.
 - [ ] Anything new that connects, listens or fetches is blocked by default and
       logged; nothing opens a plain-text connection.
 - [ ] New app-facing message has schema validation and a test that hostile
