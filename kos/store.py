@@ -61,7 +61,7 @@ class AppStore:
     def _files(self, name: str) -> tuple[Path, Path]:
         if not ID_RE.match(name):
             raise KAppError(f"invalid app name {name!r}")
-        return self.paths.apps / f"{name}.kapp", self.paths.apps / f"{name}.seal"
+        return self.paths.apps.joinpath(f"{name}.kapp"), self.paths.apps.joinpath(f"{name}.seal")
 
     def install(self, src: Path, authority: Authority) -> Manifest:
         return self._install(src, authority, update=False)
@@ -77,10 +77,10 @@ class AppStore:
             result = scan_bytes(a.data, label=a.manifest.name)
             if not result.clean:
                 self.paths.ensure()
-                qdir = self.paths.state / "quarantine"
+                qdir = self.paths.state.joinpath("quarantine")
                 qdir.mkdir(parents=True, exist_ok=True)
                 import time
-                qpath = qdir / f"{a.manifest.name}-{int(time.time())}.kapp"
+                qpath = qdir.joinpath(f"{a.manifest.name}-{int(time.time())}.kapp")
                 atomic_write(qpath, a.data)
                 raise VirusFoundError(a.manifest.name, result, qpath)
         with authority.authorize("app.install.all", label) as grant:
@@ -144,10 +144,10 @@ class AppStore:
         result = scan_bytes(app.data, label=m.name)
         if not result.clean:
             self.paths.ensure()
-            qdir = self.paths.state / "quarantine"
+            qdir = self.paths.state.joinpath("quarantine")
             qdir.mkdir(parents=True, exist_ok=True)
             import time
-            qpath = qdir / f"{m.name}-{int(time.time())}.kapp"
+            qpath = qdir.joinpath(f"{m.name}-{int(time.time())}.kapp")
             atomic_write(qpath, app.data)
             raise VirusFoundError(m.name, result, qpath)
         proof.require(app)       # no proof, no install - and before the password, like the scan

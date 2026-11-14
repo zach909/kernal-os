@@ -1,0 +1,13 @@
+{
+  "name": "sync.unshare",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:sync"
+  ],
+  "description": "Stops syncing a folder. Its files are left exactly as they are."
+}

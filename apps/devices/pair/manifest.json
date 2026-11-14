@@ -1,0 +1,13 @@
+{
+  "name": "devices.pair",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:link"
+  ],
+  "description": "Links another device: the same code on both screens, the password on both."
+}

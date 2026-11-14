@@ -63,6 +63,11 @@ STILL_THE_OS = {
     "aios": "the AI OS engine layers",
     "do": "interprets one line and runs it",
     "exec": "runs code as a sandboxed one-shot app",
+    "ai": "holds the AI endpoint and key, which an app must never see",
+    "folders": "creates the standard data folders and their permissions in the permission store",
+    "hardware": "maps the devices the kernel can see into the permission store",
+    "overlay": "sets the load order of mod file layers, a password-guarded change to the OS's own state",
+    "runtimes": "a language is a program the OS starts for you, so adding one is the OS's job",
     "backup": "a restore is a guarded write (administrator keyboard); the backup app covers list, add and remove",
 }
 

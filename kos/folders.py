@@ -119,7 +119,7 @@ def status(paths: Paths) -> list:
     out = []
     for f in FOLDERS:
         res = f"space:{f.name}"
-        d = paths.state / "spaces" / f.name
+        d = paths.state.joinpath("spaces", f.name)
         entries = perms.list(res)
         owner = next((e["app"] for e in entries if e["level"] == "own"), None)
         access = tuple((e["app"], e["level"]) for e in entries if e["level"] != "own")
@@ -143,7 +143,7 @@ def create(paths: Paths, authority: Authority) -> tuple[list, list]:
             if owner not in (None, OWNER):
                 kept.append(f.name)
                 continue
-            d = paths.state / "spaces" / f.name
+            d = paths.state.joinpath("spaces", f.name)
             existed = d.is_dir() and owner == OWNER
             d.mkdir(parents=True, exist_ok=True)
             os.chmod(d, 0o700)

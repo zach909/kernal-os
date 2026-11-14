@@ -75,7 +75,7 @@ def _mac(key: bytes, entries: list[Entry]) -> str:
 class FirewallStore:
     def __init__(self, paths: Paths):
         self.paths = paths
-        self.file = paths.state / "firewall" / "rules.json"
+        self.file = paths.state.joinpath("firewall", "rules.json")
 
     def load(self, key: bytes) -> tuple[list[Entry], str]:
         """(entries, state). state is 'ok', 'empty' or 'tampered'. A tampered file gives no
@@ -130,7 +130,7 @@ _APPS_LOG_MAX = 1 << 16
 
 
 def _remember(paths: Paths, app_id: int, name: str) -> None:
-    f = paths.state / "kernel" / "apps.log"
+    f = paths.state.joinpath("kernel", "apps.log")
     f.parent.mkdir(parents=True, exist_ok=True)
     try:
         if f.stat().st_size > _APPS_LOG_MAX:
@@ -148,7 +148,7 @@ def _remember(paths: Paths, app_id: int, name: str) -> None:
 def _names(paths: Paths) -> dict[int, str]:
     out = {}
     try:
-        for line in (paths.state / "kernel" / "apps.log").read_text().splitlines():
+        for line in (paths.state.joinpath("kernel", "apps.log")).read_text().splitlines():
             n, _, name = line.partition(" ")
             if n.isdigit() and NAME_RE.match(name):
                 out[int(n)] = name

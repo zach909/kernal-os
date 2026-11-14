@@ -69,7 +69,7 @@ class Link:
     url: str
     sha256: str
     size: int            # bytes of the app that are NOT stored because of this link
-    time: float
+    time: int            # whole seconds since the epoch
 
     def to_json(self) -> dict:
         return {"name": self.name, "version": self.version, "url": self.url,
@@ -79,7 +79,7 @@ class Link:
     def from_json(cls, d: dict) -> "Link":
         try:
             link = cls(str(d["name"]), str(d["version"]), str(d["url"]), str(d["sha256"]),
-                       int(d["size"]), float(d["time"]))
+                       int(d["size"]), int(d["time"]))
         except (KeyError, TypeError, ValueError):
             raise VaultTamperedError("app link index has a malformed entry") from None
         if not ID_RE.match(link.name) or len(link.sha256) != 64 \
@@ -113,7 +113,7 @@ def check_url(url) -> str:
 # --- the sealed index ------------------------------------------------------------------
 
 def _index_file(paths: Paths):
-    return paths.backup / "applinks.json"
+    return paths.backup.joinpath("applinks.json")
 
 
 def _canonical(links: list) -> bytes:
@@ -167,7 +167,7 @@ def add(paths: Paths, authority: Authority, name: str, url: str) -> Link:
         links = load_links(paths, grant)
         if len(links) >= MAX_LINKS and not any(l.name == name for l in links):
             raise AppLinkError(f"at most {MAX_LINKS} app links")
-        link = Link(name, app.version, url, app.sha256, size, time.time())
+        link = Link(name, app.version, url, app.sha256, size, int(time.time()))
         links = [l for l in links if l.name != name] + [link]      # one link per app: the newest wins
         _save_links(paths, grant, sorted(links, key=lambda l: l.name))
     return link

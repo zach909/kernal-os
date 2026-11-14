@@ -69,6 +69,11 @@ class Env(unittest.TestCase):
         self.prompter = ScriptedPrompter(answers)
         return Authority(self.paths, self.prompter, Throttle(self.paths, base=0))
 
+    def cli_pack(self, ns, *answers):
+        """`kos pack` needs the password (app.pack): answer it with a scripted prompter, not a terminal."""
+        with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(*(answers or (PW,))), None)):
+            return kcli.cmd_pack(ns, self.paths)
+
     def audit(self):
         return [(e["action"], e["target"], e["outcome"]) for e in AuditLog(self.paths).entries()]
 
@@ -190,14 +195,9 @@ class TestTreeLayout(Env):
         ms = {m.name: m for m in pack_tree(t, self.dist)}
         self.assertEqual(sorted(ms), ["mail.attach.inline", "mail.compose", "mail.read"])
         self.assertEqual(KApp.from_file(self.dist / "mail.compose.kapp").names(),
-                         ["app.py", "assets/icon.txt", "manifest.json"])
+                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
         # nothing is inherited: each app has its own permissions only
         self.assertEqual(ms["mail.attach.inline"].permissions, ("storage",))
-                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
-        self.assertEqual(KApp.from_file(self.dist / "mail.compose.attach.kapp").names(), ["app.py", "manifest.json", "proof.json"])
-        # nothing is inherited: the child has the child's permissions only
-        self.assertEqual(ms["mail.compose.attach"].permissions, ("storage",))
-        self.assertEqual(ms["mail.compose.attach.inline"].permissions, ())
         self.assertEqual(ms["mail.compose"].permissions, ("network",))
         self.assertEqual(ms["mail.read"].permissions, ())
 
@@ -263,7 +263,7 @@ class TestTreeLayout(Env):
         pack(one, self.root / "one.kapp")
         out = io.StringIO()
         with redirect_stdout(out):
-            kcli.cmd_pack(types.SimpleNamespace(dir=str(one), output=str(self.root / "one2.kapp")), self.paths)
+            self.cli_pack(types.SimpleNamespace(dir=str(one), output=str(self.root / "one2.kapp")))
         self.assertEqual((self.root / "one.kapp").read_bytes(), (self.root / "one2.kapp").read_bytes())
 
 
@@ -287,7 +287,7 @@ class TestFileApps(Env):
         self.assertEqual(ms["docs.spell"].permissions, ("storage",))
         self.assertEqual(ms["docs.editor.format"].permissions, ("network",))
         self.assertEqual(ms["docs.editor.plain"].permissions, ())
-        self.assertEqual(KApp.from_file(self.dist / "docs.spell.kapp").names(), ["app.py", "manifest.json"])
+        self.assertEqual(KApp.from_file(self.dist / "docs.spell.kapp").names(), ["app.py", "manifest.json", "proof.json"])
         for m in ms.values():
             self.assertTrue(scan_bytes((self.dist / f"{m.name}.kapp").read_bytes(), m.name).clean)
 
@@ -354,7 +354,7 @@ class TestFileApps(Env):
         page(g, "spell", "docs.spell")
         out = io.StringIO()
         with redirect_stdout(out):
-            kcli.cmd_pack(types.SimpleNamespace(dir=str(g), output=str(self.dist)), self.paths)
+            self.cli_pack(types.SimpleNamespace(dir=str(g), output=str(self.dist)))
         self.assertTrue((self.dist / "docs.spell.kapp").is_file())
         self.assertIn("docs is a group, not an app", out.getvalue())
 
@@ -412,15 +412,36 @@ class TestCommandLine(Env):
     def pack_and_install(self, *answers):
         out = io.StringIO()
         with redirect_stdout(out):
-            kcli.cmd_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.dist)), self.paths)
+            self.cli_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.dist)))
         self.assertIn("backup is a group, not an app, and has no permissions", out.getvalue())
         with mock.patch.object(kcli, "_authority", lambda paths: (self.authority(*answers), None)):
             with redirect_stdout(io.StringIO()):
                 kcli.cmd_install(types.SimpleNamespace(file=str(self.dist)), self.paths)
 
+    def test_pack_and_ls_need_the_password_and_refuse_without_it(self):
+        out = self.root / "refused.kapp"
+        one = self.root / "one"
+        program(one, "one", [])
+        for bad in ("no", "no", "no"):
+            with self.assertRaises(Exception):
+                self.cli_pack(types.SimpleNamespace(dir=str(one), output=str(out)), bad)
+        self.assertFalse(out.exists())                     # refused before anything was written
+        self.cli_pack(types.SimpleNamespace(dir=str(one), output=str(out)))
+        self.assertTrue(out.exists())
+        self.assertIn(("app.pack", str(one), "granted"), self.audit())
+        printed = io.StringIO()
+        with mock.patch.object(kcli, "_authority", lambda p: (self.authority("no", "no", "no"), None)), \
+                redirect_stdout(printed), self.assertRaises(Exception):
+            kcli.cmd_ls(types.SimpleNamespace(path=str(self.root)), self.paths)
+        self.assertEqual(printed.getvalue(), "")           # nothing listed without the password
+        with mock.patch.object(kcli, "_authority", lambda p: (self.authority(PW), None)), redirect_stdout(printed):
+            kcli.cmd_ls(types.SimpleNamespace(path=str(self.root)), self.paths)
+        self.assertIn("one/", printed.getvalue())
+        self.assertIn(("file.view", str(self.root), "granted"), self.audit())
+
     def test_pack_of_an_app_wants_a_folder_not_one_file(self):
         with self.assertRaises(KAppError):
-            kcli.cmd_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.root / "b.kapp")), self.paths)
+            self.cli_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.root / "b.kapp")))
 
     def test_installing_the_folder_installs_every_program_with_its_own_password(self):
         self.pack_and_install(PW, PW, PW)
@@ -534,7 +555,7 @@ class TestBridgeIsPerProgram(Env):
     def test_the_os_records_what_a_program_may_ask_when_it_opens_it(self):
         out = io.StringIO()
         with redirect_stdout(out):
-            kcli.cmd_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.dist)), self.paths)
+            self.cli_pack(types.SimpleNamespace(dir=str(BACKUP_TREE), output=str(self.dist)))
         store = AppStore(self.paths)
         for f in sorted(self.dist.glob("*.kapp")):
             store.install(f, self.authority(PW))

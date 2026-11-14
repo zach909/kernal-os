@@ -40,7 +40,7 @@ COMMANDS = (
     ('optimize', 'reclaim disk space: recompress apps, prune dead state', 'kos optimize [-h]'),
     ('overlay', 'mod file layers: order | show | conflicts', 'kos overlay [-h] {order,show,conflicts} ...'),
     ('owed', 'what earlier writes still owe (a scan, an optimize)', 'kos owed [-h]'),
-    ('pack', 'build a .kapp from a directory; an app made of programs: -o FOLDER gets one .kapp per program', 'kos pack [-h] -o OUTPUT dir'),
+    ('pack', 'build a .kapp from a directory; a group of apps: -o FOLDER gets one .kapp per app', 'kos pack [-h] -o OUTPUT dir'),
     ('passwd', 'change your password', 'kos passwd [-h]'),
     ('permit', 'give (or revoke) an app permission to run at all', 'kos permit [-h] [--revoke] [--list] [name]'),
     ('ps', "list apps opened with 'kos open'", 'kos ps [-h]'),

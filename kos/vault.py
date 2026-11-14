@@ -86,7 +86,7 @@ class Vault:
 
     def _summary_path(self, key: str) -> Path:
         self._path(key)                                   # same key check
-        return self.dir / ".summaries" / f"{key}.txt"
+        return self.dir.joinpath(".summaries", f"{key}.txt")
 
     def _write_summary(self, key: str, value: str) -> None:
         """Every item has a text summary next to it (see summary.py). It is a
