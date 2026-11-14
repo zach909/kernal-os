@@ -1,0 +1,13 @@
+{
+  "name": "devices.list",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:link"
+  ],
+  "description": "Shows this device and every device linked to it."
+}

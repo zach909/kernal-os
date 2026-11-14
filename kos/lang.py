@@ -340,6 +340,8 @@ _MODE_WORDS: dict[str, str] = {
     "gráfico": "graphical", "grafico": "graphical", "graphique": "graphical",
     "grafisch": "graphical", "графический": "graphical", "图形": "graphical",
     "圖形": "graphical", "グラフィカル": "graphical",
+    "text": "text", "texto": "text", "texte": "text", "текст": "text", "文本": "text",
+    "文字": "text", "テキスト": "text",
     "cmd": "cmd", "raw": "cmd",
 }
 
@@ -573,7 +575,7 @@ def interpret(line: str) -> Line:
         args = [a.lower() if _APP_WORD_RE.match(a) else a for a in args]
     if verb in ("run", "open"):
         mode = []
-        if args and _norm(args[0]) in _MODES:
+        if len(args) > 1 and _norm(args[0]) in _MODES:    # a lone word is the app's name, never a mode
             mode = [_MODES[_norm(args.pop(0))]]
         argv = [verb, *mode, *args]
     elif verb == "list":

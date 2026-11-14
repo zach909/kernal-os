@@ -10,10 +10,11 @@
     kos remove NAME
     kos list
     run NAME                        run the app as a text (TUI) page
+    run text NAME                   run it as plain text only: no colours, no cursor, no screen
     run graphical NAME              run the app's graphical version
     run cmd NAME                    run it with no drawing: raw command stream
-    run [graphical|cmd] NAME --cell C   run it inside kernel cell C
-    kos open [graphical|cmd] NAME   open an app in the background, return immediately
+    run [graphical|text|cmd] NAME --cell C   run it inside kernel cell C
+    kos open [graphical|text|cmd] NAME   open an app in the background, return immediately
     kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
     kos extend NAME                 switch an extension or mod on for the app it extends (password)
     kos extend --revoke NAME / --list
@@ -68,6 +69,7 @@ from . import loader
 from .admin import AdminError, WriteBlocked
 from .ai import AIError
 from .backup import BackupError, VaultTamperedError
+from .launchmap import APP_FOR_COMMAND
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
@@ -220,9 +222,9 @@ def cmd_list(args, paths: Paths) -> int:
 def _parse_run_target(words: list[str]) -> tuple[str, str]:
     if len(words) == 1:
         return "tui", words[0]
-    if len(words) == 2 and words[0] in ("graphical", "cmd"):
+    if len(words) == 2 and words[0] in ("graphical", "text", "cmd"):
         return words[0], words[1]
-    raise KAppError("usage: run [graphical|cmd] APP")
+    raise KAppError("usage: run [graphical|text|cmd] APP")
 
 
 def _address_and_mode(explicit: str | None, text: str):
@@ -282,6 +284,7 @@ def cmd_run(args, paths: Paths) -> int:
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
+                            allow_network=policy.allow_network,
                             status_ok=_may_status(app.manifest.permissions),
                             services=_services_for(paths, name, app.manifest.permissions))
     finally:
@@ -355,7 +358,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
     granted += (["admin"] if inst.admin else []) + (["ai"] if "ai" in perms else [])
     bridge = bridge_for(paths, inst.name, granted)
     return _run_session(inst.name, inst.mode, Channel(sock), None, authority, log,
-                        detach_on_interrupt=True, bridge=bridge,
+                        detach_on_interrupt=True, bridge=bridge, app_pid=inst.app_pid or None,
                         vault=_vault_for(paths, inst.name, perms),
                         extensions=_extensions_for(paths, inst.name),
                         status_ok=inst.system or _may_status(perms),
@@ -575,6 +578,7 @@ def _build_surface(mode, name, term):
     from .cmdsurface import CmdSurface
     from .devices import EvdevDevices, TerminalDevices
     from .display import FbdevBackend, GraphicalSurface, TerminalBackend
+    from .textsurface import TextSurface
     from .tui import TUISurface
 
     cols, rows = term.size()
@@ -584,6 +588,8 @@ def _build_surface(mode, name, term):
         return CmdSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if mode == "tui":
         return TUISurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
+    if mode == "text":
+        return TextSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if use_fb:
         backend = FbdevBackend(tty_fd=0)
         return (GraphicalSurface(backend, status_in_frame=True),
@@ -615,7 +621,7 @@ def _run_session(name, mode, channel, proc, authority, log, **session_kwargs) ->
     from .session import Session
     from .term import RawTerminal
 
-    with RawTerminal() as term:
+    with RawTerminal(plain=(mode == "text")) as term:     # the text layer never takes over the screen
         surface, devices = _build_surface(mode, name, term)
         try:
             return Session(name=name, mode=mode, channel=channel, proc=proc, surface=surface,
@@ -1190,42 +1196,6 @@ def cmd_convert(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_skills(args, paths: Paths) -> int:
-    """Make agent skills from the installed apps and the commands. One password
-    (``skill.make``) verifies every app's seal. Printing writes nothing; with
-    --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
-    from .skillmaker import collect_apps, command_inventory, make_skills
-    authority, prompter = _authority(paths)
-    helps: dict = {}
-    manifests, skipped = collect_apps(paths, authority, helps)
-    prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
-    for line in skipped + refused:
-        print(line, file=sys.stderr)
-    if not args.out:
-        for rel, text in files.items():
-            print(f"=== {rel}\n{text}")
-        return 0
-    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
-    out = Path(os.path.abspath(args.out))
-    if not out.is_dir() or out.is_symlink():
-        raise KAppError(f"{out} must be an existing directory (not a symlink)")
-    kb = AdminKeyboard(paths)
-    lease = kb.require_booted()          # refuse before any password prompt
-    devices = open_admin_devices(lease)
-    try:
-        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
-        wauth = Authority(paths, wprompter)
-        for rel, text in files.items():
-            target = out / rel
-            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
-            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
-    finally:
-        if devices is not None:
-            devices.close()
-    return 0
-
-
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -1340,11 +1310,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="remove an app")
     s.add_argument("name")
     sub.add_parser("list", help="list installed apps")
-    s = sub.add_parser("run", help="run an app: run [graphical|cmd] NAME")
+    s = sub.add_parser("run", help="run an app: run [graphical|text|cmd] NAME")
     s.add_argument("target", nargs="+")
     s.add_argument("--cell", help="run inside this kernel cell")
-    s = sub.add_parser("open", help="open an app in the background: open [graphical|cmd] NAME")
-    s.add_argument("mode", nargs="?", choices=["graphical", "cmd"], default=None)
+    s = sub.add_parser("open", help="open an app in the background: open [graphical|text|cmd] NAME")
+    s.add_argument("mode", nargs="?", choices=["graphical", "text", "cmd"], default=None)
     s.add_argument("name")
     s = sub.add_parser("go", help="open an address, like a browser's address bar: go kos://NAME[/path][?query]")
     s.add_argument("address")
@@ -1511,9 +1481,10 @@ def cmd_skills(args, paths: Paths) -> int:
         return _launcher("skills")(args, paths)
     from .skillmaker import collect_apps, command_inventory, make_skills
     authority, prompter = _authority(paths)
-    manifests, skipped = collect_apps(paths, authority)
+    helps: dict = {}
+    manifests, skipped = collect_apps(paths, authority, helps)
     prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
     for line in skipped + refused:
         print(line, file=sys.stderr)
     from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
@@ -1536,6 +1507,7 @@ def cmd_skills(args, paths: Paths) -> int:
     return 0
 
 
+
 def _launcher(command: str):
     """The command line's whole job for a command that is an app now: run that app (kos/launchmap.py).
     The app is installed with `kos desktop install`; until it is, say so instead of doing the work here."""
@@ -1556,6 +1528,8 @@ def _launcher(command: str):
     return go
 
 
+# Commands that are apps now (kos/launchmap.py) only open the app; `skills` and `scan` keep their own
+# function because `skills --out` and `scan watch` are guarded writes / a watcher the OS itself runs.
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
@@ -1568,6 +1542,12 @@ COMMANDS = {
     "skills": cmd_skills,
     **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
                                   "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
+    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
+    "boot": cmd_boot, "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
+    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai, "hardware": cmd_hardware,
+    "runtimes": cmd_runtimes, "scan": cmd_scan, "skills": cmd_skills,
+    **{c: _launcher(c) for c in APP_FOR_COMMAND if c not in ("scan", "skills")}}
 
 
 def main(argv: list[str] | None = None) -> int:

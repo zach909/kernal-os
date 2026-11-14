@@ -51,6 +51,12 @@ inject terminal escape sequences. `cmd` mode refuses `screen`/`frame` entirely.
 - Never trust an app-supplied string on screen; run it through `clean_text`.
 - Encryption: the frame channel is plain JSON today (see `kos-rules`).
 
+## The guard (`kos/guard.py`)
+
+`frame-budget`: more than 1,000,000 draw ops in a second (200 full frames) ends the app. It is checked
+in `Session.handle_app` after the frame is validated. A budget is a guess, not a measurement. The text
+layer (`kos-text`) sits just under this one: `text` mode never receives `frame`.
+
 ## Testing without hardware
 
 Use `HeadlessBackend` and `GraphicalSurface` (see `TestDisplayAndInput` in

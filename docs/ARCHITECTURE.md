@@ -362,3 +362,35 @@ KOS carries requests, NeuroClaw does the work and decides (no KOS password). `PO
 through its normal tool gate. Gap: the NeuroClaw engine is a separate process that must already be
 running (KOS does not start it, by the no-background-services rule), and if it has a password set the
 request is refused until the call is made from an admin session on this computer.
+
+## The pipeline's six layers and their guards
+
+Two different things are called layers here, and they are not the same list:
+
+* **Action layers** (`layers.py`, above): `gui`, `app`, `kernel`. Every *use of an app* passes through all three,
+  once, in that order. Unchanged.
+* **Pipeline layers** (`guard.PIPELINE`): the path data takes between the screen and the hardware, which every
+  *running session* is guarded on, continuously: **graphics, text, button clicker (input), app commands, kernel,
+  hardware**. The text layer (`textsurface.py`, `run text NAME`) was added between graphics and the button clicker.
+
+| layer | guard | where it runs | on a hit |
+|---|---|---|---|
+| graphics | `frame-budget` | `Session.handle_app`, after a `frame` validates | app ends (125) |
+| text | `page-budget` | `Session.handle_app`, after a `screen` validates (text and tui) | app ends |
+| input | `event-shape` | `Session.route`, before anything is forwarded | event dropped, audited (first 5) |
+| commands | `message-budget` | `Session.handle_app`, before validation | app ends |
+| commands | `prompt-budget`, `failed-requests` | `Session._on_request`, before the bridge | request answered "no", nobody is asked for a password |
+| kernel | `attest-process` | session start, then every 2 s: `/proc/PID` status and namespaces | app ends |
+| hardware | `no-device-handles` | the same look: `/proc/PID/fd` | app ends |
+
+Every refusal is `guard.LAYER.CHECK` `refused` in `kos audit` (the first five of a kind; the rest are counted in
+`Guard.stats`). The first successful kernel and hardware look is written as `pass`; under `KOS_DEV_WEAK_SANDBOX` the
+kernel look is skipped and written as `weak`.
+
+What each guard does not do is in the README gaps table ("Layer guards", "Text layer"). In short: the limits are
+guesses, not measurements; the kernel guard cannot see Landlock and skips cells; the hardware guard only sees handles
+open at the moment it looks; nothing here is encryption of the channels (see "Pipeline encrypted").
+
+**The text layer** prints a transcript: every OS line starts `KOS| `, every app line `app| ` (each wrapped piece too),
+anything unprintable becomes `?`, the password prompt is printed once and never echoed, and there is no pointer. An
+app with a `tui` mode runs as text unchanged (`kapp.supports_mode`) and is told `tui` (`kapp.wire_mode`).

@@ -43,6 +43,20 @@ MAX_ENTRIES = 4096
 MAX_UNCOMPRESSED = 1 << 30
 MAX_RATIO = 200
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")   # \Z, not $: "$" lets a trailing newline through
+# "text" is a way to *show* an app, not a kind of app: the non-graphical text layer (``textsurface.py``)
+# serves any app that has a ``tui`` mode, and the app is still told ``tui`` - it speaks ``screen``,
+# exactly as before. So a manifest can never declare "text" (MODES above) and nothing needs repacking.
+RUN_MODES = ("tui", "text", "graphical", "cmd")
+
+
+def supports_mode(modes, mode: str) -> bool:
+    """May an app whose manifest lists ``modes`` be run in ``mode``?"""
+    return mode in modes or (mode == "text" and "tui" in modes)
+
+
+def wire_mode(mode: str) -> str:
+    """The mode the *app* is told. The text layer is the OS's business; the app just sees tui."""
+    return "tui" if mode == "text" else mode
 # An id is the path of groups down to the app, joined with dots: ``backup.add`` is the app
 # ``add`` in the group ``backup``. Groups nest as deep as you like - there is no level limit. The
 # only bound is the id's total length (it becomes a file name, ``<id>.kapp``, and an instance
@@ -52,7 +66,7 @@ MAX_ID_LEN = 200
 ID_PATTERN = r"[a-z][a-z0-9-]{0,31}(?:\.[a-z][a-z0-9-]{0,31})*"
 ID_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN}}}\Z){ID_PATTERN}\Z")      # length first: no regex work on a huge string
 INSTANCE_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN + 7}}}\Z){ID_PATTERN}-[0-9a-f]{{6}}\Z")
-RESERVED_NAMES = {"graphical", "kos", "system", "all"}
+RESERVED_NAMES = {"graphical", "text", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
 MODES = {"tui", "graphical", "cmd"}
 # ``admin`` lets a program ask the OS for the administrator keyboard's one job, the guarded file
@@ -65,6 +79,7 @@ PERMISSIONS = {"network", "system", "storage", "ai", "admin", "cookies", "passwo
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
 ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "kernel", "status")
+ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "status", "kernel")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 SERVICE_PERM_RE = re.compile(r"^service:([a-z]+)$")      # ask the OS for one group of functions (servicespec.py)
@@ -169,6 +184,7 @@ class Manifest:
             if m and m.group(1) not in servicespec.GROUPS:
                 raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
             if perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)) or m:
+            if m or perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)):
                 continue
             if isinstance(perm, str) and perm.startswith(ASK_PREFIX) and perm[len(ASK_PREFIX):] in ASK_ACTIONS:
                 continue
@@ -208,6 +224,13 @@ class Manifest:
             for power in ("ai", "admin"):
                 # The power to send text to a model, or to write files as the administrator, must
                 # never ride in on an add-on.
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
+                # The power to open and close apps, or to ask the OS for its own state, must never
+                # ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
+            for power in ("system", "ai", "admin"):
+                # The power to open and close apps, to send text to a model, or to write files as the
+                # administrator must never ride in on an add-on.
                 if power in perms:
                     raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],

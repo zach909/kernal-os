@@ -1,0 +1,13 @@
+{
+  "name": "devices.unlink",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:link"
+  ],
+  "description": "Unlinks a device. Works with the other device switched off."
+}
