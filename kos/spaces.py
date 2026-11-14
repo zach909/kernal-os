@@ -75,7 +75,7 @@ class AppStorage:
                                    f"(owner of this device: kos grant {self.app} {res} --level {need})")
         else:
             raise StorageError(f"the manifest does not declare owns:{space} or uses:{space}")
-        return Vault(self.paths, directory=self.paths.state / "spaces" / space)
+        return Vault(self.paths, directory=self.paths.state.joinpath("spaces", space))
 
     def visible_spaces(self) -> list:
         """Spaces this app could open right now (for the 'look for contacts' step)."""

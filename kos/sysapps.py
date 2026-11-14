@@ -42,11 +42,11 @@ def source(e) -> str:
 
 def build_one(e, out: Path) -> Path:
     with tempfile.TemporaryDirectory() as td:
-        d = Path(td) / e.name
+        d = Path(td).joinpath(e.name)
         d.mkdir()
-        (d / "manifest.json").write_text(json.dumps(manifest(e), indent=2))
-        (d / "app.py").write_text(source(e))
-        target = out / f"{e.name}.kapp"
+        (d.joinpath("manifest.json")).write_text(json.dumps(manifest(e), indent=2))
+        (d.joinpath("app.py")).write_text(source(e))
+        target = out.joinpath(f"{e.name}.kapp")
         pack(d, target)
     return target
 

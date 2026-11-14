@@ -75,7 +75,7 @@ def scrub(v: Any, limit: int = MAX_STR) -> Any:
         return {escape_text(str(k), 100): scrub(x, limit) for k, x in v.items()}
     if isinstance(v, (list, tuple)):
         return [scrub(x, limit) for x in v]
-    if isinstance(v, (bool, int, float)) or v is None:
+    if isinstance(v, (bool, int)) or v is None:     # a decimal is not data the OS hands out: it becomes text below
         return v
     return escape_text(str(v), limit)
 
@@ -321,7 +321,7 @@ def _pkg_permit(ctx: Ctx, name: str, revoke: bool) -> dict:
         if revoke:
             PermitStore(ctx.paths).revoke(name)
             return {"name": name, "permitted": False}
-        declared = KApp.from_file(ctx.paths.apps / f"{name}.kapp").manifest.permissions
+        declared = KApp.from_file(ctx.paths.apps.joinpath(f"{name}.kapp")).manifest.permissions
         PermitStore(ctx.paths).grant(name, declared)
     return {"name": name, "permitted": True, "approved_permissions": list(declared)}
 

@@ -31,7 +31,7 @@ from kos.system import SystemBridge, bridge_for, open_background  # noqa: E402
 
 PW = "correct horse battery"
 ROOT = Path(__file__).resolve().parent.parent
-KERNEL_APP = ROOT / "examples" / "system" / "kernel"
+KERNEL_APP = ROOT / "apps" / "kernel"
 ADMIN_APP = ROOT / "examples" / "admin-write"
 WEAK = {"KOS_DEV_ADMIN_WEAK": "1"}      # this container has no keyboard to take exclusively
 

@@ -831,12 +831,14 @@ class TestHostileInput(Env):
             self.assertNotIn("\x1b", text, label)
             self.assertIn("\\x1b[2J", text, label)
 
+        import types
+        from kos.activity import build_feed, render_feed
         for label, call in (
                 ("kos ls", lambda: kcli.cmd_ls(types.SimpleNamespace(path=str(d / "evil.zip")), self.paths)),
                 ("kos audit", lambda: kcli.cmd_audit(types.SimpleNamespace(n=10, verify=False), self.paths)),
                 ("kos activity", lambda: print(render_feed(build_feed(self.paths))))):
             out = io.StringIO()
-            with contextlib.redirect_stdout(out), \
+            with _contextlib.redirect_stdout(out), \
                     _mock.patch.object(kcli, "_authority", lambda p: (self.authority(PW), None)):
                 call()
             self.assertNotIn("\x1b", out.getvalue(), label)
@@ -2709,8 +2711,12 @@ class TestDebConvert(Env):
         r = service_call(self, "packages.convert", args)               # no answers: it must not even ask
         self.assertFalse(r["ok"])
         self.assertIn("already exists", r["detail"])
-        m = AppStore(self.paths).install(out, self.authority(PW))      # install scans, asks, seals
-        self.assertEqual(m.name, "hello")
+        # A converted program holds a compiled binary. Nothing can prove it, so it is refused at
+        # install, before any password: "if it is not proven, it does not run".
+        with self.assertRaises(ProofError):
+            AppStore(self.paths).install(out, self.authority(PW))
+        self.assertEqual(AppStore(self.paths).installed(), [])
+        out.unlink()                                                   # the command line starts from nothing
         args = kcli.build_parser().parse_args(["convert", str(src), "-o", str(out)])
         orig = kcli._authority
         try:
@@ -3813,7 +3819,7 @@ class TestRealBrokerCarriesTheAddress(Env):
 class TestStateNeedsThePassword(Env):
     """Rule 1: looking at what is installed, open, logged or owed is an action too."""
 
-    COMMANDS = (["list"], ["ps"], ["activity"], ["audit"], ["owed"], ["cell", "list"])
+    COMMANDS = (["list"], ["ps"])       # audit, activity, owed and cell list are apps now: see test_system_apps
 
     def run_cli(self, argv, *typed):
         out, err = io.StringIO(), io.StringIO()
@@ -3839,5 +3845,5 @@ class TestStateNeedsThePassword(Env):
                       [(e["action"], e["outcome"]) for e in Authority(self.paths, None).audit.entries()])
 
     def test_cancelling_the_prompt_shows_nothing(self):
-        code, out, _ = self.run_cli(["audit"], None)
+        code, out, _ = self.run_cli(["list"], None)
         self.assertEqual((code, out), (2, ""))
