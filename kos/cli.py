@@ -144,6 +144,8 @@ def cmd_passwd(args, paths: Paths) -> int:
 
 
 def cmd_pack(args, paths: Paths) -> int:
+    authority, _ = _authority(paths)
+    authority.authorize("app.pack", os.path.abspath(args.dir)).close()
     src = Path(args.dir)
     if (src / MANIFEST).is_file() and not has_program_below(src, pairs=False):
         m = pack(src, Path(args.output))
@@ -439,7 +441,6 @@ def cmd_desktop(args, paths: Paths) -> int:
     from .desktop import FUNCTION_APPS, SYSTEM_APPS
     every = SYSTEM_APPS + FUNCTION_APPS
     from . import sysapps
-    from .desktop import SYSTEM_APPS
     from .permit import PermitStore
 
     src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "apps"
@@ -460,8 +461,7 @@ def cmd_desktop(args, paths: Paths) -> int:
             ms = store.install_bundle(files, authority, f"{len(files)} apps")
             print(f"installed {len(ms)} of the OS's own apps: {', '.join(m.name for m in ms)}")
     permits = PermitStore(paths)
-    need = [n for n in every if not permits.is_permitted(n)]
-    names = [*SYSTEM_APPS, *(e.name for e in sysapps.entries())]
+    names = [*every, *(e.name for e in sysapps.entries())]
     need = [n for n in names if not permits.is_permitted(n)]
     if need:
         with authority.authorize("app.permit", f"{len(need)} apps"):
@@ -497,6 +497,8 @@ def _resolve_mixed(path: str):
 
 def cmd_ls(args, paths: Paths) -> int:
     from .protocol import escape_text
+    authority, _ = _authority(paths)
+    authority.authorize("file.view", os.path.abspath(args.path)).close()
     vfs, last = _resolve_mixed(args.path)
     vfs.cd(last)
     for e in vfs.list():
@@ -1531,6 +1533,15 @@ def _launcher(command: str):
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
+    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot,
+    "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
+    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
+    "overlay": cmd_overlay, "hardware": cmd_hardware, "runtimes": cmd_runtimes, "folders": cmd_folders, "ai": cmd_ai,
+    # the commands that are apps now: the command line only opens the app
+    "skills": cmd_skills,
+    **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
+                                  "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
     "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
     "boot": cmd_boot, "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
     "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,

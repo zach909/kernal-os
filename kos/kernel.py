@@ -119,12 +119,12 @@ class Kernel:
 
     # ---- what kernel is this ----
     def present(self) -> bool:
-        return (self.sfs / "status").is_file()
+        return (self.sfs.joinpath("status")).is_file()
 
     def status(self) -> dict:
         """The module's own status file: {'core': 'claimed'|'unclaimed', 'rules': N, ...}."""
         try:
-            text = (self.sfs / "status").read_text()
+            text = (self.sfs.joinpath("status")).read_text()
         except OSError as e:
             raise KernelError(f"the KOS kernel module is not there: {e.strerror}") from None
         out = {}
@@ -181,7 +181,7 @@ class Kernel:
         if not line.isascii() or len(line) > 150:
             raise KernelError("rule line is not plain text")
         try:
-            fd = os.open(self.sfs / "rules", os.O_WRONLY | os.O_CLOEXEC)
+            fd = os.open(self.sfs.joinpath("rules"), os.O_WRONLY | os.O_CLOEXEC)
         except OSError as e:
             raise KernelError(f"cannot open the rule table: {e.strerror}") from None
         try:
@@ -206,7 +206,7 @@ class Kernel:
 
     def rules(self) -> list[Rule]:
         try:
-            text = (self.sfs / "rules").read_text()
+            text = (self.sfs.joinpath("rules")).read_text()
         except OSError as e:
             raise KernelError(f"cannot read the rule table: {e.strerror}") from None
         out = []
@@ -221,7 +221,7 @@ class Kernel:
         """(lines, dropped): everything the kernel logged since the last drain, and how many
         lines it had to overwrite before anyone read them. Core only."""
         try:
-            fd = os.open(self.sfs / "log", os.O_RDONLY | os.O_CLOEXEC)
+            fd = os.open(self.sfs.joinpath("log"), os.O_RDONLY | os.O_CLOEXEC)
         except OSError as e:
             raise KernelError(f"cannot open the kernel log: {e.strerror}") from None
         lines: list[LogLine] = []
@@ -254,7 +254,7 @@ class AppIds:
     would hand a new app the firewall rules of an old one."""
 
     def __init__(self, state: Path):
-        self.file = Path(state) / "kernel" / "next-app-id"
+        self.file = Path(state).joinpath("kernel", "next-app-id")
 
     def next(self) -> int:
         self.file.parent.mkdir(parents=True, exist_ok=True)

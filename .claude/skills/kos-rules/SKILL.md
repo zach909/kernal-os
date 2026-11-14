@@ -6,11 +6,8 @@ description: The rules every change to kernal-os (KOS) must follow - everything 
 # KOS rules
 
 **This does:** sets the six rules every change to KOS must follow
-**This does:** sets the rules every change to KOS must follow
 (verification, everything is an app, everything is separate, connections blocked
-and encrypted, the pipeline encrypted).
-(verification, everything is an app, connections blocked and encrypted, the
-pipeline encrypted, fractions not decimals, proofs).
+and encrypted, the pipeline encrypted, fractions not decimals, proofs).
 
 **So the AI:** reads the README rules first, applies the checklist at the
 bottom to its change, runs the tests against a baseline, and reports what is

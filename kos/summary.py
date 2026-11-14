@@ -70,7 +70,8 @@ def _looks_like_drawing(text: str) -> bool:
         return False
     art = sum(1 for c in chars if c in _DRAWING_CHARS)
     letters = sum(1 for c in chars if c.isalnum())
-    return art / len(chars) >= 0.6 and letters / len(chars) < 0.3
+    # art/n >= 6/10 and letters/n < 3/10, in whole numbers
+    return art * 10 >= len(chars) * 6 and letters * 10 < len(chars) * 3
 
 
 def _text_summary(name: str, text: str, total: int) -> str:
@@ -145,20 +146,20 @@ class SummaryStore:
     and cannot describe the wrong content."""
 
     def __init__(self, paths: Paths):
-        self.dir = paths.state / "summaries"
+        self.dir = paths.state.joinpath("summaries")
 
     def put(self, name: str, data: bytes) -> str:
         digest = hashlib.sha256(data).hexdigest()
         text = summarize(name, data)
         self.dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.dir, 0o700)
-        atomic_write(self.dir / f"{digest}.txt", (text + "\n").encode("utf-8"))
+        atomic_write(self.dir.joinpath(f"{digest}.txt"), (text + "\n").encode("utf-8"))
         return text
 
     def get(self, digest: str):
         if not _SHA_RE.match(digest or ""):
             return None
         try:
-            return (self.dir / f"{digest}.txt").read_text(encoding="utf-8").strip()
+            return (self.dir.joinpath(f"{digest}.txt")).read_text(encoding="utf-8").strip()
         except OSError:
             return None

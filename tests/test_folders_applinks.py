@@ -196,7 +196,7 @@ class TestAppLinks(Env):
     def test_a_link_that_somehow_is_not_https_is_blocked_and_logged(self):
         applinks.add(self.paths, self.authority(PW), "hello", URL)
         with self.authority(PW).authorize("applink.add", "hello") as g:    # a sealed index holding a bad address
-            applinks._save_links(self.paths, g, [applinks.Link("hello", "1.0.0", "http://x.org/a", "0" * 64, 1, 0.0)])
+            applinks._save_links(self.paths, g, [applinks.Link("hello", "1.0.0", "http://x.org/a", "0" * 64, 1, 0)])
         op = FakeOpener(self.data)
         with self.assertRaises(applinks.AppLinkError):
             applinks.fetch(self.paths, self.authority(PW), "hello", opener=op)
@@ -208,7 +208,7 @@ class TestAppLinks(Env):
         with self.authority(PW).authorize("applink.add", "hello") as g:    # hash right for these bytes, not an app
             junk = b"not a zip"
             applinks._save_links(self.paths, g, [applinks.Link(
-                "hello", "1.0.0", URL, hashlib.sha256(junk).hexdigest(), 9, 0.0)])
+                "hello", "1.0.0", URL, hashlib.sha256(junk).hexdigest(), 9, 0)])
         with self.assertRaisesRegex(applinks.AppLinkError, "not a valid app"):
             applinks.fetch(self.paths, self.authority(PW), "hello", opener=FakeOpener(junk))
 

@@ -46,6 +46,7 @@ ACTIONS: dict[str, str] = {
     "session.login": "log in",
     "auth.change": "change password",
     "app.install": "install app",
+    "app.pack": "pack an app folder into a .kapp",
     "app.update": "update app",
     "app.remove": "remove app",
     "file.view": "view file",
