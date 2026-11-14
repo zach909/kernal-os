@@ -33,7 +33,7 @@ are separate computers that start before the OS and keep running under it.
 Limits, stated plainly:
 * **The OS cannot disable these.** They have their own CPU and flash. KOS only detaches itself;
   the ME keeps its memory access and (with AMT) its network path. Actually disabling means the
-  flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; KOS does not write flash.
+  flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; the boot gate never writes flash (the separate `kos/fwflash.py` flasher can, for images you sign; see README).
 * **Almost no physical machine boots under `enforce`.** Besides the ME/PSP/BMC, any chip with its own
   firmware blocks it too: Thunderbolt/USB4, USB-C port controller, embedded controller, and network, GPU,
   NVMe and wireless controllers (PCI classes in `FIRMWARE_CLASSES`), and so does DMA hardware with no
@@ -42,11 +42,11 @@ Limits, stated plainly:
 * **Power-down for optional chips.** Thunderbolt/USB4 and wireless controllers are unbound and asked for D3cold
   (`d3cold_allowed`, `power/control=auto`); they stop blocking only if `power_state` then reads D3cold, in both the
   shell and Python scanners. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down on a running machine.
-  KOS does not erase, corrupt or overvolt anything, and does not try to rewrite other chips' firmware.
+  KOS does not erase, corrupt or overvolt anything, and the gate does not rewrite other chips' firmware. `kos/fwflash.py` is a separate, password-gated flasher that writes only the system flash; every other chip class refuses.
 * **`kos firmware plan` is read-only advice**, from a static table (`PLAN`): per blocking chip, whether open firmware
   exists (coreboot + me_cleaner for some Intel boards, OpenBMC for some servers, open EC for Framework/Chromebook/
   System76; none for PSP, USB-C/Thunderbolt, NIC, GPU, NVMe), and a verdict on whether this machine can pass. The OS
-  cannot verify any of it on the hardware in front of it, and flashing is an offline job KOS does not do.
+  cannot verify any of it on the hardware in front of it, and flashing is a separate step (`kos/fwflash.py`, system flash only).
 * **`kos.machine=framework`** (signed command line, shipped off) refuses to boot on anything whose DMI `sys_vendor` is
   not `Framework`. The vendor string is what the firmware reports: it prevents mistakes and swapped hardware, not a
   hostile BIOS. The allow list cannot waive it. Turning it on makes VMs and the QEMU flow refuse to boot.

@@ -102,6 +102,7 @@ ACTIONS: dict[str, str] = {
     "ai.config": "set up or look at the AI connection",
     "state.view": "look at what is installed, open or logged",
     "hardware.scan": "look at every piece of hardware and record it in the permission store",
+    "firmware.flash": "rewrite a chip's firmware with a KOS firmware image",
     "overlay.order": "set the load order of mod file layers",
     "overlay.view": "look at the merged mod file layers",
     # linked devices, sync, migration and the agent runner (kos/linkdev.py, syncer.py, migrate.py, agentrun.py)
