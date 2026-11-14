@@ -103,6 +103,21 @@ ACTIONS: dict[str, str] = {
     "hardware.scan": "look at every piece of hardware and record it in the permission store",
     "overlay.order": "set the load order of mod file layers",
     "overlay.view": "look at the merged mod file layers",
+    # linked devices, sync, migration and the agent runner (kos/linkdev.py, syncer.py, migrate.py, agentrun.py)
+    "link.add": "link another device to this one",
+    "link.remove": "unlink a device",
+    "link.list": "look at the linked devices",
+    "link.scope": "pause or resume a linked device",
+    "link.identity": "create or unlock this device's identity",
+    "link.connect": "connect to a linked device",
+    "link.listen": "let a linked device connect to this one",
+    "sync.read": "look at what is synced with a linked device",
+    "sync.run": "sync a shared folder with a linked device",
+    "sync.apply": "change files here to match a linked device",
+    "migrate.export": "pack everything you have into a migration bundle",
+    "migrate.import": "unpack a migration bundle onto this computer",
+    "agent.run": "run a local AI agent",
+    "agent.tool": "let a local AI agent use a tool",
 }
 
 
