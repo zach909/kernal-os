@@ -232,14 +232,11 @@ class Manifest:
             for power in ("system", "ai", "admin"):
                 # The power to open and close apps, to send text to a model, or to write files as the
                 # administrator must never ride in on an add-on.
-            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
-                # The power to open and close apps, or to ask the OS for its own state, must never
-                # ride in on an add-on.
-                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
-            for power in ("system", "ai"):
-                # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
                 if power in perms:
                     raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
+            if any(SERVICE_PERM_RE.match(str(p)) for p in perms):
+                # The power to ask the OS for its own state must never ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for a 'service:' permission")
             if "system" in perms or any(str(p).startswith(ASK_PREFIX) for p in perms):
                 # The power to open and close apps, or to ask the OS for anything, must never
                 # ride in on an add-on.
