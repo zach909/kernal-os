@@ -115,8 +115,7 @@ class Session:
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
-                 status_ok: bool = False):
-                 services=None):
+                 status_ok: bool = False, services=None):
         self.name, self.mode = name, mode
         self.extensions = extensions       # {"items": [...], "skipped": [...]} - see extensions.py
         self.channel = channel

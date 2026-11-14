@@ -282,7 +282,7 @@ def cmd_run(args, paths: Paths) -> int:
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
-                            status_ok=_may_status(app.manifest.permissions))
+                            status_ok=_may_status(app.manifest.permissions),
                             services=_services_for(paths, name, app.manifest.permissions))
     finally:
         if cache_dir is not None:
@@ -358,7 +358,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
                         detach_on_interrupt=True, bridge=bridge,
                         vault=_vault_for(paths, inst.name, perms),
                         extensions=_extensions_for(paths, inst.name),
-                        status_ok=inst.system or _may_status(perms), **session_kwargs)
+                        status_ok=inst.system or _may_status(perms),
                         services=_services_for(paths, inst.name, perms), **session_kwargs)
 
 
@@ -438,7 +438,6 @@ def cmd_desktop(args, paths: Paths) -> int:
     from .desktop import FUNCTION_APPS, SYSTEM_APPS
     every = SYSTEM_APPS + FUNCTION_APPS
     from . import sysapps
-    from .desktop import SYSTEM_APPS
     from .permit import PermitStore
 
     src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "apps"
@@ -459,8 +458,7 @@ def cmd_desktop(args, paths: Paths) -> int:
             ms = store.install_bundle(files, authority, f"{len(files)} apps")
             print(f"installed {len(ms)} of the OS's own apps: {', '.join(m.name for m in ms)}")
     permits = PermitStore(paths)
-    need = [n for n in every if not permits.is_permitted(n)]
-    names = [*SYSTEM_APPS, *(e.name for e in sysapps.entries())]
+    names = [*every, *(e.name for e in sysapps.entries())]
     need = [n for n in names if not permits.is_permitted(n)]
     if need:
         with authority.authorize("app.permit", f"{len(need)} apps"):
@@ -1505,17 +1503,6 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {
-    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
-    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
-    "boot": cmd_boot, "desktop": cmd_desktop, "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore,
-    "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-    "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor, "firmware": cmd_firmware,
-    "audit": cmd_audit, "security": cmd_security, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
-    "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write, "skills": cmd_skills,
-    "convert": cmd_convert, "backup": cmd_backup, "folders": cmd_folders, "aios": cmd_aios, "usb": cmd_usb,
-    "help": cmd_help, "ai": cmd_ai, "runtimes": cmd_runtimes}
 def cmd_skills(args, paths: Paths) -> int:
     """`kos skills` is the Skill Maker app (a preview). `kos skills --out DIR` stays here: each SKILL.md is a
     guarded write (administrator keyboard, scan, optimize), and the exclusive keyboard is not something an app
@@ -1576,34 +1563,11 @@ COMMANDS = {
     "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
     "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
+    "overlay": cmd_overlay, "hardware": cmd_hardware, "runtimes": cmd_runtimes, "folders": cmd_folders, "ai": cmd_ai,
     # the commands that are apps now: the command line only opens the app
     "skills": cmd_skills,
     **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
                                   "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
-
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
-COMMANDS = {
-    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
-    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
-    "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
-    "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
-    "doctor": cmd_doctor, "firmware": cmd_firmware, "hardware": cmd_hardware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
-    "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
-    "runtimes": cmd_runtimes}
 
 
 def main(argv: list[str] | None = None) -> int:

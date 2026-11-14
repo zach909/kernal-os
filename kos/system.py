@@ -258,7 +258,15 @@ class SystemBridge:
                      for c in CellManager(self.paths).cells()[:MAX_LISTED]]
         except (OSError, ValueError, TypeError, KeyError):
             cells = []
-        prot = {k: (v if isinstance(v, bool) else int(v or 0)) for k, v in report().items()}
+        prot = {}
+        for k, v in report().items():
+            # the kernel check is a small nested report: flatten its yes/no and number entries
+            # (``kos_kernel.present``); text entries are not part of the protocol's {name: bool|int}
+            for name, val in (((f"{k}.{kk}", vv) for kk, vv in v.items()) if isinstance(v, dict) else [(k, v)]):
+                if isinstance(val, bool):
+                    prot[name] = val
+                elif isinstance(val, int) or val is None:
+                    prot[name] = int(val or 0)
         self._reply({"cmd": "kernel", "protections": prot, "cells": cells,
                      "admin": clean_text(AdminKeyboard(self.paths).status(), 200)})
 

@@ -195,14 +195,9 @@ class TestTreeLayout(Env):
         ms = {m.name: m for m in pack_tree(t, self.dist)}
         self.assertEqual(sorted(ms), ["mail.attach.inline", "mail.compose", "mail.read"])
         self.assertEqual(KApp.from_file(self.dist / "mail.compose.kapp").names(),
-                         ["app.py", "assets/icon.txt", "manifest.json"])
+                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
         # nothing is inherited: each app has its own permissions only
         self.assertEqual(ms["mail.attach.inline"].permissions, ("storage",))
-                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
-        self.assertEqual(KApp.from_file(self.dist / "mail.compose.attach.kapp").names(), ["app.py", "manifest.json", "proof.json"])
-        # nothing is inherited: the child has the child's permissions only
-        self.assertEqual(ms["mail.compose.attach"].permissions, ("storage",))
-        self.assertEqual(ms["mail.compose.attach.inline"].permissions, ())
         self.assertEqual(ms["mail.compose"].permissions, ("network",))
         self.assertEqual(ms["mail.read"].permissions, ())
 
@@ -292,7 +287,7 @@ class TestFileApps(Env):
         self.assertEqual(ms["docs.spell"].permissions, ("storage",))
         self.assertEqual(ms["docs.editor.format"].permissions, ("network",))
         self.assertEqual(ms["docs.editor.plain"].permissions, ())
-        self.assertEqual(KApp.from_file(self.dist / "docs.spell.kapp").names(), ["app.py", "manifest.json"])
+        self.assertEqual(KApp.from_file(self.dist / "docs.spell.kapp").names(), ["app.py", "manifest.json", "proof.json"])
         for m in ms.values():
             self.assertTrue(scan_bytes((self.dist / f"{m.name}.kapp").read_bytes(), m.name).clean)
 
@@ -359,7 +354,7 @@ class TestFileApps(Env):
         page(g, "spell", "docs.spell")
         out = io.StringIO()
         with redirect_stdout(out):
-            kcli.cmd_pack(types.SimpleNamespace(dir=str(g), output=str(self.dist)), self.paths)
+            self.cli_pack(types.SimpleNamespace(dir=str(g), output=str(self.dist)))
         self.assertTrue((self.dist / "docs.spell.kapp").is_file())
         self.assertIn("docs is a group, not an app", out.getvalue())
 

@@ -469,7 +469,7 @@ class TestInstallingTheOsApps(Os):
         from unittest import mock
         import contextlib
         import io
-        prompter = ScriptedPrompter([PW] * 6)
+        prompter = ScriptedPrompter([PW] * 8)   # 2 desktop apps + 4 function apps, one bundle, one permit
         authority = Authority(self.paths, prompter, Throttle(self.paths, base=0))
         with mock.patch.object(cli, "_authority", lambda paths: (authority, prompter)), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
@@ -480,6 +480,8 @@ class TestInstallingTheOsApps(Os):
         permits = PermitStore(self.paths)
         for e in ENTRIES:
             self.assertTrue(permits.is_permitted(e.name), e.name)
+        for n in ("taskbar", "app-library", "mouse", "keyboard", "display", "wallpaper"):
+            self.assertTrue(permits.is_permitted(n), n)
         self.assertEqual(sum("install the OS's own apps" in p for p in prompter.asked), 1)
         # running it again changes nothing and asks for nothing
         prompter2 = ScriptedPrompter([])

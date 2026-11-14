@@ -58,16 +58,13 @@ MODES = {"tui", "graphical", "cmd"}
 # ``admin`` lets a program ask the OS for the administrator keyboard's one job, the guarded file
 # write (request ``admin`` / ``write``). It is not root: the OS still needs a live lease, the
 # password typed for exactly that write, a clean security scan and a disk optimize.
-PERMISSIONS = {"network", "system", "storage", "ai", "admin"}
 # ``cookies`` and ``passwords`` each unlock one separate, OS-owned store (see vault.py / spaces.py).
 # They are not part of ``storage``: an app that keeps notes cannot read a cookie jar or saved logins.
-PERMISSIONS = {"network", "system", "storage", "ai", "cookies", "passwords"}
-PERMISSIONS = {"network", "system", "storage", "ai"}
+PERMISSIONS = {"network", "system", "storage", "ai", "admin", "cookies", "passwords"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
-ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "status")
-ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "kernel")
+ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "kernel", "status")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
 SERVICE_PERM_RE = re.compile(r"^service:([a-z]+)$")      # ask the OS for one group of functions (servicespec.py)
@@ -171,17 +168,14 @@ class Manifest:
             m = SERVICE_PERM_RE.match(str(perm))
             if m and m.group(1) not in servicespec.GROUPS:
                 raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
-            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)) and not m:
-                raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
-                                "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
-                                "or 'service:GROUP' (ask the OS for a group of functions)")
-            if perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)):
+            if perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)) or m:
                 continue
             if isinstance(perm, str) and perm.startswith(ASK_PREFIX) and perm[len(ASK_PREFIX):] in ASK_ACTIONS:
                 continue
             raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
                             f"'ask:ACTION' (one of {', '.join(ASK_ACTIONS)}), "
-                            "'owns:NAME' (create a shared folder) or 'uses:NAME' (look for one)")
+                            "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
+                            "or 'service:GROUP' (ask the OS for a group of functions)")
         desc = d.get("description", "")
         if not isinstance(desc, str) or len(desc) > 200:
             raise KAppError("description must be a string of at most 200 characters")
@@ -206,21 +200,16 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
-            for power in ("system", "ai", "admin"):
-                # The power to open and close apps, to send text to a model, or to write files as the
-                # administrator must never ride in on an add-on.
-            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
-                # The power to open and close apps, or to ask the OS for its own state, must never
-                # ride in on an add-on.
-                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
-            for power in ("system", "ai"):
-                # The power to open and close apps, or to send text to a model, must never ride in on an add-on.
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) or str(p).startswith(ASK_PREFIX) for p in perms):
+                # The power to open and close apps, or to ask the OS for anything (its own state, one
+                # action, a service), must never ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' permission, a 'service:' permission "
+                                f"or any 'ask:' permission")
+            for power in ("ai", "admin"):
+                # The power to send text to a model, or to write files as the administrator, must
+                # never ride in on an add-on.
                 if power in perms:
                     raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
-            if "system" in perms or any(str(p).startswith(ASK_PREFIX) for p in perms):
-                # The power to open and close apps, or to ask the OS for anything, must never
-                # ride in on an add-on.
-                raise KAppError(f"a {kind} cannot ask for the 'system' permission or any 'ask:' permission")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
                    modes=modes, permissions=perms, description=desc, kind=kind, extends=extends)
 
@@ -474,9 +463,12 @@ def _pack_file_app(py: Path, out: Path) -> Manifest:
                         f"'{FILE_ENTRY}' or '{FILE_ENTRY}:FUNCTION' (the file is packed as {FILE_ENTRY}.py)")
     if m.kind != "app":
         raise KAppError(f"{side}: only an ordinary app can be a single file inside a group")
+    from . import proof      # lazy: proof builds on this module
+    contents = {MANIFEST: raw, f"{FILE_ENTRY}.py": code}
+    contents[proof.PROOF_FILE] = proof.make_proof(contents, m.runtime, m.name)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        for name, body in ((MANIFEST, raw), (f"{FILE_ENTRY}.py", code)):
+        for name, body in sorted(contents.items()):
             zi = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             zi.compress_type = zipfile.ZIP_DEFLATED
             zi.external_attr = (stat.S_IFREG | 0o644) << 16
