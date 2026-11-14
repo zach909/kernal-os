@@ -25,6 +25,8 @@ from typing import Any
 
 MAX_PATH = 1024
 MAX_TEXT = 200_000
+PLATFORMS = ("kos", "linux", "windows", "macos", "android", "ios")        # = linkdev.PLATFORMS (a test checks)
+TARGETS = ("kos", "linux", "macos", "windows", "ios", "android")           # = migrate.TARGETS (a test checks)
 _NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
@@ -170,6 +172,29 @@ SPECS: dict[str, Spec] = _specs(
                                "revoke": flag(False)}, "let an app into a shared folder (or take it away)"),
     # making skills
     Spec("skills.make", {}, "agent skills from the installed apps and the commands, as text to preview"),
+    # linked devices, sync, migration and the local agent (kos/linkdev.py, syncer.py, migrate.py, agentrun.py)
+    Spec("link.list", {}, "this device's identity and the devices linked to it"),
+    Spec("link.identify", {"name": text(40), "platform": one_of(*PLATFORMS, required=True)},
+         "give this device its identity (once): a name and what it runs"),
+    Spec("link.pair", {"role": one_of("connect", "listen", required=True), "host": text(45),
+                       "port": num(1, 65535, required=True)},
+         "link another device: compare the code on both screens, password on both"),
+    Spec("link.scope", {"device": text(32), "scope": one_of("all", "paused", required=True)},
+         "pause a linked device (it can ask for nothing) or let it ask for everything again"),
+    Spec("link.unlink", {"device": text(32)}, "unlink a device; works with the other one switched off"),
+    Spec("sync.folders", {}, "the folders chosen for syncing"),
+    Spec("sync.share", {"name": name(), "path": path()}, "choose a folder to sync, under a name"),
+    Spec("sync.unshare", {"name": name()}, "stop syncing a folder (its files stay)"),
+    Spec("sync.run", {"device": text(32), "folder": name(), "host": text(45), "port": num(1, 65535, required=True),
+                      "dry": flag(False)}, "sync one folder with a linked device (dry: only say what would change)"),
+    Spec("sync.serve", {"host": text(45), "port": num(1, 65535, required=True)},
+         "wait for one linked device and let it sync the shared folders"),
+    Spec("migrate.export", {"roots": words(required=True), "out": path(), "apps": flag(True)},
+         "pack folders, apps and permissions into one encrypted bundle"),
+    Spec("migrate.import", {"bundle": path(), "dest": path(), "target": one_of(*TARGETS, default="kos")},
+         "unpack a bundle; verified completely first, never overwrites"),
+    Spec("agent.run", {"task": text(4000), "workspace": path(), "steps": num(1, 20, 8)},
+         "run a local AI agent in one folder; every tool use asks your password"),
     # code as a command
     Spec("code.run", {"code": text(20_000), "lang": name(default="python", required=False)},
          "run one line of code as a sandboxed one-shot app"),

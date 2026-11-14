@@ -436,7 +436,6 @@ class VC(Menu):
             if ns: self.do(r.del_file, ns[i])
         return ("push", Lister("Files", rows, {"enter": edit, "a": new, "d": rm}, "Enter edit  a add  d delete from working copy (restore brings it back)", "(no files: press a)"))
 
-    def show_status(self):
     def show_status(self):      # not "status": a Menu's status() is the footer line the runner draws
         s = self.repo.status()
         lines = [f"on {self.repo.head or 'detached'}"] + [f"{k}: {', '.join(s[k])}" for k in ("added", "modified", "deleted", "conflicts") if s[k]]

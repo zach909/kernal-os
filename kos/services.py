@@ -393,6 +393,239 @@ def _code_run(ctx: Ctx, code: str, lang: str) -> dict:
     return {"status": status, "output": lines[:200]}
 
 
+# ---- linked devices, sync, migration, the local agent -------------------------------------------------
+# The logic lives in kos/linkdev.py, syncer.py, migrate.py and agentrun.py (each has its own tests). What is
+# here is only the door: the password is asked *before* anything is read, opened or connected, the caller's
+# manifest already asked for the group, and a domain error becomes a refusal the app can show.
+
+def _domain(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def run(ctx, **args):
+        from .agentrun import AgentError
+        from .linkdev import LinkError, Refusal
+        from .migrate import MigrateError
+        try:
+            return fn(ctx, **args)
+        except (LinkError, Refusal, MigrateError, AgentError) as e:
+            raise ServiceError(str(e)) from None
+    return run
+
+
+def _when(t: int) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(t))
+
+
+def _peer_view(p) -> dict:
+    return {"name": p.name, "platform": p.platform, "id": p.device_id[:16], "scope": p.scope, "since": _when(p.linked_at)}
+
+
+def _find_peer(peers: list, ident: str):
+    hit = [p for p in peers if p.device_id.startswith(ident)]
+    if len(hit) != 1:
+        raise ServiceError("no linked device matches that id" if not hit else "that id matches more than one device: type more of it")
+    return hit[0]
+
+
+@service("link.list")
+@_domain
+def _link_list(ctx: Ctx) -> dict:
+    from . import linkdev
+    with ctx.authority.authorize("link.list") as grant:
+        peers = linkdev.LinkStore(ctx.paths).peers(grant.key("link-store"))
+        me = None
+        if linkdev.Identity.exists(ctx.paths):
+            i = linkdev.Identity.load(ctx.paths, grant)
+            me = {"name": i.name, "platform": i.platform, "id": i.device_id[:16]}
+    return {"me": me, "peers": [_peer_view(p) for p in peers]}
+
+
+@service("link.identify")
+@_domain
+def _link_identify(ctx: Ctx, name: str, platform: str) -> dict:
+    from . import linkdev
+    with ctx.authority.authorize("link.identity", name) as grant:
+        i = linkdev.Identity.create(ctx.paths, grant, name, platform)
+    return {"me": {"name": i.name, "platform": i.platform, "id": i.device_id[:16]}}
+
+
+def _accept_one(paths: Paths, authority: Authority, host: str, port: int):
+    """Wait (at most two minutes) for one connection on an address the firewall allows."""
+    import socket
+    from . import linkdev
+    srv = linkdev.open_listener(paths, authority, host, port)
+    try:
+        srv.settimeout(120)
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            raise ServiceError("nobody connected within two minutes") from None
+    finally:
+        srv.close()
+    return conn
+
+
+@service("link.pair")
+@_domain
+def _link_pair(ctx: Ctx, role: str, host: str, port: int) -> dict:
+    from . import linkdev
+    with ctx.authority.authorize("link.identity", "to pair") as grant:
+        ident = linkdev.Identity.load(ctx.paths, grant)
+    if role == "connect":
+        sock = linkdev.open_client(ctx.paths, ctx.authority, host, port)
+    else:
+        sock = _accept_one(ctx.paths, ctx.authority, host, port)
+    offer = linkdev.start_pairing(sock, ident, initiator=(role == "connect"))
+    p = ctx.authority.prompter
+    p.info(f"Pairing with '{offer.peer_name}' ({offer.session.peer_public.hex()[:8]}...). Code: {offer.sas}")
+    same = p.confirm(f"Does the other device show exactly {offer.sas}? Say no if it differs: that means someone is in between")
+    peer = linkdev.finish_pairing(ctx.paths, ctx.authority, offer, bool(same))
+    return {"linked": _peer_view(peer), "code": offer.sas}
+
+
+@service("link.scope")
+@_domain
+def _link_scope(ctx: Ctx, device: str, scope: str) -> dict:
+    from . import linkdev
+    with ctx.authority.authorize("link.scope", f"{device} -> {scope}") as grant:
+        key = grant.key("link-store")
+        store = linkdev.LinkStore(ctx.paths)
+        peer = _find_peer(store.peers(key), device)
+        store.set_scope(key, peer.device_id, scope)
+    AuditLog(ctx.paths).record("link.scope", f"{peer.name} {peer.device_id[:8]}", scope)
+    return {"device": peer.name, "scope": scope}
+
+
+@service("link.unlink")
+@_domain
+def _link_unlink(ctx: Ctx, device: str) -> dict:
+    from . import linkdev
+    with ctx.authority.authorize("link.remove", device) as grant:
+        key = grant.key("link-store")
+        store = linkdev.LinkStore(ctx.paths)
+        peer = _find_peer(store.peers(key), device)
+        store.remove(key, peer.device_id)
+    AuditLog(ctx.paths).record("link.remove", f"{peer.name} {peer.device_id[:8]}", "unlinked")
+    return {"unlinked": peer.name}
+
+
+def _folders(ctx: Ctx):
+    from .syncer import FolderStore
+    return FolderStore(ctx.paths.state, forbidden=(ctx.paths.etc,))
+
+
+@service("sync.folders")
+@_domain
+def _sync_folders(ctx: Ctx) -> dict:
+    with ctx.authority.authorize("sync.read") as grant:
+        folders = _folders(ctx).folders(grant.key("sync-folders"))
+    return {"folders": [{"name": n, "path": p} for n, p in sorted(folders.items())]}
+
+
+@service("sync.share")
+@_domain
+def _sync_share(ctx: Ctx, name: str, path: str) -> dict:
+    from .syncer import SyncError
+    try:
+        with ctx.authority.authorize("sync.run", f"share {path} as {name}") as grant:
+            real = _folders(ctx).add(grant.key("sync-folders"), name, path)
+    except SyncError as e:
+        raise ServiceError(str(e)) from None
+    return {"name": name, "path": str(real)}
+
+
+@service("sync.unshare")
+@_domain
+def _sync_unshare(ctx: Ctx, name: str) -> dict:
+    with ctx.authority.authorize("sync.run", f"stop syncing {name}") as grant:
+        gone = _folders(ctx).remove(grant.key("sync-folders"), name)
+    if not gone:
+        raise ServiceError(f"no shared folder called {name!r}")
+    return {"name": name}
+
+
+@service("sync.run")
+@_domain
+def _sync_run(ctx: Ctx, device: str, folder: str, host: str, port: int, dry: bool) -> dict:
+    from . import linkdev, syncer
+    log = AuditLog(ctx.paths)
+    with ctx.authority.authorize("sync.run", f"{folder} with {device}") as grant:
+        peer = _find_peer(linkdev.LinkStore(ctx.paths).peers(grant.key("link-store")), device)
+        try:
+            root = _folders(ctx).resolve(grant.key("sync-folders"), folder)
+        except syncer.SyncError as e:
+            raise ServiceError(str(e)) from None
+        ident = linkdev.Identity.load(ctx.paths, grant)
+    sock = linkdev.open_client(ctx.paths, ctx.authority, host, port)
+    client = linkdev.connect_linked(sock, ident, peer)
+    try:
+        base = syncer.load_base(ctx.paths.state, peer.device_id, folder)
+        try:
+            rep, new_base = syncer.sync_once(client, folder, root, base, peer.device_id, peer.platform, dry)
+        except syncer.SyncError as e:
+            log.record("sync.run", f"{folder} with {peer.name}", "failed")
+            raise ServiceError(str(e)) from None
+        if not dry:
+            syncer.save_base(ctx.paths.state, peer.device_id, folder, new_base)
+    finally:
+        client.close()
+    log.record("sync.run", f"{folder} with {peer.name}", "dry-run" if dry else ("done" if rep.ok() else "partial"))
+    return {"pulled": rep.pulled[:40], "pushed": rep.pushed[:40], "trashed": rep.trashed[:40],
+            "conflicts": rep.conflicts[:40], "refused": [f"{p}: {why}" for p, why in rep.refused[:40]],
+            "skipped": rep.skipped[:40], "counts": [len(rep.pulled), len(rep.pushed), len(rep.trashed),
+                                                    len(rep.conflicts), len(rep.refused)], "dry": dry}
+
+
+@service("sync.serve")
+@_domain
+def _sync_serve(ctx: Ctx, host: str, port: int) -> dict:
+    from . import linkdev, syncer
+    with ctx.authority.authorize("sync.read", "to share folders with a linked device") as grant:
+        folders = _folders(ctx).folders(grant.key("sync-folders"))
+        ident = linkdev.Identity.load(ctx.paths, grant)
+        store_key = grant.key("link-store")           # so a stranger at the port cannot make the owner type a password
+    store = _folders(ctx)
+
+    def resolve(name: str):
+        if name not in folders:
+            raise syncer.SyncError(f"no shared folder called {name!r}")
+        return store.check_path(folders[name])
+    conn = _accept_one(ctx.paths, ctx.authority, host, port)
+    handled = linkdev.serve_socket(ctx.paths, ctx.authority, ident, conn, syncer.make_handlers(resolve), store_key)
+    return {"requests_handled": handled}
+
+
+@service("migrate.export")
+@_domain
+def _migrate_export(ctx: Ctx, roots: list, out: str, apps: bool) -> dict:
+    from . import migrate
+    label = f"{out} (reads {', '.join(roots)[:150]}{' and your apps' if apps else ''})"
+    s = migrate.export_bundle(ctx.paths, ctx.authority, [Path(r) for r in roots], Path(out), include_kos=apps, label=label)
+    return {"files": s.files, "bytes": s.bytes, "left_behind": s.skipped[:40], "out": out}
+
+
+@service("migrate.import")
+@_domain
+def _migrate_import(ctx: Ctx, bundle: str, dest: str, target: str) -> dict:
+    from . import migrate
+    r = migrate.import_bundle(ctx.paths, ctx.authority, Path(bundle), Path(dest), target)
+    return {"written": len(r.written), "identical": len(r.identical), "kept_both": len(r.kept_both),
+            "renamed": [f"{a} -> {b} ({why})" for a, b, why in r.renamed[:40]], "staged": r.staged[:40],
+            "left_behind": r.skipped_at_source[:40], "bytes": r.bytes}
+
+
+@service("agent.run")
+@_domain
+def _agent_run(ctx: Ctx, task: str, workspace: str, steps: int) -> dict:
+    from . import agentrun
+    ep = agentrun.local_endpoint(ctx.paths)
+    res = agentrun.run_agent(ctx.paths, ctx.authority, task, Path(workspace), agentrun.http_model(ctx.paths, ep),
+                             max_steps=steps)
+    return {"stopped": res.stopped, "final": res.final,
+            "steps": [{"n": s.n, "kind": s.kind, "tool": s.tool, "detail": s.detail[:200]} for s in res.steps]}
+
+
 # ---- the door -----------------------------------------------------------------------------------
 
 _ERRORS = (AuthorizationDenied, AuthError, KAppError, PermitError, TamperedError, VFSError, OSError,

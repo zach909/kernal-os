@@ -1,0 +1,13 @@
+{
+  "name": "devices.scope",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:link"
+  ],
+  "description": "Pauses a linked device (it can ask for nothing) or lets it ask for everything again."
+}

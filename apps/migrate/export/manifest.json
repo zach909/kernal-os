@@ -1,0 +1,13 @@
+{
+  "name": "migrate.export",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:migrate"
+  ],
+  "description": "Packs folders (and, if you say yes, your apps and permission list) into one encrypted bundle for a new computer."
+}
