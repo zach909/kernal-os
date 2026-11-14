@@ -103,10 +103,8 @@ MAX_COORD = 16384
 MAX_ADMIN_TEXT = 200_000      # one admin write from an app; a bigger file is written with `kos write`
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = ID_RE
-_INSTANCE_RE = re.compile(rf"^{ID_PATTERN}-[0-9a-f]{{6}}\Z")
-REQUEST_MODES = ("tui", "text", "graphical", "cmd")
 _INSTANCE_RE = INSTANCE_RE
-REQUEST_MODES = ("tui", "graphical", "cmd")
+REQUEST_MODES = ("tui", "text", "graphical", "cmd")
 STATUS_TOPICS = ("mouse", "keyboard", "display")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 

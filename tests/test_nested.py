@@ -190,14 +190,9 @@ class TestTreeLayout(Env):
         ms = {m.name: m for m in pack_tree(t, self.dist)}
         self.assertEqual(sorted(ms), ["mail.attach.inline", "mail.compose", "mail.read"])
         self.assertEqual(KApp.from_file(self.dist / "mail.compose.kapp").names(),
-                         ["app.py", "assets/icon.txt", "manifest.json"])
+                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
         # nothing is inherited: each app has its own permissions only
         self.assertEqual(ms["mail.attach.inline"].permissions, ("storage",))
-                         ["app.py", "assets/icon.txt", "manifest.json", "proof.json"])
-        self.assertEqual(KApp.from_file(self.dist / "mail.compose.attach.kapp").names(), ["app.py", "manifest.json", "proof.json"])
-        # nothing is inherited: the child has the child's permissions only
-        self.assertEqual(ms["mail.compose.attach"].permissions, ("storage",))
-        self.assertEqual(ms["mail.compose.attach.inline"].permissions, ())
         self.assertEqual(ms["mail.compose"].permissions, ("network",))
         self.assertEqual(ms["mail.read"].permissions, ())
 
