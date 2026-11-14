@@ -1,10 +1,25 @@
 # The Silicon & Local Network Mesh: how it fits KOS
 
-**Status: design only. Nothing in this document is implemented.** No code, action,
-protocol message or test exists for any of it. This file says what the mesh would have
-to be to obey the four rules in the README, where the original sketch conflicts with
-them, and what the owner must decide before any code is written. Per the README gaps
-table, it must not be described as a feature until it is built and tested.
+**Status: partly implemented (phases 1, 2 and the sync half of 3); the rest is still design only.**
+Built and tested: pairing and identity, an encrypted authenticated link over an ordinary network
+(loopback tested), and sync over that link: `kos/linkdev.py`, `kos/syncer.py`, `kos/migrate.py`, the
+`devices.*` / `sync.*` / `migrate.*` apps, and the wire format in `docs/SYNC.md`. What was decided on the
+way, against the four decisions at the bottom of this file:
+
+1. **Crypto dependency: yes.** `cryptography` was already a requirement; the link uses only its vetted
+   primitives (Ed25519, X25519, HKDF-SHA256, ChaCha20-Poly1305). No cipher of our own.
+2. **Firmware gate: untouched.** Nothing here uses a radio. A link is TCP to an address and port, behind a
+   firewall rule. Phase 4 (Bluetooth, UWB, proximity) is not started and still needs this decision.
+3. **No central account.** Pairing is in person: the same 6-digit code on both screens and the password on both.
+4. **KOS-to-KOS is what is enforced.** A peer that is not KOS is a remote party holding a key (see `docs/SYNC.md`
+   for what a native client must do itself).
+
+One thing differs from the proposal below: the owner asked for a linked device to have *every* permission of
+the other. That is built as "may **ask** for any action" (the receiving owner still types the password, per
+rule 1), minus the few actions that would let one device re-root trust on the other (`NEVER_REMOTE` in
+`kos/linkdev.py`). **Not built:** proximity, handoff of app state, camera, tether, any radio, any client that is not
+KOS. The text below is the original design and is kept as written; where it disagrees with this paragraph, this
+paragraph is newer. Per the README gaps table, anything not listed as built above must not be described as a feature.
 
 The sketch has four parts: (1) cryptographic trust and identity, (2) proximity
 discovery, (3) direct peer-to-peer transport, (4) resource sharing (remote camera,
@@ -154,6 +169,6 @@ Each phase ships only when its tests pass, including refusal tests. Phase 0 is t
 
 ## What this does not cover
 
-Everything, in code terms. No pairing, no radio support, no UWB, no transport, no
-encryption, no camera, no tether. Nothing here has been run. Claims about Linux UWB and
-Bluetooth support are unverified.
+Radio support, UWB, proximity, app-state handoff, camera and tether: none of it exists, and nothing
+about it has been run. Claims about Linux UWB and Bluetooth support are unverified. Pairing, the link and sync
+exist (see the status paragraph at the top) but were only run on one Linux machine over loopback.

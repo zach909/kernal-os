@@ -1,0 +1,13 @@
+{
+  "name": "sync.serve",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:sync"
+  ],
+  "description": "Waits (up to two minutes) for one linked device and lets it sync the shared folders."
+}

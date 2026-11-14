@@ -1,0 +1,13 @@
+{
+  "name": "migrate.import",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:migrate"
+  ],
+  "description": "Unpacks a bundle: verified completely first, never overwrites, names fixed for the target system."
+}

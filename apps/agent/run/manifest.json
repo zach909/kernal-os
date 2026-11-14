@@ -1,0 +1,13 @@
+{
+  "name": "agent.run",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:agent"
+  ],
+  "description": "Runs a model on this computer on a task, inside one folder. Every tool use asks your password; a no ends the run."
+}
