@@ -54,11 +54,10 @@ ID_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN}}}\Z){ID_PATTERN}\Z")      # length f
 INSTANCE_RE = re.compile(rf"^(?=.{{1,{MAX_ID_LEN + 7}}}\Z){ID_PATTERN}-[0-9a-f]{{6}}\Z")
 RESERVED_NAMES = {"graphical", "kos", "system", "all"}
 RUNTIMES = {"python", "native"}
-MODES = {"tui", "graphical", "cmd"}
+MODES = {"tui", "graphical", "text", "cmd"}
 # ``cookies`` and ``passwords`` each unlock one separate, OS-owned store (see vault.py / spaces.py).
 # They are not part of ``storage``: an app that keeps notes cannot read a cookie jar or saved logins.
 PERMISSIONS = {"network", "system", "storage", "ai", "cookies", "passwords"}
-PERMISSIONS = {"network", "system", "storage", "ai"}
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
@@ -76,7 +75,18 @@ _MANIFEST_KEYS = {"name", "version", "runtime", "entry", "modes", "permissions",
 # An extension or a mod is still a .kapp: installed, scanned, sealed, permitted and opened like any other.
 KINDS = ("app", "extension", "mod")
 SYSTEM_APP_NAMES = ("taskbar", "app-library")
+# A system app must draw both ways: with text (so it works on a serial console, over SSH, with no
+# framebuffer) and graphically. See is_system_app() for which apps these are.
+SYSTEM_MODES = ("text", "graphical")
 EXTENSION_FILE = "extension.json"
+
+
+def is_system_app(name: str, permissions) -> bool:
+    """An app that is one of the OS's own (the taskbar, the App Library) or that can ask the OS to act:
+    it holds ``system`` (opens and closes apps) or a ``service:GROUP`` (the OS's own functions). Only
+    permissions the manifest declares count; a program inside a group (``ask:ACTION``) is not one."""
+    perms = [str(p) for p in permissions]
+    return name in SYSTEM_APP_NAMES or "system" in perms or any(SERVICE_PERM_RE.match(p) for p in perms)
 
 # Every app can explain itself: ``help.json`` is its own "help" command, as data. It is validated
 # when the app is read, never run, and what it says is the author's free text (untrusted).
@@ -164,19 +174,22 @@ class Manifest:
         perms = tuple(d.get("permissions", []))
         for perm in perms:
             m = SERVICE_PERM_RE.match(str(perm))
-            if m and m.group(1) not in servicespec.GROUPS:
-                raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
-            if perm not in PERMISSIONS and not SPACE_PERM_RE.match(str(perm)) and not m:
-                raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
-                                "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
-                                "or 'service:GROUP' (ask the OS for a group of functions)")
+            if m:
+                if m.group(1) not in servicespec.GROUPS:
+                    raise KAppError(f"unknown service group {m.group(1)!r}: use one of {', '.join(servicespec.GROUPS)}")
+                continue
             if perm in PERMISSIONS or SPACE_PERM_RE.match(str(perm)):
                 continue
             if isinstance(perm, str) and perm.startswith(ASK_PREFIX) and perm[len(ASK_PREFIX):] in ASK_ACTIONS:
                 continue
             raise KAppError(f"unknown permission {perm!r}: use {sorted(PERMISSIONS)}, "
                             f"'ask:ACTION' (one of {', '.join(ASK_ACTIONS)}), "
-                            "'owns:NAME' (create a shared folder) or 'uses:NAME' (look for one)")
+                            "'owns:NAME' (create a shared folder), 'uses:NAME' (look for one) "
+                            "or 'service:GROUP' (ask the OS for a group of functions)")
+        if is_system_app(name, perms) and not set(SYSTEM_MODES) <= set(modes):
+            raise KAppError(f"{name} is a system app (it is one of {', '.join(SYSTEM_APP_NAMES)}, or holds the "
+                            f"'system' or a 'service:' permission): it must ship {' and '.join(SYSTEM_MODES)} modes, "
+                            f"it has: {', '.join(modes)}")
         desc = d.get("description", "")
         if not isinstance(desc, str) or len(desc) > 200:
             raise KAppError("description must be a string of at most 200 characters")

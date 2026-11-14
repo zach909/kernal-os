@@ -64,6 +64,11 @@ STILL_THE_OS = {
     "do": "interprets one line and runs it",
     "exec": "runs code as a sandboxed one-shot app",
     "backup": "a restore is a guarded write (administrator keyboard); the backup app covers list, add and remove",
+    "ai": "sets the one endpoint the OS may send text to, and holds its key",
+    "hardware": "maps every device and connection the kernel can see into the permission store",
+    "overlay": "orders and merges mod file layers; the load order is enforcement",
+    "folders": "creates the standard shared data folders and their permissions",
+    "runtimes": "adds and removes the languages the OS will start code in",
 }
 
 

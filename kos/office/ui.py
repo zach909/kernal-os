@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Iterator, Optional
 
+from .. import font
+
 CURSOR = "▌"      # shown at the insertion point
 
 
@@ -512,19 +514,71 @@ class Menu(Screen):
             if 0 <= i < len(self.entries): return self.entries[i][1]()
 
 
+# The button clicker for a screen that draws no canvas of its own. Every screen is a page of text lines, so in
+# ``graphical`` and ``text`` mode the page is drawn from those lines with one row of buttons under it; a click on a
+# button is the same as pressing its key. A screen that wants more (its own buttons, a picture) returns a canvas.
+BUTTONS = (("Back", "escape"), ("Up", "up"), ("Down", "down"), ("OK", "enter"))
+FRAMED = ("graphical", "text")
+
+
+def page_canvas(w: int, h: int, title: str, lines: list, status: str, fill_buttons: bool = True):
+    """A text page as draw ops: title bar, lines, status, and the button row. Returns (canvas, buttons) where
+    buttons is [(x, y, w, h, key)] in the app's own pixels. Cell-aligned (font.CELL_W x CELL_H), so in ``text``
+    mode what is drawn as a button is exactly what a click on it hits."""
+    from ..sdk import Canvas
+    cw, ch = font.CELL_W, font.CELL_H
+    cols, rows = max(12, w // cw), max(5, h // ch)
+    body = rows - 3
+    shown = min(cols - 2, 250)
+    c = Canvas().clear("#101820")
+    c.rect(0, 0, cols * cw, ch, "#2a4a7a").text(cw, 2, str(title)[:shown], "#ffffff")
+    for i, line in enumerate(list(lines)[:body]):
+        c.text(cw, (1 + i) * ch + 2, str(line)[:shown], "#e0e0e0")
+    c.text(cw, (rows - 2) * ch + 2, str(status)[:shown], "#9ab4d0")
+    buttons, x, y = [], cw, (rows - 1) * ch
+    for label, key in BUTTONS:
+        text = f"[ {label} ]"
+        bw = len(text) * cw
+        if fill_buttons:
+            c.rect(x, y, bw, ch, "#0c1c2c")
+        c.text(x, y + 2, text, "#ffffff")
+        buttons.append((x, y, bw, ch, key))
+        x += bw + cw
+    return c, buttons
+
+
+def button_at(buttons: list, x, y) -> Optional[str]:
+    """The key of the button under pixel (x, y), or None."""
+    if type(x) is not int or type(y) is not int:
+        return None
+    for bx, by, bw, bh, key in buttons:
+        if bx <= x < bx + bw and by <= y < by + bh:
+            return key
+    return None
+
+
 def run(host: Host, root: Screen, quit_keys=("ctrl-q",), agent=None) -> None:
     """The screen-stack loop. Esc at the root exits the app.
 
     `agent`, if given, is a function that makes the app's built-in assistant; Ctrl-N opens it from any
     screen (kos/office/agent.py - imported only when used)."""
     stack = [root]
+    buttons: list = []          # the clickable buttons of the page last drawn without a canvas of its own
 
     def draw():
         s = stack[-1]
-        if getattr(host, "mode", "tui") == "graphical":
+        mode = getattr(host, "mode", "tui")
+        buttons.clear()
+        if mode in FRAMED:
             cv = s.canvas(host.width, host.height)
             if cv is not None:
                 host.present(cv); return
+            cols, rows = max(12, host.width // font.CELL_W), max(5, host.height // font.CELL_H)
+            crumbs = " > ".join(x.title for x in stack if x.title) or "KOS"
+            cv, hit = page_canvas(host.width, host.height, crumbs, s.render(cols - 2, rows - 3), s.status(),
+                                  fill_buttons=(mode == "graphical"))
+            buttons.extend(hit)
+            host.present(cv); return
         h = max(5, host.height - 1)
         body = s.render(host.width, h)
         crumbs = " > ".join(x.title for x in stack if x.title) or "KOS"
@@ -551,6 +605,10 @@ def run(host: Host, root: Screen, quit_keys=("ctrl-q",), agent=None) -> None:
     if apply(root.on_enter()): return
     for ev in host.events():
         cmd = ev.get("cmd")
+        if cmd == "button" and buttons and ev.get("pressed") is True and ev.get("button") == "left":
+            clicked = button_at(buttons, ev.get("x"), ev.get("y"))
+            if clicked:                 # a click on a button is its key
+                ev, cmd = {"cmd": "key", "key": clicked}, "key"
         if cmd == "key":
             k = ev["key"]
             if k in quit_keys:

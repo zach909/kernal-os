@@ -43,7 +43,7 @@ def _recv_header(conn: socket.socket) -> dict:
         if len(buf) > MAX_HEADER:
             raise ValueError("header too large")
     h = json.loads(buf)
-    if h.get("cmd") != "load" or h.get("mode") not in ("tui", "graphical"):
+    if h.get("cmd") != "load" or h.get("mode") not in ("tui", "graphical", "text"):
         raise ValueError("bad load header")
     if not isinstance(h.get("size"), int) or not 0 < h["size"] <= MAX_ARCHIVE:
         raise ValueError("bad size")

@@ -7,9 +7,9 @@ A minimal app::
     def main():
         app = App()
         for event in app.events():
-            if app.mode == "tui":
+            if not app.draws_frames:             # "tui": a text page
                 app.screen("Hello", [f"last event: {event}"])
-            else:
+            else:                                # "graphical" and "text": the same frame ops
                 c = Canvas()
                 c.clear("#101820")
                 c.text(10, 10, "Hello", "#ffffff", 2)
@@ -83,6 +83,12 @@ class App:
         self._seq = 0
         self.ai_error = ""              # why the last ask was refused
         self.vault_error = ""           # why the last vault call was refused, for the app to show
+
+    @property
+    def draws_frames(self) -> bool:
+        """True in ``graphical`` and ``text`` mode: draw with ``present(Canvas)``, not ``screen``.
+        (``text`` mode draws the very same ops with characters; see kos/textdraw.py.)"""
+        return self.mode in ("graphical", "text")
 
     def send(self, obj: dict) -> None:
         self._sock.sendall(json.dumps(obj, separators=(",", ":")).encode() + b"\n")

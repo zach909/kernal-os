@@ -340,6 +340,7 @@ _MODE_WORDS: dict[str, str] = {
     "gráfico": "graphical", "grafico": "graphical", "graphique": "graphical",
     "grafisch": "graphical", "графический": "graphical", "图形": "graphical",
     "圖形": "graphical", "グラフィカル": "graphical",
+    "text": "text", "texto": "text", "texte": "text", "testo": "text", "текст": "text", "文字": "text",
     "cmd": "cmd", "raw": "cmd",
 }
 

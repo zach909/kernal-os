@@ -47,10 +47,12 @@ def listed(installed):
     return [a for a in installed if a["name"] not in (HOME, LIBRARY)]
 
 
-def chosen_mode(entry, prefer_graphical):
+def chosen_mode(entry, prefer):
+    """The mode to open an app in. ``prefer`` is True/"graphical", "text", or falsy for the text page."""
     modes = entry["modes"]
-    if prefer_graphical and "graphical" in modes:
-        return "graphical"
+    want = "graphical" if prefer is True else prefer
+    if want in ("graphical", "text") and want in modes:
+        return want
     return "tui" if "tui" in modes else modes[0]
 
 
@@ -175,7 +177,7 @@ def draw_graphical(app, state):
 
 def main():
     app = App()
-    state = {"installed": [], "open": [], "sel": 0, "graphical": False, "note": "", "ext": [], "query": None}
+    state = {"installed": [], "open": [], "sel": 0, "graphical": "text" if app.mode == "text" else False, "note": "", "ext": [], "query": None}
 
     def back():
         home = next((i for i in state["open"]
@@ -232,7 +234,7 @@ def main():
             elif k in ("q", "escape"):
                 back()
         elif cmd == "button" and ev["pressed"] and ev["button"] == "left" and state["query"] is None:
-            if app.mode == "graphical":
+            if app.draws_frames:
                 row = (ev["y"] - 26) // ROW_H
             else:
                 row = ev["y"] - TOP_LINES
@@ -243,7 +245,7 @@ def main():
                     state["sel"] = row
         if cmd == "pointer":
             continue
-        if app.mode == "graphical":
+        if app.draws_frames:
             draw_graphical(app, state)
         else:
             app.screen("App Library", tui_lines(state, app.height), status="enter: open | q: back")

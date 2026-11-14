@@ -145,7 +145,7 @@ def main():
                 if int(k) <= len(apps):
                     focus(apps[int(k) - 1])
         elif cmd == "button" and ev["pressed"] and ev["button"] == "left":
-            if app.mode == "graphical":
+            if app.draws_frames:
                 for x, y, cw, ch, _, ident in chips(app.width, state["open"]):
                     if x <= ev["x"] < x + cw and y <= ev["y"] < y + ch and ident:
                         app.request_focus(ident)
@@ -159,7 +159,7 @@ def main():
                     focus(apps[row])
         if cmd == "pointer":
             continue
-        if app.mode == "graphical":
+        if app.draws_frames:
             draw_graphical(app, state)
         else:
             app.screen("Taskbar", tui_lines(state), status="l: App Library | r: refresh")

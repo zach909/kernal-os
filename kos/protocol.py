@@ -10,7 +10,9 @@ treated as hostile: size-limited, schema-checked, and every string is stripped
 of control characters so an app cannot inject terminal escape sequences.
 
 OS -> app
-    {"cmd": "hello", "mode": "tui"|"graphical", "width": W, "height": H}
+    {"cmd": "hello", "mode": "tui"|"graphical"|"text"|"cmd", "width": W, "height": H}
+        (text mode: W, H are the drawing area in the app's own pixels, CELL_W x CELL_H per character cell;
+         a click is reported at the pixel in the middle of the cell it landed on - see textdraw.py)
     {"cmd": "key", "key": "a" | "enter" | "backspace" | "up" | ...}
     {"cmd": "pointer", "x": X, "y": Y}
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
@@ -33,13 +35,13 @@ OS -> app
 
 app -> OS
     {"cmd": "screen", "title": str, "lines": [str], "status": str}      (tui)
-    {"cmd": "frame", "ops": [op, ...]}                                   (graphical)
+    {"cmd": "frame", "ops": [op, ...]}                                   (graphical, text: same ops)
         op = ["clear", color] | ["rect", x, y, w, h, color]
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
     {"cmd": "request", "action": "apps"}                       list installed + open apps
-    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"graphical"|"text"|"cmd"}
     {"cmd": "request", "action": "open", "address": "kos://NAME[/path][?query]", "mode": ...}
                                          the same, as an address (see address.py); the app is told the path
     {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
@@ -86,7 +88,7 @@ MAX_COORD = 16384
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _APP_NAME_RE = ID_RE
 _INSTANCE_RE = INSTANCE_RE
-REQUEST_MODES = ("tui", "graphical", "cmd")
+REQUEST_MODES = ("tui", "graphical", "text", "cmd")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
 
@@ -172,7 +174,7 @@ def _request(msg: dict) -> dict:
         if not isinstance(app, str) or not _APP_NAME_RE.match(app):
             raise ProtocolError("request.app must be an app name")
         if mode not in REQUEST_MODES:
-            raise ProtocolError("request.mode must be tui, graphical or cmd")
+            raise ProtocolError("request.mode must be tui, graphical, text or cmd")
         return {"cmd": "request", "action": "open", "app": app, "mode": mode, "address": launch}
     if action in ("focus", "close"):
         ident = msg.get("id")
@@ -269,7 +271,7 @@ def validate_app_message(msg: Any, mode: str) -> dict:
                 "title": clean_text(msg.get("title", ""), 80),
                 "lines": [clean_text(l, MAX_LINE_CHARS) for l in lines],
                 "status": clean_text(msg.get("status", ""), 200)}
-    if cmd == "frame" and mode == "graphical":
+    if cmd == "frame" and mode in ("graphical", "text"):
         ops = msg.get("ops")
         if not isinstance(ops, list) or len(ops) > MAX_OPS:
             raise ProtocolError("frame.ops must be a list of at most 5000 ops")

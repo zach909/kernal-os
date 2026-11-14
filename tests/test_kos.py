@@ -3254,6 +3254,17 @@ class TestLayers(AddOnEnv):
         self.assertEqual(self.trail(), [("layer.gui.open", "refused")] * 2)
         self.assertEqual(self.prompter.asked, [])
 
+    def test_text_mode_goes_through_the_same_three_layers_and_a_missing_mode_stops_at_the_gui(self):
+        open_background(self.paths, self.authority(PW), "hello", "text", spawner=self.spawner)    # hello ships text
+        self.assertEqual(self.trail(), [("layer.gui.open", "pass"), ("layer.app.open", "pass"),
+                                        ("layer.kernel.open", "pass")])
+        before = len(self.trail())
+        with self.assertRaises(KAppError) as cm:                  # ext-hello has no text mode: no button for it
+            open_background(self.paths, self.authority(), "ext-hello", "text", spawner=self.spawner)
+        self.assertEqual(cm.exception.layer, "gui")
+        self.assertEqual(self.trail()[before:], [("layer.gui.open", "refused")])
+        self.assertEqual(self.prompter.asked, [])                 # refused before any password was asked
+
     def test_the_app_layer_refuses_an_unpermitted_app_and_no_password_is_ever_asked(self):
         PermitStore(self.paths).revoke("hello")
         with self.assertRaises(PermitError) as cm:

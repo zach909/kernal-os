@@ -189,12 +189,13 @@ class TestManifestPermission(unittest.TestCase):
 
     def test_an_app_may_ask_for_a_known_group_and_no_other(self):
         ok = KApp(self.zip({"name": "x", "version": "1", "runtime": "python", "entry": "app:main",
+                            "modes": ["tui", "text", "graphical"],
                             "permissions": ["service:audit", "service:files"]}))
         self.assertEqual(ok.manifest.permissions, ("service:audit", "service:files"))
         for bad in ("service:", "service:Audit", "service:nothing", "service:audit.tail", "service", "services:audit"):
             with self.subTest(bad=bad), self.assertRaises(KAppError):
                 KApp(self.zip({"name": "x", "version": "1", "runtime": "python", "entry": "app:main",
-                               "permissions": [bad]}))
+                               "modes": ["tui", "text", "graphical"], "permissions": [bad]}))
 
     def test_an_extension_or_a_mod_can_never_ask_the_os_for_anything(self):
         for kind, extends in (("extension", "hello"), ("mod", "taskbar")):
@@ -513,7 +514,8 @@ class TestARealAppAsksTheOS(Base):
         d = self.root / "askapp"
         d.mkdir(exist_ok=True)
         (d / "manifest.json").write_text(json.dumps({"name": "askapp", "version": "1", "runtime": "python",
-                                                     "entry": "app:main", "permissions": permissions}))
+                                                     "entry": "app:main", "permissions": permissions,
+                                                     "modes": ["tui", "text", "graphical"]}))
         (d / "app.py").write_text(APP)
         kapp = self.root / "askapp.kapp"
         pack(d, kapp)

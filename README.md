@@ -119,6 +119,8 @@ Honest list, so nobody assumes these are covered:
 | File summaries | Every user file has a text summary (`kos/summary.py`): vault and shared-folder items (a `.summaries/` folder beside them, rewritten on each put, removed on delete, created on first ask for older items), `kos write` (printed, stored by content hash under `<state>/summaries/`), and backed-up files (stored the same way, shown by `kos backup list`). File search indexes the summary and shows it first. The summary is the kind, size, shape and a quoted start ("PNG image, 64x48 pixels", "text drawing, 3 lines"): it does **not** describe what a picture shows, which would need a model. Text is summarised too, with no exemption; the quoted start is untrusted and cleaned. **Not covered:** apps cannot ask for a summary (no `vault` protocol op, so no new message to validate yet); files an app only ever saw through `kos ls`/`cat`/`explore`, or anything written outside these three paths (for example `kos convert`, `pack`, and the OS's own plain writes), get none; summaries of removed backups and overwritten `kos write` files are not pruned; a summary is only as old as the last write, so a file edited outside KOS is stale until it is written again. |
 | Pictures | `kos/vectorize.py` turns pixels into `rect`/`line` ops, it is not an image codec. Small, flat pictures (icons, pixel art, diagrams) are exact; a photo is posterised and blocky because it must fit 5000 ops, and the cap on input is 512x512 pixels. No antialiasing or alpha, and no file decoding (PNG/JPEG): the app hands it rows of colours. Tested through the real `Framebuffer` and the protocol validator, never on `/dev/fb0` or the terminal backend, and no existing app uses it yet (the image editor still exports files only). |
 | Search box | The Ctrl-N box and the App Library's `/` search (`kos/office/finder.py`) only *show*: a command hit is the line to type, never a run, and an app hit is a `request` the OS still asks your password for. File search covers only what the app can already read (its own vault plus the shared folders it was granted), at most 200 items and 20,000 characters each per place, and never keys that look like credentials (`llm`, `api_key`, `token`, `password`, ...), the agent's chat history or exports. That filter is a **name pattern, not a classifier**: a secret stored under an ordinary key name (say `note-7`) would be searchable by that same app. The App Library has no files of its own, so it searches apps and commands only, and its "Ask the assistant" row opens the `ai-assistant` app but cannot hand it your question. The command list is a generated table (`python3 -m kos.office.cmdindex --write`); a test fails if it drifts from `kos help`. Not tested: the graphical-mode drawing of the Ctrl-N box. |
+| Text mode (`kos/textdraw.py`) | `run text NAME`: the same `frame` ops as graphical, drawn on a character grid (at most 400 x 200 cells). A frame changes the last one, like graphical; one frame may touch at most 400,000 cells and ops past that are **dropped, counted, and shown on the status bar** (a one-op `clear` on a full grid costs 79,200). Every character is vetted (control, bidi, combining and double-width characters become `?`); the title bar, status bar, pointer and password overlay are the OS's and are drawn last. **Not covered:** (1) a rectangle shorter or narrower than half a cell is drawn as a rule (`-` or `|`) and a click may miss it, and one too small to hold a cell middle is drawn in the one cell around its middle, which a click may also miss, so a button smaller than a cell is not reliably clickable in text mode; (2) shading is by brightness only, colour is lost, and text is shown reversed when darker than what is under it; (3) text at scale 2 or more is spaced out one cell per scale step, not enlarged; (4) clicks on the OS title or status bar are reported with a row outside the app's area, as in the text page; (5) **not tested on a real terminal, serial console or `/dev/fb0`:** only on the in-memory grid and a socket pair; (6) text mode is not yet in the kernel-cell boot image's tests (`kos/cellagent.py` accepts it, nothing runs it). |
+| System apps ship text and graphical | `kos/kapp.py` refuses a manifest of a system app (the taskbar, the App Library, or any app holding `system` or `service:GROUP`) without both `text` and `graphical`. Only *declared* permissions count: a program inside a group that asks with `ask:ACTION` is not a system app, and the old single-app `examples/backup` (which holds `system`) now lists `text`. All 14 of the OS's own apps pass a test that builds their first screen in both modes and validates the frame. **Not covered:** the generic page is the lines of the text page plus Back / Up / Down / OK buttons; a screen that needs a mouse for anything else (clicking a list row to select it) still needs its own canvas, and only the taskbar and App Library have one. The rule is read when a manifest is parsed; apps installed before it keep their old sealed manifest until updated. |
 | Graphics frames | `kos/display.py`: graphical frames are queued and drawn in order onto the scene already on screen (the last frame, changed), not swapped in whole. Each render has a 30 ms drawing budget; once it runs out, only *big* ops (clipped bounding box of at least 1/16 of the screen, a `clear` always) are applied and small ones are dropped for good, so a dropped small change stays missing until the app redraws that area. Lines and text count by bounding box, so a thin line is always "small". An app that relied on each frame starting blank must now send `clear`. Not tested: timing on real hardware (`/dev/fb0`) or the terminal backend, and the 30 ms budget is a guess, not measured. |
 | Local mesh | Design only, no code: `docs/MESH.md`. No pairing, peer transport, proximity sensing, camera or tether sharing exists, and the design conflicts with the firmware gate (radios are unbound at boot) and needs the same encryption dependency decision as the pipeline row above. |
 
@@ -141,6 +143,7 @@ power on
      (every line is a command - human language runs a KOS command, code runs sandboxed)
   └─ run hello                       → password → app opens as a text page
                 run graphical hello  → password → app opens graphically
+                run text hello       → password → app opens drawn with text (same draw commands, no pixels)
                    "Boot mouse?"     → y → password → mouse now sends commands to the app
                    "Boot keyboard?"  → y → password → keys now go to the app
 ```
@@ -305,8 +308,8 @@ kos install app.kapp       install (kept zipped, sealed); a folder installs ever
 kos pack GROUP -o FOLDER   a group of apps: one .kapp per app (see Groups of apps)
 kos update app.kapp        update to a NEWER version (downgrades refused)
 kos remove NAME / kos list
-run [graphical|cmd] NAME   run in the foreground: text page, graphical, or raw command stream
-kos open [graphical|cmd] NAME   open in the background, return immediately
+run [graphical|text|cmd] NAME   run in the foreground: text page, graphical, drawn with text, or raw command stream
+kos open [graphical|text|cmd] NAME   open in the background, return immediately
 kos ps                     apps opened with 'kos open'
 kos attach ID               connect your terminal to one (Ctrl-C detaches, doesn't kill it)
 kos close ID                actually stop one
@@ -371,10 +374,27 @@ them. `kos/launchmap.py` lists, for every command, whether it is an app, kept in
 machine needs it before any app exists (`install`, `update`, `remove`, `permit`, `list`, `help`, `line`), or the
 OS's own.
 
-Three ways to run an app: `run NAME` (a text page), `run graphical NAME`
-(pixels), `run cmd NAME` (no drawing at all - the raw stream of commands the
-OS is sending the app and the app is sending back, for scripting or for
-seeing exactly what crosses the wire).
+Four ways to run an app: `run NAME` (a text page), `run graphical NAME`
+(pixels), `run text NAME` (the same draw commands as graphical, drawn with
+characters on a grid: box and line characters, shading, no pixels, no colour, so it
+works on a serial console, over SSH or with no framebuffer; `KOS_TEXT_ASCII=1`
+limits it to plain ASCII), `run cmd NAME` (no drawing at all - the raw stream
+of commands the OS is sending the app and the app is sending back, for scripting
+or for seeing exactly what crosses the wire).
+
+**A system app ships text and graphical.** An app that is the taskbar or the App
+Library, or that holds `system` or a `service:GROUP` permission (it can ask the OS to
+act), must list both `text` and `graphical` in its manifest `modes`; the manifest is
+refused otherwise (`kos/kapp.py` `is_system_app`). All of the OS's own apps do: a screen with no canvas
+of its own is drawn from its text lines with a row of buttons (`kos/office/ui.py`
+`page_canvas`). Every app of any kind goes through the same three layers (gui, app,
+kernel: `kos/layers.py`) in every mode, including text. **In an app,** use
+`app.draws_frames` (true in graphical and text mode), not `app.mode == "graphical"`.
+
+**The button clicker in text mode.** A click lands on a character cell and the app is
+told the pixel at the middle of that cell (6 x 12 pixels per cell, `kos/font.py`
+`CELL_W`/`CELL_H`). A rectangle fills a cell exactly when the cell's middle is inside it,
+so what is drawn filled is what a click hits (a test checks this over 300 random rectangles).
 
 **Pictures.** KOS has no image command: a frame is `clear`, `rect`, `line` and
 `text` only, at most 5000 ops. An app that wants to show a picture turns the

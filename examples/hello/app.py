@@ -20,7 +20,7 @@ def main():
                 typed += k
         elif cmd == "button" and ev["pressed"]:
             clicks += 1
-            if app.mode == "graphical" and ev["y"] > 40:
+            if app.draws_frames and ev["y"] > 40:
                 dots.append((ev["x"], ev["y"]))
         if cmd != "pointer":
             history = (history + [f"{cmd}: {ev}"])[-8:]

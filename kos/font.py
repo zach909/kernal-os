@@ -7,6 +7,10 @@ GLYPH_W = 5
 GLYPH_H = 7
 ADVANCE = 6
 LINE_HEIGHT = 9
+# One character cell of the text mode (kos/textdraw.py), in the pixels an app draws in: a letter at
+# scale 1 is exactly one cell wide, and a 12-pixel row (the pitch the apps already use) is one cell tall.
+CELL_W = ADVANCE
+CELL_H = 12
 
 _F = {
     " ": [0, 0, 0, 0, 0, 0, 0],

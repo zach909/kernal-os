@@ -30,7 +30,9 @@ def manifest(e) -> dict:
     perms = (["storage"] + [f"owns:{x}" for x in e.owns] + [f"uses:{x}" for x in e.uses]
              + [f"service:{x}" for x in getattr(e, "services", [])] + (["system"] if getattr(e, "system", False) else [])
              + (["network"] if e.network else []))
-    modes = ["tui", "graphical"] if e.graphical else ["tui"]
+    # a system app ships text and graphical (kos/kapp.py SYSTEM_MODES); every one of them can: a screen with no
+    # canvas of its own is drawn from its lines with a button row (kos/office/ui.py page_canvas)
+    modes = ["tui", "text", "graphical"]
     desc = f"{e.title}" + (f" - {e.note}" if e.note else "")
     return {"name": e.name, "version": "1.0", "runtime": "python", "entry": "app:main", "modes": modes,
             "permissions": perms, "description": desc[:200]}

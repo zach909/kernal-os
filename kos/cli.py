@@ -11,9 +11,10 @@
     kos list
     run NAME                        run the app as a text (TUI) page
     run graphical NAME              run the app's graphical version
+    run text NAME                   run it drawn with text: the same draw commands on a character grid
     run cmd NAME                    run it with no drawing: raw command stream
-    run [graphical|cmd] NAME --cell C   run it inside kernel cell C
-    kos open [graphical|cmd] NAME   open an app in the background, return immediately
+    run [graphical|text|cmd] NAME --cell C   run it inside kernel cell C
+    kos open [graphical|text|cmd] NAME   open an app in the background, return immediately
     kos go kos://NAME[/path][?q]    open an address, like a browser's address bar (run/open take them too)
     kos extend NAME                 switch an extension or mod on for the app it extends (password)
     kos extend --revoke NAME / --list
@@ -24,7 +25,7 @@
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
     kos desktop install             pack, scan, install + permit the taskbar and App Library
-    kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
+    kos boot desktop [--graphical|--text]  the desktop: taskbar + App Library apps; right mouse = App Library
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
     kos activity                    one feed: open apps + recent password decisions
@@ -218,13 +219,13 @@ def cmd_list(args, paths: Paths) -> int:
 def _parse_run_target(words: list[str]) -> tuple[str, str]:
     if len(words) == 1:
         return "tui", words[0]
-    if len(words) == 2 and words[0] in ("graphical", "cmd"):
+    if len(words) == 2 and words[0] in ("graphical", "text", "cmd"):
         return words[0], words[1]
-    raise KAppError("usage: run [graphical|cmd] APP")
+    raise KAppError("usage: run [graphical|text|cmd] APP")
 
 
 def _address_and_mode(explicit: str | None, text: str):
-    """An app name or a kos:// address, and the mode: a word you typed (graphical, cmd) wins,
+    """An app name or a kos:// address, and the mode: a word you typed (graphical, text, cmd) wins,
     the address's ?mode= comes next, tui last. Saying two different modes is an error."""
     from .address import AddressError, parse
     addr = parse(text)
@@ -396,7 +397,9 @@ def cmd_boot(args, paths: Paths) -> int:
     from .desktop import Desktop, DesktopError
     from .registry import Registry
 
-    mode = "graphical" if args.graphical else "tui"
+    if args.graphical and args.text:
+        raise KAppError("choose --graphical or --text, not both")
+    mode = "graphical" if args.graphical else ("text" if args.text else "tui")
     authority, prompter = _authority(paths)
     authority.authorize("device.desktop").close()
     prompter.close()
@@ -562,6 +565,7 @@ def _build_surface(mode, name, term):
     from .cmdsurface import CmdSurface
     from .devices import EvdevDevices, TerminalDevices
     from .display import FbdevBackend, GraphicalSurface, TerminalBackend
+    from .textdraw import TextDrawSurface
     from .tui import TUISurface
 
     cols, rows = term.size()
@@ -571,6 +575,8 @@ def _build_surface(mode, name, term):
         return CmdSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if mode == "tui":
         return TUISurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
+    if mode == "text":
+        return TextDrawSurface(1, cols, rows, name), TerminalDevices(term, cell_to_pixels=False)
     if use_fb:
         backend = FbdevBackend(tty_fd=0)
         return (GraphicalSurface(backend, status_in_frame=True),
@@ -1327,11 +1333,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("remove", help="remove an app")
     s.add_argument("name")
     sub.add_parser("list", help="list installed apps")
-    s = sub.add_parser("run", help="run an app: run [graphical|cmd] NAME")
+    s = sub.add_parser("run", help="run an app: run [graphical|text|cmd] NAME")
     s.add_argument("target", nargs="+")
     s.add_argument("--cell", help="run inside this kernel cell")
-    s = sub.add_parser("open", help="open an app in the background: open [graphical|cmd] NAME")
-    s.add_argument("mode", nargs="?", choices=["graphical", "cmd"], default=None)
+    s = sub.add_parser("open", help="open an app in the background: open [graphical|text|cmd] NAME")
+    s.add_argument("mode", nargs="?", choices=["graphical", "text", "cmd"], default=None)
     s.add_argument("name")
     s = sub.add_parser("go", help="open an address, like a browser's address bar: go kos://NAME[/path][?query]")
     s.add_argument("address")
@@ -1357,6 +1363,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("boot", help="boot the desktop: the taskbar + App Library, made of apps")
     s.add_argument("what", choices=["desktop"])
     s.add_argument("--graphical", action="store_true", help="draw the desktop graphically")
+    s.add_argument("--text", action="store_true", help="draw the desktop with text (works with no framebuffer)")
     s = sub.add_parser("desktop", help="set up the desktop apps")
     s.add_argument("desktop_cmd", choices=["install"])
     s.add_argument("--from", dest="src", help="directory holding taskbar/ and app-library/")
@@ -1550,36 +1557,13 @@ COMMANDS = {
     "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
     "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
+    "overlay": cmd_overlay, "hardware": cmd_hardware, "folders": cmd_folders, "ai": cmd_ai,
+    "runtimes": cmd_runtimes,
     # the commands that are apps now: the command line only opens the app
     "skills": cmd_skills,
     **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
                                   "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
 
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
-COMMANDS = {
-    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
-    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
-    "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
-    "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
-    "doctor": cmd_doctor, "firmware": cmd_firmware, "hardware": cmd_hardware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
-    "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help}
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
-    "runtimes": cmd_runtimes}
 
 
 def main(argv: list[str] | None = None) -> int:
