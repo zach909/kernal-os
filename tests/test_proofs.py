@@ -31,6 +31,17 @@ class TestProofs(unittest.TestCase):
         # a counter that may reach the limit CAN wrap
         s = z3.BitVec("s", 64)
         self.assertFalse(proofs._proved(z3.UGT(s + 1, s)))
+        # KOS-SILENT: a one-byte length field cannot hold a full record's length
+        m = z3.BitVec("m", 32)
+        self.assertFalse(proofs._proved(z3.ZeroExt(24, z3.Extract(7, 0, m)) == m, z3.ULE(m, proofs.CELL_CAP)))
+        # KOS-SILENT: if more records than the fewest were allowed, the padding could be more than a record
+        n, c = z3.Ints("n c")
+        pad = c * proofs.CELL_CAP - n
+        self.assertFalse(proofs._proved(pad <= proofs.CELL_CAP,
+                                        z3.And(n >= 0, n <= proofs.MAX_MESSAGE, c >= 1, c * proofs.CELL_CAP >= n)))
+        # KOS-SILENT: with the wrong padding the answer is NOT the size of the question
+        p = z3.Int("p")
+        self.assertFalse(proofs._proved(proofs.X_LEN + proofs.CT_LEN + p == proofs.HS_PLAIN, p >= 0))
 
 
 if __name__ == "__main__":
