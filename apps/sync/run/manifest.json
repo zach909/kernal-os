@@ -1,0 +1,13 @@
+{
+  "name": "sync.run",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:sync"
+  ],
+  "description": "Syncs one shared folder with a linked device that is waiting (sync.serve). Nothing is lost: conflicts keep both."
+}

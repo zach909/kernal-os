@@ -118,9 +118,7 @@ class Session:
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
                  guard: Optional[Guard] = None, allow_network: Optional[bool] = None,
-                 app_pid: Optional[int] = None):
-                 status_ok: bool = False):
-                 services=None):
+                 app_pid: Optional[int] = None, status_ok: bool = False, services=None):
         self.name, self.mode = name, mode
         # A layer with no pointer (the text layer) is never offered the mouse.
         self.has_pointer = getattr(surface, "has_pointer", True)

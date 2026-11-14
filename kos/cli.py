@@ -69,6 +69,7 @@ from . import loader
 from .admin import AdminError, WriteBlocked
 from .ai import AIError
 from .backup import BackupError, VaultTamperedError
+from .launchmap import APP_FOR_COMMAND
 from .auth import (AuthError, Authority, AuthorizationDenied, KdfParams, PasswordStore,
                    derive_master, subkey)
 from .cells import CellError
@@ -281,8 +282,8 @@ def cmd_run(args, paths: Paths) -> int:
         vault = _vault_for(paths, name, app.manifest.permissions) if not args.cell else None
         code = _run_session(name, mode, Channel(sock), proc, authority, open(log_path, "a"),
                             bridge=bridge, vault=vault, extensions=_extensions_for(paths, name),
-                            allow_network=policy.allow_network)
-                            status_ok=_may_status(app.manifest.permissions))
+                            allow_network=policy.allow_network,
+                            status_ok=_may_status(app.manifest.permissions),
                             services=_services_for(paths, name, app.manifest.permissions))
     finally:
         if cache_dir is not None:
@@ -358,7 +359,7 @@ def _attach_session(paths: Paths, authority: Authority, inst, **session_kwargs) 
                         detach_on_interrupt=True, bridge=bridge, app_pid=inst.app_pid or None,
                         vault=_vault_for(paths, inst.name, perms),
                         extensions=_extensions_for(paths, inst.name),
-                        status_ok=inst.system or _may_status(perms), **session_kwargs)
+                        status_ok=inst.system or _may_status(perms),
                         services=_services_for(paths, inst.name, perms), **session_kwargs)
 
 
@@ -1193,42 +1194,6 @@ def cmd_convert(args, paths: Paths) -> int:
     return 0
 
 
-def cmd_skills(args, paths: Paths) -> int:
-    """Make agent skills from the installed apps and the commands. One password
-    (``skill.make``) verifies every app's seal. Printing writes nothing; with
-    --out, each SKILL.md is a guarded write (admin keyboard, scan, optimize)."""
-    from .skillmaker import collect_apps, command_inventory, make_skills
-    authority, prompter = _authority(paths)
-    helps: dict = {}
-    manifests, skipped = collect_apps(paths, authority, helps)
-    prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
-    for line in skipped + refused:
-        print(line, file=sys.stderr)
-    if not args.out:
-        for rel, text in files.items():
-            print(f"=== {rel}\n{text}")
-        return 0
-    from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
-    out = Path(os.path.abspath(args.out))
-    if not out.is_dir() or out.is_symlink():
-        raise KAppError(f"{out} must be an existing directory (not a symlink)")
-    kb = AdminKeyboard(paths)
-    lease = kb.require_booted()          # refuse before any password prompt
-    devices = open_admin_devices(lease)
-    try:
-        wprompter = AdminPrompter(devices) if devices is not None else TTYPrompter()
-        wauth = Authority(paths, wprompter)
-        for rel, text in files.items():
-            target = out / rel
-            target.parent.mkdir(exist_ok=True)   # an empty directory; the content is a guarded write
-            print(write_file(paths, wauth, kb, str(target), text.encode()).summary())
-    finally:
-        if devices is not None:
-            devices.close()
-    return 0
-
-
 def _execute_line(argv: list[str]) -> int:
     """Run one interpreted command in-process. argparse exits on bad usage;
     in the line shell that must not end the shell."""
@@ -1506,17 +1471,6 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {
-    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
-    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
-    "boot": cmd_boot, "desktop": cmd_desktop, "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore,
-    "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-    "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor, "firmware": cmd_firmware,
-    "audit": cmd_audit, "security": cmd_security, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
-    "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin, "write": cmd_write, "skills": cmd_skills,
-    "convert": cmd_convert, "backup": cmd_backup, "folders": cmd_folders, "aios": cmd_aios, "usb": cmd_usb,
-    "help": cmd_help, "ai": cmd_ai, "runtimes": cmd_runtimes}
 def cmd_skills(args, paths: Paths) -> int:
     """`kos skills` is the Skill Maker app (a preview). `kos skills --out DIR` stays here: each SKILL.md is a
     guarded write (administrator keyboard, scan, optimize), and the exclusive keyboard is not something an app
@@ -1525,9 +1479,10 @@ def cmd_skills(args, paths: Paths) -> int:
         return _launcher("skills")(args, paths)
     from .skillmaker import collect_apps, command_inventory, make_skills
     authority, prompter = _authority(paths)
-    manifests, skipped = collect_apps(paths, authority)
+    helps: dict = {}
+    manifests, skipped = collect_apps(paths, authority, helps)
     prompter.close()
-    files, refused = make_skills(command_inventory(build_parser()), manifests)
+    files, refused = make_skills(command_inventory(build_parser()), manifests, helps)
     for line in skipped + refused:
         print(line, file=sys.stderr)
     from .admin import AdminKeyboard, AdminPrompter, open_admin_devices, write_file
@@ -1550,6 +1505,7 @@ def cmd_skills(args, paths: Paths) -> int:
     return 0
 
 
+
 def _launcher(command: str):
     """The command line's whole job for a command that is an app now: run that app (kos/launchmap.py).
     The app is installed with `kos desktop install`; until it is, say so instead of doing the work here."""
@@ -1570,41 +1526,17 @@ def _launcher(command: str):
     return go
 
 
+# Commands that are apps now (kos/launchmap.py) only open the app; `skills` and `scan` keep their own
+# function because `skills --out` and `scan watch` are guarded writes / a watcher the OS itself runs.
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot,
-    "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
-    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
-    # the commands that are apps now: the command line only opens the app
-    "skills": cmd_skills,
-    **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
-                                  "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
-
-COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install,
-            "update": cmd_update, "view": cmd_view, "remove": cmd_remove, "list": cmd_list,
-            "run": cmd_run, "open": cmd_open, "go": cmd_go, "extend": cmd_extend, "ps": cmd_ps,
-            "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "desktop": cmd_desktop,
-            "ls": cmd_ls, "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity,
-            "permit": cmd_permit, "grant": cmd_grant, "spaces": cmd_spaces, "dirs": cmd_dirs,
-            "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell, "doctor": cmd_doctor,
-            "security": cmd_security, "firmware": cmd_firmware, "audit": cmd_audit,
-            "admin": cmd_admin, "owed": cmd_owed, "settle": cmd_settle, "write": cmd_write,
-            "backup": cmd_backup, "folders": cmd_folders, "convert": cmd_convert, "skills": cmd_skills, "do": cmd_do,
-            "exec": cmd_exec, "usb": cmd_usb, "aios": cmd_aios, "line": cmd_line,
-            "ai": cmd_ai}
-COMMANDS = {
-    "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
-    "view": cmd_view, "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls,
-    "cat": cmd_cat, "explore": cmd_explore, "activity": cmd_activity, "permit": cmd_permit, "grant": cmd_grant,
-    "spaces": cmd_spaces, "dirs": cmd_dirs, "scan": cmd_scan, "optimize": cmd_optimize, "cell": cmd_cell,
-    "doctor": cmd_doctor, "firmware": cmd_firmware, "hardware": cmd_hardware, "audit": cmd_audit, "security": cmd_security, "do": cmd_do,
-    "line": cmd_line, "exec": cmd_exec, "owed": cmd_owed, "settle": cmd_settle, "admin": cmd_admin,
-    "write": cmd_write, "skills": cmd_skills, "convert": cmd_convert, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai,
-    "runtimes": cmd_runtimes}
+    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
+    "boot": cmd_boot, "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
+    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai, "hardware": cmd_hardware,
+    "runtimes": cmd_runtimes, "scan": cmd_scan, "skills": cmd_skills,
+    **{c: _launcher(c) for c in APP_FOR_COMMAND if c not in ("scan", "skills")}}
 
 
 def main(argv: list[str] | None = None) -> int:

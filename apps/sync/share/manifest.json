@@ -1,0 +1,13 @@
+{
+  "name": "sync.share",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:sync"
+  ],
+  "description": "Chooses a folder to sync, under a short name. A linked device can name the folder, never a path."
+}
