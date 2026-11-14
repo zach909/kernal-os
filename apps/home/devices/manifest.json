@@ -1,0 +1,9 @@
+{
+  "name": "home.devices",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["owns:home"],
+  "description": "Smart home overview: every paired device, its room and the state you asked for. Owns the 'home' shared folder; read-only screen."
+}

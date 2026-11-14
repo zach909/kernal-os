@@ -1,0 +1,9 @@
+{
+  "name": "home.control",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["uses:home"],
+  "description": "Turns a paired device on or off and sets its level. Records what you asked for in the 'home' shared folder. It cannot add devices."
+}
