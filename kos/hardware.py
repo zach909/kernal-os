@@ -67,6 +67,14 @@ DEVICE_ATTRS = ("vendor", "device", "class", "subsystem_vendor", "subsystem_devi
                 "operstate", "speed", "duplex", "type")
 LINK_ATTRS = ("current_link_speed", "current_link_width", "max_link_speed", "max_link_width",
               "devpath", "busnum", "devnum")
+# FPGA support. The kernel's own FPGA framework registers three kinds of class device: a manager
+# (the thing that loads a bitstream into the fabric), a region (a part of the fabric a design is
+# loaded into) and a bridge (the gate between the CPU side and a region). Finding one is a fact
+# the kernel states. A PCI vendor id is only a hint: these vendors also make chips that are not
+# FPGAs, so those are reported as candidates, never as FPGAs.
+FPGA_SUBSYSTEMS = {"fpga_manager": "manager", "fpga_region": "region", "fpga_bridge": "bridge"}
+FPGA_ATTRS = ("name", "state", "status")
+FPGA_PCI_VENDORS = {"0x10ee": "Xilinx/AMD", "0x1172": "Altera/Intel", "0x1204": "Lattice"}
 SKIP_DIRS = frozenset({"power", "msi_irqs", "iommu", "firmware_node", "subsystem", "driver"})
 
 MAX_DEVICES = 20000
@@ -80,6 +88,7 @@ NOT_VISIBLE = (
     "what is plugged into the far end of a port (a live carrier is not an identity)",
     "individual GPIO lines (only the count per chip; naming a line needs a device-file ioctl)",
     "devices the firmware hides from the OS",
+    "FPGA fabric contents: what design is loaded, or what is wired inside (only the kernel's FPGA framework devices and PCI vendor hints are seen)",
     "serial numbers, MAC addresses and unique ids (never read)",
 )
 
@@ -162,6 +171,16 @@ def _device(rel: str, path: Path, parent: Optional[str], notes: dict) -> tuple[d
     dev = {"id": rel, "resource": "hw:" + rel, "name": clean(os.path.basename(rel)),
            "subsystem": _link_name(path.joinpath("subsystem")), "driver": _link_name(path.joinpath("driver")),
            "parent": parent, "attrs": attrs}
+    kind = FPGA_SUBSYSTEMS.get(dev["subsystem"])
+    if kind:
+        for n in FPGA_ATTRS:
+            if n not in attrs and (v := _attr(path.joinpath(n), notes)) is not None:
+                attrs[n] = v
+        dev["fpga"] = {"kind": kind, "basis": "kernel FPGA framework"}
+    elif dev["subsystem"] == "pci" and attrs.get("vendor", "").lower() in FPGA_PCI_VENDORS:
+        dev["fpga"] = {"kind": "pci-candidate",
+                       "basis": "PCI vendor id " + FPGA_PCI_VENDORS[attrs["vendor"].lower()]
+                                + " (a guess: that vendor also makes chips that are not FPGAs)"}
     return dev, link_attrs
 
 
@@ -291,6 +310,19 @@ def _devicetree(root: Path, notes: dict, max_dirs: int) -> tuple[dict, list]:
     return devices, links
 
 
+def _fpga_summary(devices: dict) -> dict:
+    """What the scan found about FPGAs. ``can_load_bitstream`` only says the kernel has a manager
+    registered; it is not a promise that KOS (or anything) may load one: that is a separate,
+    password-gated action that does not exist yet."""
+    count = {"manager": 0, "region": 0, "bridge": 0, "pci-candidate": 0}
+    for d in devices.values():
+        f = d.get("fpga")
+        if f:
+            count[f["kind"]] += 1
+    return {"managers": count["manager"], "regions": count["region"], "bridges": count["bridge"],
+            "pci_candidates": count["pci-candidate"], "can_load_bitstream": count["manager"] > 0}
+
+
 def scan(root: Path = Path("/"), max_devices: int = MAX_DEVICES, max_dirs: int = MAX_DIRS) -> Map:
     """Look at the machine. ``root`` is a fake tree in tests, ``/`` for real. Reads only."""
     notes = {"sources": {"devices": False, "devlink": False, "devicetree": False},
@@ -309,6 +341,7 @@ def scan(root: Path = Path("/"), max_devices: int = MAX_DEVICES, max_dirs: int =
     for link in links:
         link["resource"] = f"hwlink:{link['kind']}:{link['from']}>{link['to']}"
     notes["truncated"] = sorted(set(notes["truncated"]))
+    notes["fpga"] = _fpga_summary(devices)
     return Map(devices=sorted(devices.values(), key=lambda d: d["id"]),
                links=sorted(links, key=lambda l: (l["kind"], l["from"], l["to"])), notes=notes)
 

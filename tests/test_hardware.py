@@ -430,6 +430,71 @@ class TestTheCommand(Env):
         self.assertIn("hardware", [c[0] for c in cmdindex.COMMANDS])
 
 
+class TestFpga(MapTest):
+    """FPGAs: the kernel's FPGA framework devices are facts; a PCI vendor id is only a hint."""
+
+    def zynq(self):
+        soc = "platform/soc/f8007000.devcfg"
+        self.m.device("platform/soc", subsystem="platform")
+        self.m.device(soc, subsystem="platform", driver="xdevcfg")
+        self.m.device(soc + "/fpga_manager/fpga0", {"name": "Xilinx Zynq FPGA Manager", "state": "operating",
+                                                    "status": "0x0"}, subsystem="fpga_manager")
+        self.m.device("platform/soc/region0", {"name": "region0"}, subsystem="fpga_region")
+        self.m.device("platform/soc/bridge0", {"name": "br0", "state": "enabled"}, subsystem="fpga_bridge")
+        return soc
+
+    def test_the_kernels_fpga_devices_are_marked_with_their_kind(self):
+        soc = self.zynq()
+        f = self.scan()
+        mgr = self.dev(f, soc + "/fpga_manager/fpga0")
+        self.assertEqual(mgr["fpga"]["kind"], "manager")
+        self.assertEqual(mgr["attrs"]["state"], "operating")
+        self.assertEqual(self.dev(f, "platform/soc/region0")["fpga"]["kind"], "region")
+        self.assertEqual(self.dev(f, "platform/soc/bridge0")["fpga"]["kind"], "bridge")
+        self.assertNotIn("fpga", self.dev(f, soc))                       # its parent is not marked
+        self.assertEqual(f.notes["fpga"], {"managers": 1, "regions": 1, "bridges": 1,
+                                           "pci_candidates": 0, "can_load_bitstream": True})
+
+    def test_a_pci_card_from_an_fpga_vendor_is_a_candidate_not_an_fpga(self):
+        self.m.device("pci0000:00/0000:00:03.0", {"vendor": "0x10EE", "device": "0x7024", "class": "0x058000"},
+                      subsystem="pci", driver="xdma")
+        f = self.scan()
+        card = self.dev(f, "pci0000:00/0000:00:03.0")
+        self.assertEqual(card["fpga"]["kind"], "pci-candidate")
+        self.assertIn("a guess", card["fpga"]["basis"])
+        self.assertEqual(f.notes["fpga"]["pci_candidates"], 1)
+        self.assertFalse(f.notes["fpga"]["can_load_bitstream"])         # a PCI id proves no manager
+
+    def test_a_machine_without_fpgas_has_no_fpga_marks(self):
+        f = self.scan()
+        self.assertTrue(all("fpga" not in d for d in f.devices))
+        self.assertEqual(f.notes["fpga"], {"managers": 0, "regions": 0, "bridges": 0,
+                                           "pci_candidates": 0, "can_load_bitstream": False})
+
+    def test_a_device_cannot_claim_to_be_an_fpga_by_its_name(self):
+        self.m.device("usb-fpga", {"name": "fpga_manager", "product": "FPGA manager"}, subsystem="usb")
+        self.m.device("pci0000:00/0000:00:04.0", {"vendor": "0x8086", "name": "fpga_manager"}, subsystem="pci")
+        self.assertEqual(self.scan().notes["fpga"]["managers"], 0)
+
+    def test_fpga_strings_are_cleaned_like_every_other_device_string(self):
+        self.m.device("platform/f", {"name": "evil\x1b[2Jname", "state": "x" * 500}, subsystem="fpga_manager")
+        a = self.dev(self.scan(), "platform/f")["attrs"]
+        self.assertNotIn("\x1b", a["name"])
+        self.assertLessEqual(len(a["state"]), hardware.MAX_VALUE)
+
+    def test_the_map_says_the_fabric_contents_are_not_visible(self):
+        self.assertTrue(any("FPGA fabric" in n for n in self.scan().notes["not_visible"]))
+
+    def test_fpga_marks_survive_save_and_load(self):
+        self.zynq()
+        from kos.paths import Paths
+        with tempfile.TemporaryDirectory() as t:
+            paths = Paths(Path(t))
+            hardware.save(paths, self.scan())
+            got = hardware.load(paths)
+        self.assertEqual(got.notes["fpga"]["managers"], 1)
+
+
 class TestARealTree(unittest.TestCase):
     @unittest.skipUnless(Path("/sys/devices").is_dir(), "no /sys/devices on this machine")
     def test_the_walker_survives_this_machines_real_sysfs(self):
