@@ -518,6 +518,60 @@ class TestNeuromorphic(MapTest):
         self.assertTrue(any("neuromorphic" in n for n in self.scan().notes["not_visible"]))
 
 
+class TestProcessors(MapTest):
+    def kind(self, found, id_):
+        return self.dev(found, id_).get("processor")
+
+    def test_what_the_kernel_or_device_states_is_certain(self):
+        self.m.device("system/cpu/cpu0", subsystem="cpu")
+        self.m.device("pci0000:00/0000:00:02.0", {"vendor": "0x8086", "class": "0x030000"}, subsystem="pci")
+        self.m.device("pci0000:00/0000:00:07.0", {"vendor": "0x1234", "class": "0x120000"}, subsystem="pci")
+        self.m.device("platform/npu0", subsystem="accel")
+        self.m.device("platform/dsp0", subsystem="remoteproc")
+        self.m.device("platform/tpm0", subsystem="tpm")
+        f = self.scan()
+        for id_, kind in (("system/cpu/cpu0", "cpu"), ("pci0000:00/0000:00:02.0", "gpu"),
+                          ("pci0000:00/0000:00:07.0", "ai-accelerator"), ("platform/npu0", "ai-accelerator"),
+                          ("platform/dsp0", "coprocessor"), ("platform/tpm0", "security-processor")):
+            p = self.kind(f, id_)
+            self.assertEqual((p["kind"], p["certain"]), (kind, True), id_)
+        self.assertEqual(f.notes["processors"]["counts"]["gpu"], 1)
+
+    def test_a_vendor_id_or_driver_name_is_only_a_guess(self):
+        self.m.device("pci0000:00/0000:00:08.0", {"vendor": "0x1AE0", "class": "0x058000"}, subsystem="pci")
+        self.m.device("platform/isp0", subsystem="platform", driver="rkisp1")
+        self.m.device("platform/gpu0", subsystem="platform", driver="panfrost")
+        f = self.scan()
+        for id_, kind in (("pci0000:00/0000:00:08.0", "ai-accelerator"), ("platform/isp0", "isp"), ("platform/gpu0", "gpu")):
+            p = self.kind(f, id_)
+            self.assertEqual((p["kind"], p["certain"]), (kind, False), id_)
+            self.assertIn("a guess", p["basis"])
+        self.assertIn("isp?", f.notes["processors"]["counts"])
+
+    def test_a_name_alone_never_makes_a_processor(self):
+        self.m.device("usb-gpu", {"product": "GPU NPU TPU", "name": "cpu"}, subsystem="usb")
+        self.assertEqual(self.scan().notes["processors"]["counts"], {})
+
+    def test_the_instruction_set_is_named_with_a_caveat_and_unknown_is_unknown(self):
+        for machine, fam in (("x86_64", "CISC"), ("aarch64", "RISC"), ("riscv64", "RISC"), ("weird", "unknown")):
+            isa = self.scan(machine=machine).notes["processors"]["isa"]
+            self.assertEqual(isa["family"], fam)
+        self.assertIn("coarse", self.scan(machine="x86_64").notes["processors"]["isa"]["note"])
+        self.assertIsNone(self.scan().notes["processors"]["isa"])      # a fake tree has no machine
+
+    def test_a_device_tree_is_reported_as_typical_not_proof(self):
+        self.m.device("x")  # keep tree non-empty
+        self.m.write("sys/firmware/devicetree/base/model", "Board")
+        soc = self.scan().notes["processors"]["soc"]
+        self.assertTrue(soc["device_tree"])
+        self.assertIn("not proof", soc["note"])
+
+    def test_the_map_lists_the_processors_it_cannot_see(self):
+        text = " ".join(self.scan().notes["not_visible"])
+        for word in ("quantum", "photonic", "wetware", "wafer-scale", "APU"):
+            self.assertIn(word, text)
+
+
 class TestARealTree(unittest.TestCase):
     @unittest.skipUnless(Path("/sys/devices").is_dir(), "no /sys/devices on this machine")
     def test_the_walker_survives_this_machines_real_sysfs(self):
