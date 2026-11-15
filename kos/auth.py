@@ -105,6 +105,8 @@ ACTIONS: dict[str, str] = {
     "firmware.flash": "rewrite a chip's firmware with a KOS firmware image",
     "overlay.order": "set the load order of mod file layers",
     "overlay.view": "look at the merged mod file layers",
+    "compute.list": "look at the compute devices",
+    "compute.choose": "choose a device for a task",
     # linked devices, sync, migration and the agent runner (kos/linkdev.py, syncer.py, migrate.py, agentrun.py)
     "link.add": "link another device to this one",
     "link.remove": "unlink a device",
