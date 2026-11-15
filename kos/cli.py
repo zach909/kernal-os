@@ -879,6 +879,9 @@ def cmd_hardware(args, paths: Paths) -> int:
                   f"{notes['dangling']} connections pointed at something not in the map")
         if not notes["sources"]["devices"]:
             print("no /sys/devices on this machine: nothing to map")
+        if (notes.get("neuromorphic") or {}).get("candidates"):
+            print(f"neuromorphic: {notes['neuromorphic']['candidates']} device(s) that look like a neuromorphic "
+                  f"chip by vendor id or driver name (a guess, not confirmed)")
         fp = notes.get("fpga") or {}
         if fp.get("managers") or fp.get("pci_candidates"):
             print(f"FPGA: {fp['managers']} manager(s), {fp['regions']} region(s), {fp['bridges']} bridge(s) "
@@ -908,6 +911,8 @@ def cmd_hardware(args, paths: Paths) -> int:
         return 0
     for d in saved.devices:
         line = f"{d['id']}  {d['subsystem'] or '-'}  {d['driver'] or '-'}"
+        if d.get("neuromorphic"):
+            line += "  [neuromorphic?]"
         if d.get("fpga"):
             line += f"  [FPGA {d['fpga']['kind']}]"
         if needle in (line + " " + " ".join(d["attrs"].values())).lower():

@@ -495,6 +495,29 @@ class TestFpga(MapTest):
         self.assertEqual(got.notes["fpga"]["managers"], 1)
 
 
+class TestNeuromorphic(MapTest):
+    def test_a_card_with_a_neuromorphic_vendor_id_is_a_candidate_only(self):
+        self.m.device("pci0000:00/0000:00:05.0", {"vendor": "0x1E7C", "device": "0x0001"}, subsystem="pci")
+        f = self.scan()
+        d = self.dev(f, "pci0000:00/0000:00:05.0")
+        self.assertEqual(d["neuromorphic"]["kind"], "candidate")
+        self.assertIn("a guess", d["neuromorphic"]["basis"])
+        self.assertEqual(f.notes["neuromorphic"]["candidates"], 1)
+
+    def test_a_driver_name_is_enough_for_a_candidate(self):
+        self.m.device("pci0000:00/0000:00:06.0", {"vendor": "0x1234"}, subsystem="pci", driver="akida_pcie")
+        self.assertEqual(self.scan().notes["neuromorphic"]["candidates"], 1)
+
+    def test_an_ordinary_machine_has_none_and_a_usb_device_cannot_claim_it_by_name(self):
+        self.m.device("usb-x", {"product": "Akida neuromorphic", "name": "akida"}, subsystem="usb")
+        f = self.scan()
+        self.assertEqual(f.notes["neuromorphic"]["candidates"], 0)
+        self.assertTrue(all("neuromorphic" not in d for d in f.devices))
+
+    def test_the_map_says_which_chips_it_cannot_see(self):
+        self.assertTrue(any("neuromorphic" in n for n in self.scan().notes["not_visible"]))
+
+
 class TestARealTree(unittest.TestCase):
     @unittest.skipUnless(Path("/sys/devices").is_dir(), "no /sys/devices on this machine")
     def test_the_walker_survives_this_machines_real_sysfs(self):

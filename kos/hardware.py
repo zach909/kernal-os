@@ -75,6 +75,13 @@ LINK_ATTRS = ("current_link_speed", "current_link_width", "max_link_speed", "max
 FPGA_SUBSYSTEMS = {"fpga_manager": "manager", "fpga_region": "region", "fpga_bridge": "bridge"}
 FPGA_ATTRS = ("name", "state", "status")
 FPGA_PCI_VENDORS = {"0x10ee": "Xilinx/AMD", "0x1172": "Altera/Intel", "0x1204": "Lattice"}
+# Neuromorphic chips. Linux has no neuromorphic framework, so unlike FPGAs there is nothing the
+# kernel states: the only signals are a PCI vendor id or a driver name, both guesses. BrainChip
+# (Akida) is the one such chip that shows up as a PCI device with its own vendor id. Intel Loihi
+# and SpiNNaker are reached over USB or Ethernet with no id specific to them, so they are NOT
+# recognised. The vendor id below is from memory and was not checked against a real card.
+NEUROMORPHIC_PCI_VENDORS = {"0x1e7c": "BrainChip"}
+NEUROMORPHIC_DRIVERS = {"akida": "BrainChip Akida"}
 SKIP_DIRS = frozenset({"power", "msi_irqs", "iommu", "firmware_node", "subsystem", "driver"})
 
 MAX_DEVICES = 20000
@@ -89,6 +96,7 @@ NOT_VISIBLE = (
     "individual GPIO lines (only the count per chip; naming a line needs a device-file ioctl)",
     "devices the firmware hides from the OS",
     "FPGA fabric contents: what design is loaded, or what is wired inside (only the kernel's FPGA framework devices and PCI vendor hints are seen)",
+    "neuromorphic chips with no PCI id or driver name of their own (Loihi, SpiNNaker, TrueNorth)",
     "serial numbers, MAC addresses and unique ids (never read)",
 )
 
@@ -181,6 +189,11 @@ def _device(rel: str, path: Path, parent: Optional[str], notes: dict) -> tuple[d
         dev["fpga"] = {"kind": "pci-candidate",
                        "basis": "PCI vendor id " + FPGA_PCI_VENDORS[attrs["vendor"].lower()]
                                 + " (a guess: that vendor also makes chips that are not FPGAs)"}
+    maker = NEUROMORPHIC_PCI_VENDORS.get(attrs.get("vendor", "").lower()) if dev["subsystem"] == "pci" else None
+    maker = maker or next((v for k, v in NEUROMORPHIC_DRIVERS.items() if (dev["driver"] or "").lower().startswith(k)), None)
+    if maker:
+        dev["neuromorphic"] = {"kind": "candidate",
+                               "basis": f"{maker} PCI vendor id or driver name (a guess, not confirmed)"}
     return dev, link_attrs
 
 
@@ -342,6 +355,7 @@ def scan(root: Path = Path("/"), max_devices: int = MAX_DEVICES, max_dirs: int =
         link["resource"] = f"hwlink:{link['kind']}:{link['from']}>{link['to']}"
     notes["truncated"] = sorted(set(notes["truncated"]))
     notes["fpga"] = _fpga_summary(devices)
+    notes["neuromorphic"] = {"candidates": sum(1 for d in devices.values() if "neuromorphic" in d)}
     return Map(devices=sorted(devices.values(), key=lambda d: d["id"]),
                links=sorted(links, key=lambda l: (l["kind"], l["from"], l["to"])), notes=notes)
 
