@@ -78,7 +78,6 @@ PERMISSIONS = {"network", "system", "storage", "ai", "admin", "cookies", "passwo
 # A program may ask the OS for exactly one thing at a time: ``ask:ACTION``. ``system`` is every
 # action at once (including opening and closing other apps) and stays all-or-nothing; the actions
 # that touch other apps (open, close, focus) are deliberately not available one by one.
-ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "kernel", "status")
 ASK_ACTIONS = ("apps", "backup", "backup_add", "backup_remove", "status", "kernel")
 ASK_PREFIX = "ask:"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")
@@ -225,6 +224,19 @@ class Manifest:
                 # never ride in on an add-on.
                 if power in perms:
                     raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
+                # The power to open and close apps, or to ask the OS for its own state, must never
+                # ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' or a 'service:' permission")
+            for power in ("system", "ai", "admin"):
+                # The power to open and close apps, to send text to a model, or to write files as the
+                # administrator must never ride in on an add-on.
+                if power in perms:
+                    raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
+            if "system" in perms or any(str(p).startswith(ASK_PREFIX) for p in perms):
+                # The power to open and close apps, or to ask the OS for anything, must never
+                # ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' permission or any 'ask:' permission")
         return cls(name=name, version=d["version"], runtime=d["runtime"], entry=d["entry"],
                    modes=modes, permissions=perms, description=desc, kind=kind, extends=extends)
 

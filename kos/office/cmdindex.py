@@ -17,6 +17,7 @@ COMMANDS = (
     ('boot', 'boot the desktop: the taskbar + App Library, made of apps', 'kos boot [-h] [--graphical] {desktop}'),
     ('cat', 'view a file, including one inside a zip', 'kos cat [-h] path'),
     ('cell', 'manage parallel kernel cells', 'kos cell [-h] {start,list,stop} ...'),
+    ('chip', 'security chip (TPM) as a second factor next to the password: status | enroll | remove | recover', 'kos chip [-h] [--pcr PCR] [--drop-chip] [{status,enroll,remove,recover}]'),
     ('close', "stop an app opened with 'kos open'", 'kos close [-h] id'),
     ('convert', 'convert a Debian .deb package into a .kapp (static programs only)', 'kos convert [-h] -o OUTPUT [--exe EXE] file'),
     ('desktop', 'set up the desktop apps', 'kos desktop [-h] [--from SRC] {install}'),
