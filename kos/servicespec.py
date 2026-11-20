@@ -159,6 +159,11 @@ SPECS: dict[str, Spec] = _specs(
     Spec("cells.start", {"name": name(), "kernel": path(), "initrd": path(), "memory": num(64, 65536, 256),
                          "cpus": words(required=True)}, "start a cell: its own kernel on its own cores"),
     Spec("cells.stop", {"name": name()}, "stop a cell"),
+    # compute devices: where a task should run (kos/compute.py)
+    Spec("compute.list", {}, "every compute device the OS knows: processor, accelerators, cells, linked devices"),
+    Spec("compute.choose", {"task": one_of("general", "parallel", "inference", required=True),
+                            "memory": num(0, 1_048_576, 0), "private": flag(True), "isolate": flag(False)},
+         "which device a task should run on, and why each of the others was refused (decides only; runs nothing)"),
     # apps and permissions
     Spec("packages.list", {}, "installed apps, versions, permits, add-ons"),
     Spec("packages.install", {"path": path()}, "install a .kapp: scan, password, seal"),

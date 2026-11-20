@@ -1,0 +1,9 @@
+{
+  "name": "router.islands",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["owns:router"],
+  "description": "Finds the islands in a network of 0/1 connections, shows what each costs, and publishes them for router.plan. Reads weights only; runs no model."
+}
