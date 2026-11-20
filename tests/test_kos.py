@@ -645,7 +645,7 @@ class TestSecurityCheck(Env):
         checks = self.run_checks()
         self.assertEqual([c for c in checks if c.level == "fail"], [])
         self.assertEqual({c.name for c in checks},
-                         {"kernel", "password", "files", "audit log", "apps", "permissions", "owed", "leftovers"})
+                         {"kernel", "password", "chip", "files", "audit log", "apps", "permissions", "owed", "leftovers"})
         self.assertEqual(self.levels("password"), ["warn"])          # the test KDF (N=1024) is deliberately weak
         self.assertIn("weak", self.detail("password"))
         self.assertEqual(self.levels("apps"), ["pass"])

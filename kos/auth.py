@@ -103,6 +103,9 @@ ACTIONS: dict[str, str] = {
     "state.view": "look at what is installed, open or logged",
     "hardware.scan": "look at every piece of hardware and record it in the permission store",
     "firmware.flash": "rewrite a chip's firmware with a KOS firmware image",
+    "chip.enroll": "tie this computer's password to its security chip (TPM)",
+    "chip.remove": "stop using the security chip (TPM) with the password",
+    "chip.recover": "recover the password's security chip secret with the recovery key",
     "overlay.order": "set the load order of mod file layers",
     "overlay.view": "look at the merged mod file layers",
     "compute.list": "look at the compute devices",
@@ -164,15 +167,22 @@ class KdfParams:
         return params
 
 
-def derive_master(password: bytes, params: KdfParams) -> SecretBytes:
+def derive_master(password: bytes, params: KdfParams, chip_secret: Optional[bytes] = None) -> SecretBytes:
+    """scrypt(password); with a security chip enrolled, mixed with the chip's secret (kos/chip.py)."""
     maxmem = 256 * params.r * params.n * max(1, params.p) + (1 << 24)
     key = hashlib.scrypt(password, salt=params.salt, n=params.n, r=params.r,
                          p=params.p, maxmem=maxmem, dklen=32)
+    if chip_secret is not None:
+        from .chip import mix
+        key = mix(chip_secret, key)
     return SecretBytes(key)
 
 
 def subkey(master: SecretBytes, label: str) -> bytes:
     return hmac.new(master.raw, b"kos:v1:" + label.encode(), hashlib.sha256).digest()
+
+
+_KEEP = object()
 
 
 class PasswordStore:
@@ -198,16 +208,47 @@ class PasswordStore:
             raise AuthError("password must be at least 8 characters")
         params = params or KdfParams.fresh()
         master = derive_master(password, params)
-        self.write(params, master, throttle_base)
+        self.write(params, master, throttle_base, chip=None)
         return master
 
-    def write(self, params: KdfParams, master: SecretBytes, throttle_base: float = 1.0) -> None:
+    def params(self) -> KdfParams:
+        return KdfParams.from_json(self._load()["kdf"])
+
+    def matches(self, master: SecretBytes) -> bool:
+        """Does this master key match the stored verifier?"""
+        expected = base64.b64decode(self._load()["verifier"])
+        return hmac.compare_digest(subkey(master, "verifier"), expected)
+
+    def chip_block(self) -> Optional[dict]:
+        """The security-chip block of auth.json, or None when no chip is enrolled."""
+        block = self._load().get("chip")
+        return block if isinstance(block, dict) else None
+
+    def chip_secret(self) -> Optional[bytes]:
+        """The chip's secret, read from the chip (None when no chip is enrolled)."""
+        block = self.chip_block()
+        if block is None:
+            return None
+        from .chip import unseal_for
+        return unseal_for(block)
+
+    def write(self, params: KdfParams, master: SecretBytes, throttle_base: float = 1.0,
+              chip: object = _KEEP) -> None:
+        """Save the verifier. ``chip`` is the chip block to store; left out, the existing one is kept
+        (so ``kos passwd`` cannot drop the chip); ``None`` removes it."""
         doc = {
             "version": 1,
             "kdf": params.to_json(),
             "verifier": base64.b64encode(subkey(master, "verifier")).decode(),
             "throttle_base": throttle_base,
         }
+        if chip is _KEEP:
+            try:
+                chip = self.chip_block()
+            except AuthError:
+                chip = None
+        if chip is not None:
+            doc["chip"] = chip
         self.paths.ensure()
         atomic_write(self.paths.auth_file, json.dumps(doc, indent=2).encode())
 
@@ -215,7 +256,11 @@ class PasswordStore:
         doc = self._load()
         params = KdfParams.from_json(doc["kdf"])
         expected = base64.b64decode(doc["verifier"])
-        master = derive_master(password, params)
+        chip_secret = None
+        if isinstance(doc.get("chip"), dict):
+            from .chip import unseal_for
+            chip_secret = unseal_for(doc["chip"])       # ChipError (an AuthError) if the chip says no
+        master = derive_master(password, params, chip_secret)
         if hmac.compare_digest(subkey(master, "verifier"), expected):
             return master
         master.wipe()
@@ -510,6 +555,14 @@ class Grant:
         if not self._master:
             raise AuthorizationDenied("grant already closed")
         return subkey(self._master, label)
+
+    def chip_master(self, chip_secret: bytes) -> SecretBytes:
+        """The master key this grant's password gives once a chip secret is mixed in (kos/chip.py).
+        Only meaningful while no chip is enrolled: the master is then the plain scrypt key."""
+        from .chip import mix
+        if not self._master:
+            raise AuthorizationDenied("grant already used")
+        return SecretBytes(mix(chip_secret, bytes(self._master.raw)))
 
     def close(self) -> None:
         self._master.wipe()
