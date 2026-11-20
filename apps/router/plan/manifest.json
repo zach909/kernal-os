@@ -1,0 +1,9 @@
+{
+  "name": "router.plan",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["uses:router"],
+  "description": "Reads your prompt and picks local or cloud, an effort level and how many islands to run. Optionally tidies the prompt first. Advice only: it sends nothing."
+}
