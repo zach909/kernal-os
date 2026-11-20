@@ -214,6 +214,16 @@ class Manifest:
             if kind == "mod" and extends not in SYSTEM_APP_NAMES:
                 raise KAppError(f"a mod modifies a system app ({', '.join(SYSTEM_APP_NAMES)}); "
                                 f"{extends} is an ordinary app - to add to it write an extension")
+            if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) or str(p).startswith(ASK_PREFIX) for p in perms):
+                # The power to open and close apps, or to ask the OS for anything (its own state, one
+                # action, a service), must never ride in on an add-on.
+                raise KAppError(f"a {kind} cannot ask for the 'system' permission, a 'service:' permission "
+                                f"or any 'ask:' permission")
+            for power in ("ai", "admin"):
+                # The power to send text to a model, or to write files as the administrator, must
+                # never ride in on an add-on.
+                if power in perms:
+                    raise KAppError(f"a {kind} cannot ask for the '{power}' permission")
             if "system" in perms or any(SERVICE_PERM_RE.match(str(p)) for p in perms):
                 # The power to open and close apps, or to ask the OS for its own state, must never
                 # ride in on an add-on.

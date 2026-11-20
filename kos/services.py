@@ -282,6 +282,47 @@ def _cells_stop(ctx: Ctx, name: str) -> dict:
     return {"stopped": name}
 
 
+# ---- compute devices -------------------------------------------------------------------------------------
+# The logic is kos/compute.py (decides only; runs nothing, opens nothing under /dev). Here is the door: the
+# password is asked before any device is read, every choice is written to the audit log, and a link store
+# that does not match its seal is believed by nobody (no linked devices are listed, and the answer says so).
+
+def _compute_devices(ctx: Ctx, grant) -> tuple[list, str]:
+    from . import compute, linkdev
+    from .cells import CellManager
+    note = ""
+    try:
+        peers = linkdev.LinkStore(ctx.paths).peers(grant.key("link-store"))
+    except linkdev.LinkError:
+        peers, note = [], "the link list does not match its seal, so no linked device is listed"
+    return compute.probe(cells=CellManager(ctx.paths).cells(), peers=peers), note
+
+
+def _device_view(d) -> dict:
+    return {"id": d.id, "kind": d.kind, "name": d.name, "units": d.units, "memory_mb": d.memory_mb,
+            "online": d.online, "remote": d.remote, "isolated": d.isolated, "runs": d.runs}
+
+
+@service("compute.list")
+def _compute_list(ctx: Ctx) -> dict:
+    with ctx.authority.authorize("compute.list") as grant:
+        devices, note = _compute_devices(ctx, grant)
+    return {"devices": [_device_view(d) for d in devices], "note": note}
+
+
+@service("compute.choose")
+def _compute_choose(ctx: Ctx, task: str, memory: int, private: bool, isolate: bool) -> dict:
+    from . import compute
+    t = compute.Task(task, memory, private, isolate)
+    label = f"{task} memory={memory} private={private} isolate={isolate}"
+    with ctx.authority.authorize("compute.choose", label) as grant:
+        devices, note = _compute_devices(ctx, grant)
+        decision = compute.choose(t, devices)
+        AuditLog(ctx.paths).record("compute.choose", label, decision.device.id if decision.device else "no device",
+                                   key=grant.key(AUDIT_KEY_LABEL))
+    return dict(decision.as_dict(), note=note)
+
+
 # ---- apps and permissions -----------------------------------------------------------------------
 
 @service("packages.list")

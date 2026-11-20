@@ -108,6 +108,8 @@ ACTIONS: dict[str, str] = {
     "chip.recover": "recover the password's security chip secret with the recovery key",
     "overlay.order": "set the load order of mod file layers",
     "overlay.view": "look at the merged mod file layers",
+    "compute.list": "look at the compute devices",
+    "compute.choose": "choose a device for a task",
     # linked devices, sync, migration and the agent runner (kos/linkdev.py, syncer.py, migrate.py, agentrun.py)
     "link.add": "link another device to this one",
     "link.remove": "unlink a device",
