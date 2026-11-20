@@ -1538,15 +1538,8 @@ COMMANDS = {
     "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
     "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
     "overlay": cmd_overlay, "hardware": cmd_hardware, "runtimes": cmd_runtimes, "folders": cmd_folders, "ai": cmd_ai,
-    # the commands that are apps now: the command line only opens the app
+    # the commands that are apps now: the command line only opens the app (kos/launchmap.py)
     "skills": cmd_skills,
-    **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
-                                  "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
-    "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
-    "boot": cmd_boot, "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
-    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai, "hardware": cmd_hardware,
-    "runtimes": cmd_runtimes, "scan": cmd_scan, "skills": cmd_skills,
     **{c: _launcher(c) for c in APP_FOR_COMMAND if c not in ("scan", "skills")}}
 
 
