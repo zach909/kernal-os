@@ -896,6 +896,20 @@ def cmd_hardware(args, paths: Paths) -> int:
                   f"{notes['dangling']} connections pointed at something not in the map")
         if not notes["sources"]["devices"]:
             print("no /sys/devices on this machine: nothing to map")
+        pr = notes.get("processors") or {}
+        if pr.get("counts"):
+            print("processors: " + ", ".join(f"{k} x{v}" for k, v in pr["counts"].items())
+                  + "  (a '?' means a guess from a vendor id or driver name)")
+        if pr.get("isa"):
+            print(f"instruction set: {pr['isa']['machine']} ({pr['isa']['family']})")
+        if (notes.get("neuromorphic") or {}).get("candidates"):
+            print(f"neuromorphic: {notes['neuromorphic']['candidates']} device(s) that look like a neuromorphic "
+                  f"chip by vendor id or driver name (a guess, not confirmed)")
+        fp = notes.get("fpga") or {}
+        if fp.get("managers") or fp.get("pci_candidates"):
+            print(f"FPGA: {fp['managers']} manager(s), {fp['regions']} region(s), {fp['bridges']} bridge(s) "
+                  f"registered with the kernel; {fp['pci_candidates']} PCI device(s) from FPGA vendors "
+                  f"(a guess, not confirmed FPGAs). Fabric contents are not visible.")
         if old is not None:
             d = hardware.diff(old, found)
             for key, label in (("devices_added", "NEW device"), ("devices_removed", "gone device"),
@@ -920,6 +934,12 @@ def cmd_hardware(args, paths: Paths) -> int:
         return 0
     for d in saved.devices:
         line = f"{d['id']}  {d['subsystem'] or '-'}  {d['driver'] or '-'}"
+        if d.get("processor"):
+            line += f"  [{d['processor']['kind']}{'' if d['processor']['certain'] else '?'}]"
+        if d.get("neuromorphic"):
+            line += "  [neuromorphic?]"
+        if d.get("fpga"):
+            line += f"  [FPGA {d['fpga']['kind']}]"
         if needle in (line + " " + " ".join(d["attrs"].values())).lower():
             print(line)
     print(f"({saved.notes.get('devices', 0)} devices, {saved.notes.get('links', 0)} connections. "

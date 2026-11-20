@@ -67,6 +67,41 @@ DEVICE_ATTRS = ("vendor", "device", "class", "subsystem_vendor", "subsystem_devi
                 "operstate", "speed", "duplex", "type")
 LINK_ATTRS = ("current_link_speed", "current_link_width", "max_link_speed", "max_link_width",
               "devpath", "busnum", "devnum")
+# FPGA support. The kernel's own FPGA framework registers three kinds of class device: a manager
+# (the thing that loads a bitstream into the fabric), a region (a part of the fabric a design is
+# loaded into) and a bridge (the gate between the CPU side and a region). Finding one is a fact
+# the kernel states. A PCI vendor id is only a hint: these vendors also make chips that are not
+# FPGAs, so those are reported as candidates, never as FPGAs.
+FPGA_SUBSYSTEMS = {"fpga_manager": "manager", "fpga_region": "region", "fpga_bridge": "bridge"}
+FPGA_ATTRS = ("name", "state", "status")
+FPGA_PCI_VENDORS = {"0x10ee": "Xilinx/AMD", "0x1172": "Altera/Intel", "0x1204": "Lattice"}
+# Neuromorphic chips. Linux has no neuromorphic framework, so unlike FPGAs there is nothing the
+# kernel states: the only signals are a PCI vendor id or a driver name, both guesses. BrainChip
+# (Akida) is the one such chip that shows up as a PCI device with its own vendor id. Intel Loihi
+# and SpiNNaker are reached over USB or Ethernet with no id specific to them, so they are NOT
+# recognised. The vendor id below is from memory and was not checked against a real card.
+NEUROMORPHIC_PCI_VENDORS = {"0x1e7c": "BrainChip"}
+NEUROMORPHIC_DRIVERS = {"akida": "BrainChip Akida"}
+# Every other kind of processor. A mark has "certain": True only when the kernel or the device
+# itself states it (a registered subsystem, a PCI class code). Everything else is a guess from a
+# vendor id or driver name, said so in "basis". PCI vendor ids here are from memory, unchecked.
+PROCESSOR_SUBSYSTEMS = {
+    "cpu": ("cpu", "kernel cpu subsystem"),
+    "accel": ("ai-accelerator", "kernel accel subsystem (an NPU, TPU or similar; the kernel does not say which)"),
+    "remoteproc": ("coprocessor", "kernel remoteproc subsystem (a separate core, often a DSP or microcontroller; "
+                                  "the kernel does not say which)"),
+    "tpm": ("security-processor", "kernel TPM subsystem"),
+    "mei": ("security-processor", "kernel MEI subsystem (Intel management engine interface)"),
+}
+PROCESSOR_PCI_CLASS = (("0x03", "gpu", "PCI class code 0x03 (display controller), stated by the device"),
+                       ("0x1200", "ai-accelerator", "PCI class code 0x1200 (processing accelerator), stated by the device"))
+PROCESSOR_DRIVERS = (("gpu", ("panfrost", "lima", "etnaviv", "v3d", "msm", "mali")),
+                     ("ai-accelerator", ("ivpu", "amdxdna", "habanalabs", "qaic", "apex", "rknpu")),
+                     ("isp", ("rkisp", "atomisp", "mtk_isp", "mtk-isp", "ipu3", "ipu6")))
+PROCESSOR_PCI_VENDORS = {"0x1ae0": ("ai-accelerator", "PCI vendor id Google (a TPU candidate)")}
+ISA_FAMILIES = (("x86", "CISC"), ("i386", "CISC"), ("i686", "CISC"),
+                ("aarch64", "RISC"), ("arm", "RISC"), ("riscv", "RISC"), ("mips", "RISC"),
+                ("ppc", "RISC"), ("s390", "CISC"), ("loongarch", "RISC"))
 SKIP_DIRS = frozenset({"power", "msi_irqs", "iommu", "firmware_node", "subsystem", "driver"})
 
 MAX_DEVICES = 20000
@@ -80,6 +115,11 @@ NOT_VISIBLE = (
     "what is plugged into the far end of a port (a live carrier is not an identity)",
     "individual GPIO lines (only the count per chip; naming a line needs a device-file ioctl)",
     "devices the firmware hides from the OS",
+    "FPGA fabric contents: what design is loaded, or what is wired inside (only the kernel's FPGA framework devices and PCI vendor hints are seen)",
+    "processors with no kernel interface at all: quantum (QPU), photonic, thermodynamic (TSU), "
+    "wetware, wafer-scale (WSE), language (LPU), physics (PPU), Cell SPUs, data processing units (DPU); "
+    "ISP and DPU only by guess; an APU shows up as a CPU plus a GPU, never as one chip",
+    "neuromorphic chips with no PCI id or driver name of their own (Loihi, SpiNNaker, TrueNorth)",
     "serial numbers, MAC addresses and unique ids (never read)",
 )
 
@@ -156,12 +196,74 @@ def _resolve(link: Path, devroot: Path) -> Optional[str]:
     return full[len(prefix):]
 
 
+def _processor(dev: dict, attrs: dict) -> Optional[dict]:
+    sub, drv = dev["subsystem"], (dev["driver"] or "").lower()
+    if sub in PROCESSOR_SUBSYSTEMS:
+        kind, basis = PROCESSOR_SUBSYSTEMS[sub]
+        return {"kind": kind, "basis": basis, "certain": True}
+    if sub == "pci":
+        cls = attrs.get("class", "").lower()
+        for prefix, kind, basis in PROCESSOR_PCI_CLASS:
+            if cls.startswith(prefix):
+                return {"kind": kind, "basis": basis, "certain": True}
+        hit = PROCESSOR_PCI_VENDORS.get(attrs.get("vendor", "").lower())
+        if hit:
+            return {"kind": hit[0], "basis": hit[1] + " (a guess)", "certain": False}
+    for kind, names in PROCESSOR_DRIVERS:
+        if any(drv.startswith(n) for n in names):
+            return {"kind": kind, "basis": "driver name " + clean(drv, 32) + " (a guess)", "certain": False}
+    return None
+
+
+def _isa(machine: str) -> dict:
+    m = machine.lower()
+    for prefix, family in ISA_FAMILIES:
+        if m.startswith(prefix):
+            return {"machine": clean(machine, 32), "family": family,
+                    "note": "a coarse label: modern x86 chips decode to RISC-like micro-ops inside"}
+    return {"machine": clean(machine, 32), "family": "unknown", "note": ""}
+
+
+def _processor_summary(devices: dict, root: Path, machine: Optional[str]) -> dict:
+    counts: dict = {}
+    for d in devices.values():
+        p = d.get("processor")
+        if p:
+            k = p["kind"] + ("" if p["certain"] else "?")
+            counts[k] = counts.get(k, 0) + 1
+    dt = root.joinpath("sys", "firmware", "devicetree", "base")
+    soc = {"device_tree": dt.is_dir(),
+           "note": "a device tree is typical of SoC boards; it is not proof of one"}
+    if machine is None and root == Path("/"):
+        machine = os.uname().machine
+    return {"counts": dict(sorted(counts.items())), "soc": soc,
+            "isa": _isa(machine) if machine else None}
+
+
 def _device(rel: str, path: Path, parent: Optional[str], notes: dict) -> tuple[dict, dict]:
     attrs = {n: v for n in DEVICE_ATTRS if (v := _attr(path.joinpath(n), notes)) is not None}
     link_attrs = {n: v for n in LINK_ATTRS if (v := _attr(path.joinpath(n), notes)) is not None}
     dev = {"id": rel, "resource": "hw:" + rel, "name": clean(os.path.basename(rel)),
            "subsystem": _link_name(path.joinpath("subsystem")), "driver": _link_name(path.joinpath("driver")),
            "parent": parent, "attrs": attrs}
+    kind = FPGA_SUBSYSTEMS.get(dev["subsystem"])
+    if kind:
+        for n in FPGA_ATTRS:
+            if n not in attrs and (v := _attr(path.joinpath(n), notes)) is not None:
+                attrs[n] = v
+        dev["fpga"] = {"kind": kind, "basis": "kernel FPGA framework"}
+    elif dev["subsystem"] == "pci" and attrs.get("vendor", "").lower() in FPGA_PCI_VENDORS:
+        dev["fpga"] = {"kind": "pci-candidate",
+                       "basis": "PCI vendor id " + FPGA_PCI_VENDORS[attrs["vendor"].lower()]
+                                + " (a guess: that vendor also makes chips that are not FPGAs)"}
+    proc = _processor(dev, attrs)
+    if proc:
+        dev["processor"] = proc
+    maker = NEUROMORPHIC_PCI_VENDORS.get(attrs.get("vendor", "").lower()) if dev["subsystem"] == "pci" else None
+    maker = maker or next((v for k, v in NEUROMORPHIC_DRIVERS.items() if (dev["driver"] or "").lower().startswith(k)), None)
+    if maker:
+        dev["neuromorphic"] = {"kind": "candidate",
+                               "basis": f"{maker} PCI vendor id or driver name (a guess, not confirmed)"}
     return dev, link_attrs
 
 
@@ -291,7 +393,21 @@ def _devicetree(root: Path, notes: dict, max_dirs: int) -> tuple[dict, list]:
     return devices, links
 
 
-def scan(root: Path = Path("/"), max_devices: int = MAX_DEVICES, max_dirs: int = MAX_DIRS) -> Map:
+def _fpga_summary(devices: dict) -> dict:
+    """What the scan found about FPGAs. ``can_load_bitstream`` only says the kernel has a manager
+    registered; it is not a promise that KOS (or anything) may load one: that is a separate,
+    password-gated action that does not exist yet."""
+    count = {"manager": 0, "region": 0, "bridge": 0, "pci-candidate": 0}
+    for d in devices.values():
+        f = d.get("fpga")
+        if f:
+            count[f["kind"]] += 1
+    return {"managers": count["manager"], "regions": count["region"], "bridges": count["bridge"],
+            "pci_candidates": count["pci-candidate"], "can_load_bitstream": count["manager"] > 0}
+
+
+def scan(root: Path = Path("/"), max_devices: int = MAX_DEVICES, max_dirs: int = MAX_DIRS,
+         machine: Optional[str] = None) -> Map:
     """Look at the machine. ``root`` is a fake tree in tests, ``/`` for real. Reads only."""
     notes = {"sources": {"devices": False, "devlink": False, "devicetree": False},
              "unreadable": 0, "dangling": 0, "truncated": [], "virtual_skipped": False,
@@ -309,6 +425,9 @@ def scan(root: Path = Path("/"), max_devices: int = MAX_DEVICES, max_dirs: int =
     for link in links:
         link["resource"] = f"hwlink:{link['kind']}:{link['from']}>{link['to']}"
     notes["truncated"] = sorted(set(notes["truncated"]))
+    notes["fpga"] = _fpga_summary(devices)
+    notes["processors"] = _processor_summary(devices, root, machine)
+    notes["neuromorphic"] = {"candidates": sum(1 for d in devices.values() if "neuromorphic" in d)}
     return Map(devices=sorted(devices.values(), key=lambda d: d["id"]),
                links=sorted(links, key=lambda l: (l["kind"], l["from"], l["to"])), notes=notes)
 

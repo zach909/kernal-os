@@ -430,6 +430,148 @@ class TestTheCommand(Env):
         self.assertIn("hardware", [c[0] for c in cmdindex.COMMANDS])
 
 
+class TestFpga(MapTest):
+    """FPGAs: the kernel's FPGA framework devices are facts; a PCI vendor id is only a hint."""
+
+    def zynq(self):
+        soc = "platform/soc/f8007000.devcfg"
+        self.m.device("platform/soc", subsystem="platform")
+        self.m.device(soc, subsystem="platform", driver="xdevcfg")
+        self.m.device(soc + "/fpga_manager/fpga0", {"name": "Xilinx Zynq FPGA Manager", "state": "operating",
+                                                    "status": "0x0"}, subsystem="fpga_manager")
+        self.m.device("platform/soc/region0", {"name": "region0"}, subsystem="fpga_region")
+        self.m.device("platform/soc/bridge0", {"name": "br0", "state": "enabled"}, subsystem="fpga_bridge")
+        return soc
+
+    def test_the_kernels_fpga_devices_are_marked_with_their_kind(self):
+        soc = self.zynq()
+        f = self.scan()
+        mgr = self.dev(f, soc + "/fpga_manager/fpga0")
+        self.assertEqual(mgr["fpga"]["kind"], "manager")
+        self.assertEqual(mgr["attrs"]["state"], "operating")
+        self.assertEqual(self.dev(f, "platform/soc/region0")["fpga"]["kind"], "region")
+        self.assertEqual(self.dev(f, "platform/soc/bridge0")["fpga"]["kind"], "bridge")
+        self.assertNotIn("fpga", self.dev(f, soc))                       # its parent is not marked
+        self.assertEqual(f.notes["fpga"], {"managers": 1, "regions": 1, "bridges": 1,
+                                           "pci_candidates": 0, "can_load_bitstream": True})
+
+    def test_a_pci_card_from_an_fpga_vendor_is_a_candidate_not_an_fpga(self):
+        self.m.device("pci0000:00/0000:00:03.0", {"vendor": "0x10EE", "device": "0x7024", "class": "0x058000"},
+                      subsystem="pci", driver="xdma")
+        f = self.scan()
+        card = self.dev(f, "pci0000:00/0000:00:03.0")
+        self.assertEqual(card["fpga"]["kind"], "pci-candidate")
+        self.assertIn("a guess", card["fpga"]["basis"])
+        self.assertEqual(f.notes["fpga"]["pci_candidates"], 1)
+        self.assertFalse(f.notes["fpga"]["can_load_bitstream"])         # a PCI id proves no manager
+
+    def test_a_machine_without_fpgas_has_no_fpga_marks(self):
+        f = self.scan()
+        self.assertTrue(all("fpga" not in d for d in f.devices))
+        self.assertEqual(f.notes["fpga"], {"managers": 0, "regions": 0, "bridges": 0,
+                                           "pci_candidates": 0, "can_load_bitstream": False})
+
+    def test_a_device_cannot_claim_to_be_an_fpga_by_its_name(self):
+        self.m.device("usb-fpga", {"name": "fpga_manager", "product": "FPGA manager"}, subsystem="usb")
+        self.m.device("pci0000:00/0000:00:04.0", {"vendor": "0x8086", "name": "fpga_manager"}, subsystem="pci")
+        self.assertEqual(self.scan().notes["fpga"]["managers"], 0)
+
+    def test_fpga_strings_are_cleaned_like_every_other_device_string(self):
+        self.m.device("platform/f", {"name": "evil\x1b[2Jname", "state": "x" * 500}, subsystem="fpga_manager")
+        a = self.dev(self.scan(), "platform/f")["attrs"]
+        self.assertNotIn("\x1b", a["name"])
+        self.assertLessEqual(len(a["state"]), hardware.MAX_VALUE)
+
+    def test_the_map_says_the_fabric_contents_are_not_visible(self):
+        self.assertTrue(any("FPGA fabric" in n for n in self.scan().notes["not_visible"]))
+
+    def test_fpga_marks_survive_save_and_load(self):
+        self.zynq()
+        from kos.paths import Paths
+        with tempfile.TemporaryDirectory() as t:
+            paths = Paths(Path(t))
+            hardware.save(paths, self.scan())
+            got = hardware.load(paths)
+        self.assertEqual(got.notes["fpga"]["managers"], 1)
+
+
+class TestNeuromorphic(MapTest):
+    def test_a_card_with_a_neuromorphic_vendor_id_is_a_candidate_only(self):
+        self.m.device("pci0000:00/0000:00:05.0", {"vendor": "0x1E7C", "device": "0x0001"}, subsystem="pci")
+        f = self.scan()
+        d = self.dev(f, "pci0000:00/0000:00:05.0")
+        self.assertEqual(d["neuromorphic"]["kind"], "candidate")
+        self.assertIn("a guess", d["neuromorphic"]["basis"])
+        self.assertEqual(f.notes["neuromorphic"]["candidates"], 1)
+
+    def test_a_driver_name_is_enough_for_a_candidate(self):
+        self.m.device("pci0000:00/0000:00:06.0", {"vendor": "0x1234"}, subsystem="pci", driver="akida_pcie")
+        self.assertEqual(self.scan().notes["neuromorphic"]["candidates"], 1)
+
+    def test_an_ordinary_machine_has_none_and_a_usb_device_cannot_claim_it_by_name(self):
+        self.m.device("usb-x", {"product": "Akida neuromorphic", "name": "akida"}, subsystem="usb")
+        f = self.scan()
+        self.assertEqual(f.notes["neuromorphic"]["candidates"], 0)
+        self.assertTrue(all("neuromorphic" not in d for d in f.devices))
+
+    def test_the_map_says_which_chips_it_cannot_see(self):
+        self.assertTrue(any("neuromorphic" in n for n in self.scan().notes["not_visible"]))
+
+
+class TestProcessors(MapTest):
+    def kind(self, found, id_):
+        return self.dev(found, id_).get("processor")
+
+    def test_what_the_kernel_or_device_states_is_certain(self):
+        self.m.device("system/cpu/cpu0", subsystem="cpu")
+        self.m.device("pci0000:00/0000:00:02.0", {"vendor": "0x8086", "class": "0x030000"}, subsystem="pci")
+        self.m.device("pci0000:00/0000:00:07.0", {"vendor": "0x1234", "class": "0x120000"}, subsystem="pci")
+        self.m.device("platform/npu0", subsystem="accel")
+        self.m.device("platform/dsp0", subsystem="remoteproc")
+        self.m.device("platform/tpm0", subsystem="tpm")
+        f = self.scan()
+        for id_, kind in (("system/cpu/cpu0", "cpu"), ("pci0000:00/0000:00:02.0", "gpu"),
+                          ("pci0000:00/0000:00:07.0", "ai-accelerator"), ("platform/npu0", "ai-accelerator"),
+                          ("platform/dsp0", "coprocessor"), ("platform/tpm0", "security-processor")):
+            p = self.kind(f, id_)
+            self.assertEqual((p["kind"], p["certain"]), (kind, True), id_)
+        self.assertEqual(f.notes["processors"]["counts"]["gpu"], 1)
+
+    def test_a_vendor_id_or_driver_name_is_only_a_guess(self):
+        self.m.device("pci0000:00/0000:00:08.0", {"vendor": "0x1AE0", "class": "0x058000"}, subsystem="pci")
+        self.m.device("platform/isp0", subsystem="platform", driver="rkisp1")
+        self.m.device("platform/gpu0", subsystem="platform", driver="panfrost")
+        f = self.scan()
+        for id_, kind in (("pci0000:00/0000:00:08.0", "ai-accelerator"), ("platform/isp0", "isp"), ("platform/gpu0", "gpu")):
+            p = self.kind(f, id_)
+            self.assertEqual((p["kind"], p["certain"]), (kind, False), id_)
+            self.assertIn("a guess", p["basis"])
+        self.assertIn("isp?", f.notes["processors"]["counts"])
+
+    def test_a_name_alone_never_makes_a_processor(self):
+        self.m.device("usb-gpu", {"product": "GPU NPU TPU", "name": "cpu"}, subsystem="usb")
+        self.assertEqual(self.scan().notes["processors"]["counts"], {})
+
+    def test_the_instruction_set_is_named_with_a_caveat_and_unknown_is_unknown(self):
+        for machine, fam in (("x86_64", "CISC"), ("aarch64", "RISC"), ("riscv64", "RISC"), ("weird", "unknown")):
+            isa = self.scan(machine=machine).notes["processors"]["isa"]
+            self.assertEqual(isa["family"], fam)
+        self.assertIn("coarse", self.scan(machine="x86_64").notes["processors"]["isa"]["note"])
+        self.assertIsNone(self.scan().notes["processors"]["isa"])      # a fake tree has no machine
+
+    def test_a_device_tree_is_reported_as_typical_not_proof(self):
+        self.m.device("x")  # keep tree non-empty
+        self.m.write("sys/firmware/devicetree/base/model", "Board")
+        soc = self.scan().notes["processors"]["soc"]
+        self.assertTrue(soc["device_tree"])
+        self.assertIn("not proof", soc["note"])
+
+    def test_the_map_lists_the_processors_it_cannot_see(self):
+        text = " ".join(self.scan().notes["not_visible"])
+        for word in ("quantum", "photonic", "wetware", "wafer-scale", "APU"):
+            self.assertIn(word, text)
+
+
 class TestARealTree(unittest.TestCase):
     @unittest.skipUnless(Path("/sys/devices").is_dir(), "no /sys/devices on this machine")
     def test_the_walker_survives_this_machines_real_sysfs(self):
