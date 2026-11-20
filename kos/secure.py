@@ -7,6 +7,7 @@ question you could otherwise only answer by running half a dozen commands:
 
 * kernel      do the protections apps depend on exist on this machine?
 * password    is one set, and is the key-stretching strong?
+* chip        is there a TPM 2.0, and is the password tied to it?
 * files       are KOS's folders and secrets private to you?
 * audit log   is the hash chain intact (nothing edited, deleted or reordered)?
 * apps        does every installed app still scan clean and match what was installed?
@@ -28,7 +29,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .auth import AuditLog
+from .auth import AuditLog, PasswordStore as PasswordStoreRef
 from .kapp import KApp, KAppError
 from .paths import Paths
 from .permissions import Permissions
@@ -80,6 +81,28 @@ def _password(paths: Paths) -> list[Check]:
     if n < MIN_KDF_N:
         return [Check(WARN, "password", f"key-stretching is weak (scrypt N={n}, ~{ram} MiB per guess)")]
     return [Check(PASS, "password", f"set; every guess costs scrypt N={n} (~{ram} MiB of memory)")]
+
+
+def _chip(paths: Paths) -> list[Check]:
+    """The security chip (TPM 2.0): is there one, and does it protect the password? Reads sysfs and the
+    chip block of auth.json; opens no device (kos/chip.py)."""
+    from . import chip
+    st = chip.status()
+    try:
+        enrolled = PasswordStoreRef(paths).chip_block() is not None if paths.auth_file.exists() else False
+    except Exception as e:
+        return [Check(FAIL, "chip", f"auth.json's chip block cannot be read ({e!r})")]
+    if enrolled and not st["usable"]:
+        return [Check(FAIL, "chip", "enrolled, but no usable TPM 2.0 is visible (sysfs, /dev/tpmrm0 or "
+                                    "tpm2-tools missing): the password cannot unlock until it is back or "
+                                    "you run 'kos chip recover' with your recovery key")]
+    if enrolled:
+        return [Check(PASS, "chip", "TPM 2.0 present; the password also needs this computer's chip "
+                                    "(the chip itself is not asked here: no device is opened)")]
+    if st["usable"]:
+        return [Check(WARN, "chip", "a TPM 2.0 is present but not used: the password alone protects this "
+                                    "computer (kos chip enroll)")]
+    return [Check(WARN, "chip", "no usable TPM 2.0 on this computer: the password alone protects it")]
 
 
 def _files(paths: Paths) -> list[Check]:
@@ -230,7 +253,7 @@ def _leftovers(paths: Paths) -> list[Check]:
     return checks
 
 
-CHECKS = (_kernel, _password, _files, _audit, _apps, _permissions, _owed, _leftovers)
+CHECKS = (_kernel, _password, _chip, _files, _audit, _apps, _permissions, _owed, _leftovers)
 
 
 def run_checks(paths: Paths) -> list[Check]:

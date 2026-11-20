@@ -39,6 +39,7 @@
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
     kos firmware                    management processors (Intel ME, AMD PSP, BMC) and whether the OS may boot
+    kos chip [enroll|remove|recover]  security chip (TPM) as a second factor: status needs no password
     kos hardware scan               map every device and connection into the permission store (password)
     kos hardware [show|links] [TEXT]  list the saved devices or connections (password)
     kos audit                       show the authorization log
@@ -135,12 +136,28 @@ def cmd_passwd(args, paths: Paths) -> int:
     with authority.authorize("auth.change") as old:
         new_pw = _new_password(prompter)
         params = _kdf(args)
-        with derive_master(new_pw, params) as master:
+        with derive_master(new_pw, params, authority.store.chip_secret()) as master:   # keeps the chip
             n = store.reseal_all(old, subkey(master, SEAL_KEY_LABEL))
             authority.store.write(params, master, authority.store.throttle_base())
     print(f"Password changed; {n} app(s) re-sealed.")
     print("Remember to also change the disk password: cryptsetup luksChangeKey <root device>")
     return 0
+
+
+def cmd_chip(args, paths: Paths) -> int:
+    """`kos chip` shows the security chip (no password); enroll | remove | recover change how the
+    password is protected. See kos/chip.py and kos/chipcmd.py."""
+    from . import chipcmd
+    what = getattr(args, "what", None) or "status"
+    if what == "status":
+        print("\n".join(chipcmd.describe(paths)))
+        return 0
+    authority, prompter = _authority(paths)
+    if what == "enroll":
+        return chipcmd.enroll(paths, authority, prompter, args.pcr)
+    if what == "remove":
+        return chipcmd.remove(paths, authority, prompter)
+    return chipcmd.recover(paths, authority, prompter, args.drop_chip)
 
 
 def cmd_pack(args, paths: Paths) -> int:
@@ -1387,6 +1404,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
     s.add_argument("fw_cmd", nargs="?", choices=["status", "plan"],
                    help="plan: read-only advice on what each blocking chip would need")
+    s = sub.add_parser("chip", help="security chip (TPM) as a second factor next to the password: "
+                                    "status | enroll | remove | recover")
+    s.add_argument("what", nargs="?", choices=["status", "enroll", "remove", "recover"])
+    s.add_argument("--pcr", default="sha256:7", help="enroll: boot-state policy, e.g. sha256:7 or none")
+    s.add_argument("--drop-chip", action="store_true", help="recover: leave the chip instead of resealing to it")
     s = sub.add_parser("hardware", help="map every device and connection into the permission store: scan | show | links")
     s.add_argument("hw_cmd", nargs="?", choices=["scan", "show", "links"])
     s.add_argument("match", nargs="?", help="only lines containing this text")
@@ -1533,19 +1555,10 @@ def _launcher(command: str):
 COMMANDS = {
     "setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack, "install": cmd_install, "update": cmd_update,
     "remove": cmd_remove, "list": cmd_list, "run": cmd_run, "open": cmd_open, "go": cmd_go,
-    "extend": cmd_extend, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close, "boot": cmd_boot,
-    "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
-    "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "scan": cmd_scan,
-    "overlay": cmd_overlay, "hardware": cmd_hardware, "runtimes": cmd_runtimes, "folders": cmd_folders, "ai": cmd_ai,
-    # the commands that are apps now: the command line only opens the app
-    "skills": cmd_skills,
-    **{c: _launcher(c) for c in ("view", "ls", "cat", "explore", "activity", "grant", "spaces", "optimize", "cell",
-                                  "doctor", "firmware", "audit", "security", "owed", "settle", "convert")}}
     "extend": cmd_extend, "overlay": cmd_overlay, "ps": cmd_ps, "attach": cmd_attach, "close": cmd_close,
     "boot": cmd_boot, "permit": cmd_permit, "dirs": cmd_dirs, "do": cmd_do, "line": cmd_line, "exec": cmd_exec,
     "admin": cmd_admin, "write": cmd_write, "desktop": cmd_desktop, "backup": cmd_backup, "folders": cmd_folders,
-    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai, "hardware": cmd_hardware,
+    "aios": cmd_aios, "usb": cmd_usb, "help": cmd_help, "ai": cmd_ai, "hardware": cmd_hardware, "chip": cmd_chip,
     "runtimes": cmd_runtimes, "scan": cmd_scan, "skills": cmd_skills,
     **{c: _launcher(c) for c in APP_FOR_COMMAND if c not in ("scan", "skills")}}
 
