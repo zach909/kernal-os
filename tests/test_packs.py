@@ -17,7 +17,7 @@ from kos.office.ui import FakeHost, run  # noqa: E402
 from kos.protocol import validate_app_message  # noqa: E402
 
 ENTRIES = entries()
-REQ = [l.split("\t") for l in (ROOT / "docs" / "REQUESTED2.txt").read_text().splitlines() if l.strip()]
+REQ = [l.split("\t") for f in ("REQUESTED2.txt", "REQUESTED3.txt") for l in (ROOT / "docs" / f).read_text().splitlines() if l.strip()]
 BUILT = [e for e in ENTRIES if e.scope != "none"]
 
 
@@ -27,7 +27,7 @@ def make(e, host):
 
 class TestPackList(unittest.TestCase):
     def test_every_requested_title_is_built_or_explained_in_the_right_pack(self):
-        self.assertEqual(len(REQ), 105)
+        self.assertEqual(len(REQ), 105 + 53)
         self.assertEqual(sorted((e.pack, e.title) for e in ENTRIES), sorted((g, t) for g, t in REQ))
 
     def test_names_are_unique_and_do_not_clash_with_the_core_catalogue(self):
@@ -137,7 +137,7 @@ class TestEveryAppHasTheAgent(unittest.TestCase):
             h = self._agent_run(e, lambda hh, e=e: make(e, hh))
             self.assertTrue(any(t.split(" > ")[-1].startswith("Agent") for t, _l, _s in h.frames), e.name)
             self.assertFalse([t for t, _l, _s in h.frames if "Internal error" in t], e.name)
-            self.assertEqual({k: v for k, v in h.data.items() if not k.startswith("agent-")}, {"note-1": "alpha beta gamma"}, e.name)
+            self.assertEqual({k: v for k, v in h.data.items() if not k.startswith("agent-") and k != "casual-games"}, {"note-1": "alpha beta gamma"}, e.name)
 
     def test_ctrl_n_opens_an_agent_in_every_core_app_too(self):
         from kos.office.catalog import build

@@ -1,0 +1,53 @@
+pack_more	Authenticator Codes
+pack_more	Sudoku Puzzles
+pack_more	Minesweeper Puzzles
+pack_more	Mahjong Solitaire
+pack_more	Digital Card Games
+pack_more	Virtual Keyboard
+pack_more	Trend Analyzer
+pack_more	Trip Planner
+pack_more	Flight Planner
+pack_more	Product Comparison
+pack_more	Blog Manager
+pack_more	Business Listings
+pack_more	Site Ad Revenue
+pack_more	App Ad Revenue
+pack_more	Tag Manager
+pack_more	Search Performance
+pack_more	Parental Controls
+pack_more	Screen Time Log
+pack_more	Lost and Found Registry
+pack_more	Art and Culture Collection
+pack_more	Movies and TV Watchlist
+pack_more	Kids Video Lists
+pack_more	Video Channel Manager
+pack_more	Live TV Guide
+pack_more	Cloud Resource Inventory
+pack_more	AI Experiment Log
+pack_more	App Release Tracker
+pack_more	Rewards Tracker
+pack_more	Gaming Accessory Profiles
+pack_more	Children's Gaming Log
+pack_more	Font Catalogue
+pack_more	Academic Reference Library
+pack_more	Book Catalogue
+pack_more	Web Search
+pack_more	Web Browser
+pack_more	Voice Assistant
+pack_more	Earth Explorer
+pack_more	Street Imagery Viewer
+pack_more	Image Recognition
+pack_more	Text Messaging
+pack_more	Phone Calls
+pack_more	Virtual Phone Number
+pack_more	Handwriting Input
+pack_more	Earth Timelapse
+pack_more	Satellite Imagery Analysis
+pack_more	Python Notebooks
+pack_more	Flight Simulator
+pack_more	Block World Game
+pack_more	Movie and TV Streaming
+pack_more	Music Streaming
+pack_more	Audiobook Player
+pack_more	Live TV Streaming
+pack_more	Find My Device
