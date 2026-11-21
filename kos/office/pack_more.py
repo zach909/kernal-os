@@ -74,7 +74,7 @@ def hm(x) -> str:
 def pct(a, b) -> str:
     """a/b as a whole percent plus the exact per-1000 figure; '-' when b is zero."""
     a, b = fr(a), fr(b)
-    return "-" if b == 0 else f"{rnd(a * 100 / b)}% ({rnd(a * 1000 / b)} per 1000)"
+    return "-" if b == 0 else f"{rnd(div(a * 100, b))}% ({rnd(div(a * 1000, b))} per 1000)"
 
 
 # ================================================================== authenticator ==
@@ -371,8 +371,8 @@ def trend_report(xs, window: int = 3) -> list:
     out += ["", f"index (first point = 100) and {window}-point moving average:"]
     span = hi - lo
     for i, x in enumerate(xs[:60]):
-        idx = rnd(x * 100 / xs[0]) if xs[0] != 0 else 0
-        bar = "#" * (1 + (rnd((x - lo) * 30 / span) if span else 15))
+        idx = rnd(div(x * 100, xs[0])) if xs[0] != 0 else 0
+        bar = "#" * (1 + (rnd(div((x - lo) * 30, span)) if span else 15))
         out.append(f"  {i + 1:>3} {str(x):>10} idx {idx:>5} {bar}")
     if len(xs) > 60: out.append(f"  ... {len(xs) - 60} more point(s) not drawn")
     out += ["", "moving average: " + ", ".join(str(m) for m in ma[:30])]
@@ -473,7 +473,7 @@ def compare_report(items):
 def ads_site_report(items):
     imp, clk, rev = (sum((fr(r.get(k)) for r in items), Fraction(0)) for k in ("impressions", "clicks", "revenue"))
     out = [f"Impressions {imp}   clicks {clk}   revenue {money(rev)}", f"Click-through rate {pct(clk, imp)}",
-           f"Revenue per 1000 impressions (RPM) {money(rev * 1000 / imp) if imp else '-'}", ""]
+           f"Revenue per 1000 impressions (RPM) {money(div(rev * 1000, imp)) if imp else '-'}", ""]
     t = _sum_by(items, "site", "revenue")
     return out + ["By site:"] + [f"  {k:<28} {money(v):>12}" for k, v in sorted(t.items(), key=lambda x: -x[1])]
 
@@ -481,7 +481,7 @@ def ads_site_report(items):
 def ads_app_report(items):
     req, imp, rev = (sum((fr(r.get(k)) for r in items), Fraction(0)) for k in ("requests", "impressions", "revenue"))
     out = [f"Requests {req}   shown {imp}   revenue {money(rev)}", f"Fill rate {pct(imp, req)}",
-           f"Revenue per 1000 shown (eCPM) {money(rev * 1000 / imp) if imp else '-'}", ""]
+           f"Revenue per 1000 shown (eCPM) {money(div(rev * 1000, imp)) if imp else '-'}", ""]
     return out + ["By app:"] + [f"  {k:<28} {money(v):>12}" for k, v in sorted(_sum_by(items, "app", "revenue").items(), key=lambda x: -x[1])]
 
 
