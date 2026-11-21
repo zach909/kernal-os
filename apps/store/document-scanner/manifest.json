@@ -1,0 +1,11 @@
+{
+  "name": "store.document-scanner",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Scan paper into a file."
+}

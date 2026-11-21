@@ -1,0 +1,11 @@
+{
+  "name": "store.firmware-updater",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Update device firmware."
+}

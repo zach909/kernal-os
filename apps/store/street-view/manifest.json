@@ -1,0 +1,11 @@
+{
+  "name": "store.street-view",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Look around streets in 360 degrees."
+}

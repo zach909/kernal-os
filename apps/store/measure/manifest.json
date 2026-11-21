@@ -1,0 +1,11 @@
+{
+  "name": "store.measure",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Measure real objects with the camera and motion sensors."
+}

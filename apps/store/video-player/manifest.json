@@ -1,0 +1,11 @@
+{
+  "name": "store.video-player",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Play video (QuickTime Player, Media Player, Videos, VR Cinema and Videos)."
+}

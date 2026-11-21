@@ -1,0 +1,11 @@
+{
+  "name": "store.tv",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Watch shows and films from a streaming service (Apple TV, Google TV, TV)."
+}

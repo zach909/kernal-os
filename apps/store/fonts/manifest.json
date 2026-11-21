@@ -1,0 +1,11 @@
+{
+  "name": "store.fonts",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Browse installed fonts (Font Book, Fonts)."
+}

@@ -1,0 +1,13 @@
+{
+  "name": "store.passwords",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "passwords"
+  ],
+  "description": "Keeps name/secret pairs in the OS's own passwords store (the 'passwords' permission). Secrets are hidden until you press enter. The OS keeps them in clear on the LUKS volume today (README gaps table, "
+}
