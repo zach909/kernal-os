@@ -11,7 +11,7 @@ permissions**; each app below has its own manifest and asks only for what it nee
 | `devices.unlink` | `unlink/` | `service:link` (remove one; works with the other device off) |
 
 ```
-kos pack apps/devices -o dist/devices      # one .kapp per app
+kos pack store/apps/devices -o dist/devices      # one .kapp per app
 kos install dist/devices                   # each asks for the password
 kos permit devices.pair                    # one app at a time
 run devices.pair

@@ -1549,7 +1549,7 @@ from kos.desktop import Desktop, DesktopError, SYSTEM_APPS  # noqa: E402
 from kos.system import SystemBridge, close_instance, list_apps, open_background  # noqa: E402
 from kos.tui import TUISurface  # noqa: E402
 
-SYSTEM_DIR = Path(__file__).resolve().parent.parent / "apps"
+SYSTEM_DIR = Path(__file__).resolve().parent.parent / "store" / "apps"
 
 
 def _keys(text):
@@ -3511,8 +3511,8 @@ class TestHostApps(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tb = _load_example("apps/taskbar/app.py", "tb_app")
-        cls.lib = _load_example("apps/app-library/app.py", "lib_app")
+        cls.tb = _load_example("store/apps/taskbar/app.py", "tb_app")
+        cls.lib = _load_example("store/apps/app-library/app.py", "lib_app")
         cls.web = _load_example("examples/web/web.py", "web_app")
 
     def screens(self, out):
