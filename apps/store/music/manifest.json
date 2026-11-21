@@ -1,0 +1,11 @@
+{
+  "name": "store.music",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Play a music library and streams (Music, YouTube Music, Rhythmbox)."
+}

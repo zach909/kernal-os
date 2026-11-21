@@ -1,0 +1,11 @@
+{
+  "name": "store.settings",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "The device settings screen. Each setting with a screen of its own is its own app."
+}

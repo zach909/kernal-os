@@ -1,0 +1,11 @@
+{
+  "name": "store.startup-apps",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Choose what starts at boot (System Configuration, Startup Applications)."
+}

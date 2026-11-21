@@ -1,0 +1,11 @@
+{
+  "name": "store.voice-assistant",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Answer spoken requests (Siri, Google Assistant, Gemini, Voice Commands)."
+}

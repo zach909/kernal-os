@@ -1,0 +1,11 @@
+{
+  "name": "store.encounter-dinosaurs",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "A 3D augmented-reality demo."
+}

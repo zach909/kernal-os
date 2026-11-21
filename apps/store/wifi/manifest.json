@@ -1,0 +1,11 @@
+{
+  "name": "store.wifi",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Join Wi-Fi networks (Wi-Fi Setup)."
+}

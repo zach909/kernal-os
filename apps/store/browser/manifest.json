@@ -1,0 +1,11 @@
+{
+  "name": "store.browser",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Browse websites (Chrome, Safari, Edge, Firefox and the VR browser are one function)."
+}

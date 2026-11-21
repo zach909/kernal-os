@@ -1,0 +1,11 @@
+{
+  "name": "store.screenshot",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Capture the screen (Screenshot, Snipping Tool). The trusted password overlay must never be capturable by an app, so this is the OS's decision."
+}

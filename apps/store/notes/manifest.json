@@ -1,0 +1,13 @@
+{
+  "name": "store.notes",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "description": "Short text notes kept in the app's own storage: add, read, delete. Plain text, 400 characters per note, 200 notes. No formatting, folders, search or sync."
+}

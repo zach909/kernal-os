@@ -1,0 +1,11 @@
+{
+  "name": "store.messages",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Send and read text messages and chats."
+}
