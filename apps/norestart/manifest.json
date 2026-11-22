@@ -1,0 +1,13 @@
+{
+  "name": "norestart",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:norestart"
+  ],
+  "description": "Says whether a reboot is really needed, and swaps out-of-date apps for their new files without restarting the machine."
+}

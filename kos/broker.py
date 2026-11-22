@@ -126,6 +126,7 @@ class Broker:
         if not data:
             self.attached.close()
             self.attached = None
+            self._mark_attached(False)
             return
         try:
             self.app_channel.sendall(data)
@@ -140,6 +141,18 @@ class Broker:
             except OSError:
                 pass
         self.attached = conn
+        self._mark_attached(True)
+
+    def _mark_attached(self, yes: bool) -> None:
+        """Say in the registry whether someone is looking at this app, so a refresh never swaps it out
+        from under them (kos/norestart.py). Bookkeeping only: a failed write must not stop the instance."""
+        if self.inst.attached == yes:
+            return
+        self.inst.attached = yes
+        try:
+            self.registry.write(self.inst)
+        except OSError as e:
+            print(f"kos-broker: could not record attach state: {e!r}", file=sys.stderr)
 
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_sigterm)

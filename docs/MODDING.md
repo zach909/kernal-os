@@ -16,7 +16,7 @@ requirement maps to **today**. "Built" means built and tested; nothing here is c
 | 2 | Capability tokens | Partly | Per-app permissions in one store (`kos/permissions.py`, `kos/permit.py`), pinned to the sha256 of what was approved. Not unforgeable tokens; no per-subsystem token handed to a mod. |
 | 2 | Bytecode verification (SFI) | Not built | Depends on the Wasm item. |
 | 2 | Version-multiplexed linker | Not built | |
-| 3 | Hot-swap, state serialization | Not built | Extension changes take effect at the next host start (ARCHITECTURE "No live reload"). |
+| 3 | Hot-swap, state serialization | **Partly** | Apps only, not mods or the OS's own code: `kos/norestart.py` swaps an out-of-date app for its new file with make-before-break and never widens its permissions (README, "No reboot"). No state serialization: only the app's private data folder survives. Extension changes still take effect at the next host start (ARCHITECTURE "No live reload"). |
 | 3 | Watchdog + automatic last-known-good rollback | Not built | Mods are pinned by sha256 and a changed one is skipped, which is a safe-by-default stop, not a rollback. |
 | 4 | Immutable base, priority overlay, CoW | **Built** (this change) | `kos/overlay.py`. See below. |
 | 4 | Non-destructive conflict resolution, load-order matrix | **Built** | Global load order plus per-folder rules; `kos overlay conflicts`. |

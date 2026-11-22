@@ -148,7 +148,7 @@ def open_background(paths: Paths, authority: Authority, name: str, mode: str = "
                     log_path=str(run_dir / f"{inst_id}.log"), started=time.time(),
                     system="system" in app.manifest.permissions,
                     asks=list(app.manifest.asks), admin="admin" in app.manifest.permissions,
-                    address=address)
+                    address=address, sha256=app.sha256, version=app.manifest.version)
     spawner(inst, app, mode, policy, registry, Path(inst.log_path), cache_dir)
     if wait:
         wait_running(registry, inst_id, wait)
