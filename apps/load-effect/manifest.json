@@ -1,0 +1,9 @@
+{
+  "name": "load-effect",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui", "graphical"],
+  "permissions": ["owns:load-effect"],
+  "description": "Settings for how pictures load: the point-to-band-to-hull arrival with unblur, and the 3D layers lit by a sun. Saved in the 'load-effect' shared folder; an app reads it once you grant it."
+}
