@@ -200,6 +200,21 @@ SPECS: dict[str, Spec] = _specs(
          "unpack a bundle; verified completely first, never overwrites"),
     Spec("agent.run", {"task": text(4000), "workspace": path(), "steps": num(1, 20, 8)},
          "run a local AI agent in one folder; every tool use asks your password"),
+    # senses: what the OS reads for an app that maps the world (kos/camera.py, kos/sensors.py); one password per call
+    Spec("camera.list", {}, "the cameras plugged in (names only)"),
+    Spec("camera.capture", {"cams": words(required=True), "width": num(32, 320, 128), "height": num(24, 240, 96),
+                            "count": num(1, 8, 1), "every_ms": num(0, 30000, 0)},
+         "take greyscale pictures with one or more cameras (video0, video1...): at most 30 seconds, then they are closed"),
+    Spec("sensor.list", {}, "the plain sensors plugged in (temperature, humidity, pressure, light, gas)"),
+    Spec("sensor.read", {"index": num(0, 999, required=True)}, "read every channel of one sensor, as whole numbers"),
+    Spec("sensor.sweep", {}, "read every channel of every plugged-in sensor in one call (one password), as whole numbers"),
+    Spec("clock.now", {}, "the time, in whole seconds since 1970 (UTC): apps have no clock of their own"),
+    # a whole folder tree in one go (kos/filewalk.py)
+    Spec("files.walk", {"path": path(), "limit": num(1, 2000, 500), "depth": num(1, 8, 4), "heads": flag(False)},
+         "list a folder tree in one call (never through symlinks); with heads, the start of small text files"),
+    # a zip dropped in runs sandboxed with nothing (kos/ziprun.py)
+    Spec("zip.run", {"path": path(), "seconds": num(1, 300, 30)},
+         "scan, check and run a zip's program in the sandbox with no permissions; what it asked for is shown, not granted"),
     # code as a command
     Spec("code.run", {"code": text(20_000), "lang": name(default="python", required=False)},
          "run one line of code as a sandboxed one-shot app"),

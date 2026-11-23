@@ -667,6 +667,88 @@ def _agent_run(ctx: Ctx, task: str, workspace: str, steps: int) -> dict:
             "steps": [{"n": s.n, "kind": s.kind, "tool": s.tool, "detail": s.detail[:200]} for s in res.steps]}
 
 
+# ---- senses, folder trees and zips ----------------------------------------------------------------------
+# The reading is in kos/camera.py, kos/sensors.py, kos/filewalk.py and kos/ziprun.py. Here is only the door:
+# the password is asked first, and a domain error becomes a refusal the app can show.
+
+@service("camera.list")
+def _camera_list(ctx: Ctx) -> dict:
+    from . import camera
+    with ctx.authority.authorize("camera.list"):
+        return {"cameras": camera.list_cameras()}
+
+
+@service("camera.capture")
+def _camera_capture(ctx: Ctx, cams: list, width: int, height: int, count: int, every_ms: int) -> dict:
+    import re
+    from . import camera
+    nodes = []
+    for c in cams:
+        m = re.match(r"^video([0-9]{1,3})$", c)
+        if not m:
+            raise ServiceError(f"{c[:20]!r} is not a camera name: use video0, video1, ...")
+        nodes.append(int(m.group(1)))
+    try:
+        camera.check_budget(len(nodes), width, height, count, every_ms)       # refuse before asking
+    except camera.CameraError as e:
+        raise ServiceError(str(e)) from None
+    with ctx.authority.authorize("camera.capture", ",".join(f"video{n}" for n in nodes)):
+        try:
+            return camera.capture(nodes, width, height, count, every_ms)
+        except camera.CameraError as e:
+            raise ServiceError(str(e)) from None
+
+
+@service("sensor.list")
+def _sensor_list(ctx: Ctx) -> dict:
+    from . import sensors
+    with ctx.authority.authorize("sensor.list"):
+        return {"sensors": sensors.list_sensors()}
+
+
+@service("sensor.read")
+def _sensor_read(ctx: Ctx, index: int) -> dict:
+    from . import sensors
+    with ctx.authority.authorize("sensor.read", f"iio:device{index}"):
+        try:
+            return sensors.read_sensor(index)
+        except sensors.SensorError as e:
+            raise ServiceError(str(e)) from None
+
+
+@service("sensor.sweep")
+def _sensor_sweep(ctx: Ctx) -> dict:
+    from . import sensors
+    with ctx.authority.authorize("sensor.sweep"):
+        return sensors.sweep()
+
+
+@service("clock.now")
+def _clock_now(ctx: Ctx) -> dict:
+    with ctx.authority.authorize("clock.read"):
+        return {"t": time.time_ns() // 1_000_000_000}
+
+
+@service("files.walk")
+def _files_walk(ctx: Ctx, path: str, limit: int, depth: int, heads: bool) -> dict:
+    from . import filewalk
+    root = os.path.abspath(path)
+    with ctx.authority.authorize("file.view", root + (" (the whole tree, with the start of its text files)" if heads
+                                                      else " (the whole tree)")):
+        return filewalk.walk(root, limit, depth, heads)
+
+
+@service("zip.run")
+def _zip_run(ctx: Ctx, path: str, seconds: int) -> dict:
+    from . import ziprun
+    lines: list[str] = []
+    try:
+        res = ziprun.run_zip(ctx.paths, lambda: ctx.authority, path, seconds, out=lambda s: lines.append(str(s)[:2000]))
+    except ziprun.ZipRunError as e:
+        raise ServiceError(str(e)) from None
+    return {**res, "output": lines[:200]}
+
+
 # ---- the door -----------------------------------------------------------------------------------
 
 _ERRORS = (AuthorizationDenied, AuthError, KAppError, PermitError, TamperedError, VFSError, OSError,

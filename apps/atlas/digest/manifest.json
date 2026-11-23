@@ -1,0 +1,13 @@
+{
+  "name": "atlas.digest",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "uses:atlas"
+  ],
+  "description": "Makes the map smaller and smarter: surfaces, routines, sources, themes, trends, merged duplicates. Rewrites the 'atlas' folder."
+}

@@ -1,0 +1,14 @@
+{
+  "name": "atlas.scan",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "uses:atlas",
+    "service:camera"
+  ],
+  "description": "Two or more cameras: depth from how much their views differ, then what moved. Writes marks to the 'atlas' folder; one bounded capture per key press."
+}

@@ -23,12 +23,13 @@ from kos.kapp import KApp, Manifest, pack_tree  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 APPS = ROOT / "apps"
-GROUP_OF = {"devices": "link", "sync": "sync", "migrate": "migrate", "agent": "agent"}
+GROUP_OF = {"devices": "link", "sync": "sync", "migrate": "migrate", "agent": "agent", "zip": "zip"}
 EXPECTED = {
     "devices": ["devices.list", "devices.pair", "devices.scope", "devices.unlink"],
     "sync": ["sync.folders", "sync.run", "sync.serve", "sync.share", "sync.unshare"],
     "migrate": ["migrate.export", "migrate.import"],
     "agent": ["agent.run"],
+    "zip": ["zip.run"],
 }
 
 
