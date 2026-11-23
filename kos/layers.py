@@ -46,6 +46,12 @@ LAYERS = ("gui", "app", "kernel")
 LAUNCH = ("open", "run")
 VERBS = (*LAUNCH, "close", "focus", "extend", "unextend")
 
+# The two password actions the kernel layer asks for that a lease (kos/norestart.py) may stand in for when an app
+# is swapped for its updated file with nobody at the keyboard. They are named here and nowhere else: the swap
+# still goes through ``traverse``, so the gui and app layers still run and every layer still writes its line.
+OPEN, CLOSE = "app.open", "app.close"
+UNATTENDED = (OPEN, CLOSE)
+
 
 @dataclass(frozen=True)
 class Request:
@@ -101,7 +107,7 @@ def _kernel(paths, get_authority, req: Request, p: Passage) -> str:
     store = AppStore(paths)
     if req.verb in LAUNCH:
         action = "app.graphical" if req.mode == "graphical" else \
-            ("app.open" if req.verb == "open" else "app.run")
+            (OPEN if req.verb == "open" else "app.run")
         with authority.authorize(action, req.target) as grant:
             app = store.load_verified(req.target, grant)
             fw_key = grant.key(firewall.KEY_LABEL)       # to check the firewall's rules are the owner's
@@ -125,7 +131,7 @@ def _kernel(paths, get_authority, req: Request, p: Passage) -> str:
         authority.authorize("app.unextend", req.target).close()
         return "password"
     if req.verb == "close":
-        authority.authorize("app.close", p.instance.id).close()
+        authority.authorize(CLOSE, p.instance.id).close()
         return "password"
     # focus: switching is an attach; the kernel's word is whether the process is really there
     if p.instance.status != "running":

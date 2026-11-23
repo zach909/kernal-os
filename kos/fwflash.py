@@ -551,6 +551,11 @@ def _flash_one(paths: Paths, authority, it: PlanItem, w: Writer, typed, now) -> 
             after.unlink()
             if ok:
                 authority.audit.record(ACTION, it.target, "flashed", key=key)
+                try:
+                    from .norestart import note_reboot_needed        # a new firmware image loads only at boot
+                    note_reboot_needed(paths, f"the firmware of {it.target} was rewritten")
+                except OSError:
+                    pass                                             # a missing note must not hide a finished write
                 return Result(it.target, DONE, "written and read back identical; reboot to use it", str(backup))
             problem = "the chip does not hold the signed image after the write"
         except (FlashError, OSError) as e:        # from here the chip may be half-written: always roll back

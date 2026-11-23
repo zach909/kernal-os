@@ -303,6 +303,15 @@ class TestFlash(Base):
         self.assertEqual(Path(res[0].backup).read_bytes(), OLD)
         self.assertEqual(oct(os.stat(res[0].backup).st_mode & 0o777), "0o600")
         self.assertEqual(oct(os.stat(self.paths.state / "firmware-backup").st_mode & 0o777), "0o700")
+
+    def test_only_a_verified_write_says_a_reboot_is_needed(self):
+        from kos import norestart
+        self.go()                                                    # a dry run writes nothing
+        self.assertEqual(norestart.reboot_reasons(self.paths, running="", root=self.root), [])
+        res, _ = self.go(PW, apply=True)
+        self.assertEqual([r.status for r in res], [fwflash.DONE])
+        (why,) = norestart.reboot_reasons(self.paths, running="", root=self.root)
+        self.assertIn("firmware", why)
         self.assertEqual(self.audit_outcomes(),
                          [("firmware.flash", "granted"), ("firmware.flash", "flash-started"),
                           ("firmware.flash", "flashed")])

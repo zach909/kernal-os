@@ -125,6 +125,11 @@ ACTIONS: dict[str, str] = {
     "migrate.import": "unpack a migration bundle onto this computer",
     "agent.run": "run a local AI agent",
     "agent.tool": "let a local AI agent use a tool",
+    # no reboot (kos/norestart.py): swap out-of-date apps for new files without restarting the machine
+    "norestart.read": "see which apps are out of date and whether a reboot is really needed",
+    "norestart.refresh": "swap out-of-date apps for their new files now",
+    "norestart.auto": "let the OS swap out-of-date apps by itself while this computer is unlocked",
+    "norestart.stop": "stop the OS swapping out-of-date apps by itself",
 }
 
 
