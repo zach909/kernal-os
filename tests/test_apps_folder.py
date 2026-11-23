@@ -23,7 +23,7 @@ from kos.vault import Vault  # noqa: E402
 from test_kos import DesktopSessionEnv, _keys  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-APPS = ROOT / "apps"
+APPS = ROOT / "store" / "apps"
 # Imports from the OS package an app may make. kos.sdk is the protocol client every app speaks through.
 # kos.office is the one known exception (the App Library's search): it is listed as a gap in the README,
 # so a new shared import fails here instead of slipping in.
@@ -154,19 +154,19 @@ class TestWallpaper(DesktopSessionEnv):
             taskbar.vault("wallpaper", "put")
 
     def test_the_taskbar_trusts_only_a_plain_colour_from_another_app(self):
-        tb = load("apps/taskbar/app.py", "tb_for_wallpaper")
+        tb = load("store/apps/taskbar/app.py", "tb_for_wallpaper")
         self.assertEqual(tb.valid_color("#16361F"), "#16361f")
         for bad in (None, 7, "", "red", "#12345", "#1234567", "#12345g", "16361f", "#16361f\n", "url(x)", ["#000000"]):
             self.assertIsNone(tb.valid_color(bad), bad)
 
     def test_the_wallpaper_swatches_are_all_plain_colours(self):
-        wp = load("apps/wallpaper/app.py", "wp_colours")
-        tb = load("apps/taskbar/app.py", "tb_colours")
+        wp = load("store/apps/wallpaper/app.py", "wp_colours")
+        tb = load("store/apps/taskbar/app.py", "tb_colours")
         for _, color in wp.SWATCHES:
             self.assertEqual(tb.valid_color(color), color)
 
     def test_clicking_outside_every_swatch_picks_nothing(self):
-        wp = load("apps/wallpaper/app.py", "wp_click")
+        wp = load("store/apps/wallpaper/app.py", "wp_click")
         self.assertIsNone(wp.swatch_at(0, 0, 320))
         self.assertIsNone(wp.swatch_at(2000, 2000, 320))
         self.assertEqual(wp.swatch_at(wp.GAP + 1, wp.TOP + 1, 320), 0)

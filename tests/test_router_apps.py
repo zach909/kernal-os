@@ -1,4 +1,4 @@
-"""The router group (``apps/router``): router.islands finds the islands in a 0/1 network, router.plan chooses
+"""The router group (``store/apps/router``): router.islands finds the islands in a 0/1 network, router.plan chooses
 local or cloud, the effort and how many islands run. Two separate apps sharing the ``router`` folder.
 
 Imports only what stands on its own, so it runs even where the OS package does not import (see the note on the
@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 ROOT = Path(__file__).resolve().parent.parent
-GROUP = ROOT / "apps" / "router"
+GROUP = ROOT / "store" / "apps" / "router"
 SPACE_PERM_RE = re.compile(r"^(owns|uses):[a-z][a-z0-9-]{0,31}$")   # the same pattern kos/kapp.py uses
 
 

@@ -2,7 +2,7 @@
 
 Three cuts, none of which changes what the code does:
 
-1. Only the OS core ships: ``bin/kos``, ``bin/run``, ``kos/*.py`` and ``apps/`` (the apps
+1. Only the OS core ships: ``bin/kos``, ``bin/run``, ``kos/*.py`` and ``store/apps/`` (the apps
    ``kos desktop install`` packs: one folder per function of the OS). The productivity suite (``kos/office``), the apps in
    ``examples/``, the tests, the docs and the image-building scripts are separate; everything else is
    an app you install, which is the point.
@@ -21,7 +21,7 @@ from __future__ import annotations
 import ast
 
 LEAN_FILES_TOP = ("bin/kos", "bin/run")
-LEAN_PREFIXES = ("apps/",)
+LEAN_PREFIXES = ("store/apps/",)
 
 
 def in_lean(path: str) -> bool:

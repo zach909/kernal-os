@@ -1,6 +1,6 @@
 {
- "apps/backup/list/app.py": 1,
- "apps/backup/remove/app.py": 1,
+ "store/apps/backup/list/app.py": 1,
+ "store/apps/backup/remove/app.py": 1,
  "examples/backup/app.py": 1,
  "kos/admin.py": 3,
  "kos/auth.py": 12,

@@ -1,4 +1,4 @@
-"""The smart home group (``apps/home``): three separate apps that share one folder, ``home``.
+"""The smart home group (``store/apps/home``): three separate apps that share one folder, ``home``.
 
 Imports only modules that stand on their own (proof gate, manifests, the shared-folder store), so it runs
 without the session/CLI layer. The apps are driven through their real ``main()`` with a fake SDK."""
@@ -20,7 +20,7 @@ from kos.spaces import AppStorage, StorageError  # noqa: E402
 from kos.vault import Vault  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-HOME = ROOT / "apps" / "home"
+HOME = ROOT / "store" / "apps" / "home"
 NAMES = {"devices": "home.devices", "pair": "home.pair", "control": "home.control"}
 GOOD = {"name": "Lamp", "room": "Den", "kind": "light", "on": False, "level": 50}
 
