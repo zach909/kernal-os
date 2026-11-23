@@ -1,0 +1,11 @@
+{
+  "name": "store.remote-desktop",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Control another computer (Quick Assist, Remote Desktop, Remmina)."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "store.youtube",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Watch video from YouTube (YouTube and YouTube VR)."
+}

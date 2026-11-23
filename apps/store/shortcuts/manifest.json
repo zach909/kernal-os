@@ -1,0 +1,11 @@
+{
+  "name": "store.shortcuts",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Chain actions of other apps into a shortcut (Shortcuts, Automator). Apps never call each other (soft rule), so this would need a design of its own."
+}

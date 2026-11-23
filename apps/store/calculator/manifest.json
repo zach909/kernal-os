@@ -1,0 +1,11 @@
+{
+  "name": "store.calculator",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Exact arithmetic: + - * / and brackets on whole numbers and fractions; answers are shown as 7/2, never 3.5. Exact fractions only, no decimals (rule 6). No scientific functions, no memory."
+}

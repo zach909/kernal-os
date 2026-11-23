@@ -1,0 +1,11 @@
+{
+  "name": "store.task-manager",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Show running programs and their load (Activity Monitor, Task Manager, System Monitor, Resource Monitor)."
+}

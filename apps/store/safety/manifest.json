@@ -1,0 +1,11 @@
+{
+  "name": "store.safety",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Emergency contacts, check-ins and SOS."
+}

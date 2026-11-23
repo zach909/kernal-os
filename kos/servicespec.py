@@ -200,6 +200,13 @@ SPECS: dict[str, Spec] = _specs(
          "unpack a bundle; verified completely first, never overwrites"),
     Spec("agent.run", {"task": text(4000), "workspace": path(), "steps": num(1, 20, 8)},
          "run a local AI agent in one folder; every tool use asks your password"),
+    # no reboot (kos/norestart.py): out-of-date apps swapped without restarting the machine
+    Spec("norestart.status", {}, "which apps are out of date, whether a reboot is really needed, and the watcher"),
+    Spec("norestart.refresh", {"app": name(default=None, required=False)},
+         "swap out-of-date apps for their new files now (one app, or every one that is safe to swap)"),
+    Spec("norestart.auto", {"hours": num(1, 24, 8)},
+         "let the OS do that by itself for some hours: the password is typed once, here"),
+    Spec("norestart.stop", {}, "stop the automatic swapping and wipe its keys"),
     # code as a command
     Spec("code.run", {"code": text(20_000), "lang": name(default="python", required=False)},
          "run one line of code as a sandboxed one-shot app"),

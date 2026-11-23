@@ -1,4 +1,4 @@
-"""Apps made of programs: ``apps/backup/list`` is the program ``backup.list``.
+"""Apps made of programs: ``store/apps/backup/list`` is the program ``backup.list``.
 
 Run with: python3 -m unittest discover -s tests -v
 """
@@ -38,7 +38,7 @@ from kos.store import AppStore  # noqa: E402
 from kos.system import SystemBridge, bridge_for, open_background  # noqa: E402
 
 PW = "correct horse battery"
-BACKUP_TREE = REPO / "apps" / "backup"
+BACKUP_TREE = REPO / "store" / "apps" / "backup"
 
 
 def manifest(name, permissions=(), **extra):

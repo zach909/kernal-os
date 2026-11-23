@@ -1,0 +1,13 @@
+{
+  "name": "store.text-editor",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "description": "Scratch text buffers (Text Editor, Notepad and TextEdit are one function). Stored in the app's own storage, not as files: it cannot open or save a file on disk (needs a file service)."
+}

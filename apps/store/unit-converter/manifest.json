@@ -1,0 +1,11 @@
+{
+  "name": "store.unit-converter",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Converts length, mass and temperature exactly, as fractions. Three families only. Not the camera ruler that Measure is (see `measure`)."
+}

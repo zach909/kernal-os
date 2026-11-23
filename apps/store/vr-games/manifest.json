@@ -1,0 +1,11 @@
+{
+  "name": "store.vr-games",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Games for a headset."
+}

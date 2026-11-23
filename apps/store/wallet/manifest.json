@@ -1,0 +1,11 @@
+{
+  "name": "store.wallet",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Cards, passes and payments. A wallet is a payment surface: not built, and not something to fake."
+}
