@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import select
 from collections import deque
 from typing import Iterator, Optional
 
@@ -61,6 +62,18 @@ class Canvas:
         v = vectorize(pixels, x, y, scale, min(max_ops or DEFAULT_BUDGET, room) if room >= 1 else 0)
         self.ops.extend(v.ops)
         return v
+
+
+def _pause(ms: int) -> None:
+    """Wait ``ms`` whole milliseconds (poll takes milliseconds as an integer, so no fractions of a second)."""
+    select.poll().poll(ms)
+
+
+def _canvas_with(base: Canvas, ops: list) -> Canvas:
+    """A new canvas holding ``base``'s ops followed by ``ops``."""
+    c = Canvas()
+    c.ops = list(base.ops) + list(ops)
+    return c
 
 
 class App:
@@ -198,6 +211,52 @@ class App:
                 self._queue.append(ev)
                 return {"ok": False, "detail": "quit", "data": {}}
             self._queue.append(ev)
+
+    # --- the load effect (needs 'uses:load-effect' and the owner's grant) ----
+    def load_effect(self) -> dict:
+        """What the owner chose in the load-effect app: {"on", "three_d", "light", "ms"}. Off if the
+        app has no access to the ``load-effect`` space or nothing was saved. See ``kos.reveal``."""
+        from .reveal import SETTING_KEY, SETTING_SPACE, parse_setting
+        return parse_setting(self.vault_get(SETTING_KEY, space=SETTING_SPACE))
+
+    def scene(self, pixels, x: int = 0, y: int = 0, scale: int = 1, **options):
+        """Find the things in a picture for the load effect. Same arguments as ``Canvas.image`` plus the
+        options of ``kos.reveal.Scene`` (``ui_color``, ``layer_height``, ``light``). Raises ValueError."""
+        from .reveal import Scene
+        return Scene(pixels, x, y, scale, **options)
+
+    def show_scene(self, canvas: Canvas, scene, vp=None, effect: Optional[dict] = None, max_ops: Optional[int] = None):
+        """Put a ``kos.reveal.Scene`` on the screen the way the owner asked. ``canvas`` holds the app's
+        own background and interface (start it with a ``clear``). With the effect on, the picture arrives
+        (seed, band out, band in, unblur), pausing ``ms`` between frames; with 3D on it then stands up
+        in perspective from ``vp`` (the mouse). On a pointer event call it again with the new ``vp`` and
+        ``effect={**fx, "on": False}`` (``fx`` from ``load_effect()``) so the arrival does not replay.
+        Returns the ``reveal.Rendered`` when it drew 3D (check ``.note``), else None."""
+        from .reveal import DEFAULT_SETTING
+        from .vectorize import DEFAULT_BUDGET
+        fx = effect if effect is not None else self.load_effect()
+        fx = {**DEFAULT_SETTING, **fx}
+        room = max(1, min(max_ops or DEFAULT_BUDGET, 5000 - len(canvas.ops)))
+        scene.set_light(tuple(fx["light"]))
+        ms = fx["ms"]
+
+        def show(ops):
+            self.present(_canvas_with(canvas, ops))
+        if fx["on"]:
+            for ops in scene.frames(max_ops=room):
+                show(ops)
+                _pause(ms)
+        if fx["three_d"]:
+            if fx["on"]:
+                for ops in scene.rise_frames(vp, max_ops=room)[:-1]:
+                    show(ops)
+                    _pause(ms)
+            standing = scene.render(vp, max_ops=room)
+            show(standing.ops)
+            return standing
+        if not fx["on"]:
+            show(scene.flat(room).ops)
+        return None
 
     # --- commands the app can issue -------------------------------------
     def screen(self, title: str, lines: list[str], status: str = "") -> None:

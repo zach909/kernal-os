@@ -163,22 +163,30 @@ def _boxes(grid: list[list[int]], bg: int, limit: int):
 
 
 def vectorize(pixels: Sequence[Sequence[Any]], x: int = 0, y: int = 0, scale: int = 1,
-              max_ops: int = DEFAULT_BUDGET) -> Vectorized:
+              max_ops: int = DEFAULT_BUDGET, min_downscale: int = 1) -> Vectorized:
     """Draw ops for a picture. ``pixels`` is a list of rows of '#rrggbb' strings
     or (r, g, b) triples; (x, y) is where its top-left corner goes and ``scale``
     makes every source pixel a scale x scale square. Never returns more than
-    ``max_ops`` ops. Raises ValueError for anything malformed, never anything else."""
+    ``max_ops`` ops. ``min_downscale`` forces a blur: every drawn cell stands for at least that many
+    source pixels square (1 means no forced blur). Raises ValueError for anything malformed, never
+    anything else."""
     x = _int(x, "x", -MAX_COORD, MAX_COORD)
     y = _int(y, "y", -MAX_COORD, MAX_COORD)
     scale = _int(scale, "scale", 1, MAX_SCALE)
     max_ops = _int(max_ops, "max_ops", 1, MAX_OPS)
-    source = _grid(pixels)
+    min_downscale = _int(min_downscale, "min_downscale", 1, MAX_SIDE)
+    return from_grid(_grid(pixels), x, y, scale, max_ops, min_downscale)
+
+
+def from_grid(source: list, x: int, y: int, scale: int, max_ops: int, min_downscale: int = 1) -> Vectorized:
+    """``vectorize`` for a grid that is already validated (rows of 0xRRGGBB ints). Used by
+    ``kos.reveal`` so a picture that is drawn several times is checked once."""
     w, h = len(source[0]), len(source)
     if not (-MAX_COORD <= x and x + w * scale <= MAX_COORD
             and -MAX_COORD <= y and y + h * scale <= MAX_COORD):
         raise ValueError("the picture would reach outside the coordinate range")
 
-    d = 1
+    d = min_downscale
     while True:
         base = _downscale(source, d)
         for step in _STEPS:
