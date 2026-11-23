@@ -1,0 +1,11 @@
+{
+  "name": "store.clock",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "UTC time and date, a world clock in whole and half-hour offsets, and a stopwatch. Shows the time when you press a key: an app gets no clock ticks, so it does not count live. No alarms or timers."
+}

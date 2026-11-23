@@ -1,0 +1,9 @@
+{
+  "name": "load-preview",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["graphical"],
+  "permissions": ["uses:load-effect"],
+  "description": "Shows a small test picture the way the load-effect settings say: arrival, then 3D layers with the mouse as the vanishing point. Needs: kos grant load-preview space:load-effect --level read."
+}

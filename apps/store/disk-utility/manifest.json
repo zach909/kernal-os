@@ -1,0 +1,11 @@
+{
+  "name": "store.disk-utility",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Inspect and repair disks (Disk Utility, Disks, Disk Management, Disk Usage Analyzer)."
+}

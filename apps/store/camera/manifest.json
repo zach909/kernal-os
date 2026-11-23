@@ -1,0 +1,11 @@
+{
+  "name": "store.camera",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Take photos and video (Camera, Photo Booth, Photo and Video Capture are one function)."
+}

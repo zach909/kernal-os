@@ -1,0 +1,11 @@
+{
+  "name": "store.device-setup",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "First-run setup of a device."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "store.feedback",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Send feedback to the maker (Feedback Hub)."
+}
