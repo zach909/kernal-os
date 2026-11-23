@@ -25,7 +25,7 @@
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
     kos desktop install             pack, scan, install + permit the taskbar, App Library, mouse, keyboard, display, wallpaper
-    kos boot desktop [--graphical]  the desktop: taskbar + App Library apps; right mouse = App Library
+    kos boot desktop [--graphical]  the desktop screen + App Library + search; right mouse = App Library, Windows key = search
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
     kos explore [PATH]              interactive cd/ls/cat, straight into zip files
     kos activity                    one feed: open apps + recent password decisions
@@ -430,8 +430,11 @@ def cmd_boot(args, paths: Paths) -> int:
     authority, prompter = _authority(paths)
     authority.authorize("device.desktop").close()
     prompter.close()
-    home = _ensure_open(paths, "taskbar", mode)
+    installed = {a.name for a in AppStore(paths).installed()}
+    # The home screen is the desktop (wallpaper, icons, bar) when it is installed, else the plain taskbar.
+    home = _ensure_open(paths, "desktop" if "desktop" in installed else "taskbar", mode)
     library = _ensure_open(paths, "app-library", mode)
+    search = _ensure_open(paths, "search", mode) if "search" in installed else None
 
     def attach(instance_id: str, ctx: dict) -> dict:
         from . import layers
@@ -440,11 +443,12 @@ def cmd_boot(args, paths: Paths) -> int:
         prompter.close()
         outcome: dict = {}
         _attach_session(paths, authority, inst, outcome=outcome,
-                        preboot=tuple(ctx["preboot"]), right_click_to=ctx["right_click_to"])
+                        preboot=tuple(ctx["preboot"]), right_click_to=ctx["right_click_to"],
+                        search_to=ctx.get("search_to"))
         return outcome
 
     try:
-        return Desktop(home, library, attach).run()
+        return Desktop(home, library, attach, search).run()
     except DesktopError as e:
         raise KAppError(str(e)) from None
 

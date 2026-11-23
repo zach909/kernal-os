@@ -219,6 +219,9 @@ class Guard:
         kind = ev.get("type") if isinstance(ev, dict) else None
         if kind == "interrupt":
             return {"type": "interrupt"}        # Ctrl-C is the OS's; it is never judged or delayed
+        if kind == "search":                    # the Windows key: no fields, rebuilt, never forwarded
+            self.ok("input", "event-shape")
+            return {"type": "search"}
         bad = None
         if kind == "key":
             key = ev.get("key")

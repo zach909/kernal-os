@@ -40,6 +40,9 @@ mouse/keyboard --> devices.py (OS only) --> session.py route() --> app (as a com
   password). "Booting" it means *starting to forward keys to the app*. Until
   then keystrokes reach only the OS prompt.
 - **Ctrl-C is reserved by the OS in every mode.** An app can never trap you.
+- **Windows key** (evdev KEY_LEFTMETA/KEY_RIGHTMETA, a press only) becomes a `search` event: `Session.route`
+  switches to `search_to` (the search popup) once the keyboard is booted and never forwards it. A terminal cannot
+  send it, so it only works on the real keyboard.
 - **Right mouse** is consumed by `Session.route` when `right_click_to` is set
   (the App Library). It is never forwarded to the app.
 - While a trusted prompt is up, the app gets nothing.
