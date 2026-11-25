@@ -22,6 +22,8 @@ from kos import sdk, servicespec  # noqa: E402
 from kos.kapp import KApp, Manifest, pack_tree  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+APPS = ROOT / "apps"
+GROUP_OF = {"devices": "link", "sync": "sync", "migrate": "migrate", "agent": "agent", "zip": "zip"}
 APPS = ROOT / "store" / "apps"
 GROUP_OF = {"devices": "link", "sync": "sync", "migrate": "migrate", "agent": "agent"}
 EXPECTED = {
@@ -29,6 +31,7 @@ EXPECTED = {
     "sync": ["sync.folders", "sync.run", "sync.serve", "sync.share", "sync.unshare"],
     "migrate": ["migrate.export", "migrate.import"],
     "agent": ["agent.run"],
+    "zip": ["zip.run"],
 }
 
 

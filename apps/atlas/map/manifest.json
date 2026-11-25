@@ -1,0 +1,13 @@
+{
+  "name": "atlas.map",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "uses:atlas"
+  ],
+  "description": "A top-down picture of one space of the map, with pan and zoom. Reads the 'atlas' shared folder; changes nothing."
+}

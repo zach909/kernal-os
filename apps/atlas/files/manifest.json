@@ -1,0 +1,14 @@
+{
+  "name": "atlas.files",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "uses:atlas",
+    "service:files"
+  ],
+  "description": "Maps a folder tree: a place, links and a fingerprint for every file, text or not. Writes marks to the 'atlas' folder."
+}

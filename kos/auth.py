@@ -125,6 +125,14 @@ ACTIONS: dict[str, str] = {
     "migrate.import": "unpack a migration bundle onto this computer",
     "agent.run": "run a local AI agent",
     "agent.tool": "let a local AI agent use a tool",
+    # senses and the zip runner (kos/camera.py, kos/sensors.py, kos/filewalk.py, kos/ziprun.py)
+    "camera.list": "look at which cameras are plugged in",
+    "camera.capture": "take pictures with a camera",
+    "sensor.list": "look at which sensors are plugged in",
+    "sensor.read": "read a sensor",
+    "sensor.sweep": "read every sensor",
+    "clock.read": "read the clock",
+    "zip.run": "run the program in a zip file",
     # no reboot (kos/norestart.py): swap out-of-date apps for new files without restarting the machine
     "norestart.read": "see which apps are out of date and whether a reboot is really needed",
     "norestart.refresh": "swap out-of-date apps for their new files now",
