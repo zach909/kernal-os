@@ -1,0 +1,9 @@
+{
+  "name": "app-builder",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["owns:app-drafts"],
+  "description": "Make a new app: name it, describe it, pick its screens. Saves a checked draft (manifest and starter code) in the 'app-drafts' shared folder."
+}

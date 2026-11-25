@@ -133,6 +133,11 @@ ACTIONS: dict[str, str] = {
     "sensor.sweep": "read every sensor",
     "clock.read": "read the clock",
     "zip.run": "run the program in a zip file",
+    # no reboot (kos/norestart.py): swap out-of-date apps for new files without restarting the machine
+    "norestart.read": "see which apps are out of date and whether a reboot is really needed",
+    "norestart.refresh": "swap out-of-date apps for their new files now",
+    "norestart.auto": "let the OS swap out-of-date apps by itself while this computer is unlocked",
+    "norestart.stop": "stop the OS swapping out-of-date apps by itself",
 }
 
 

@@ -1,4 +1,4 @@
-"""The apps for linked devices, sync, migration and the agent (apps/devices, apps/sync, apps/migrate, apps/agent).
+"""The apps for linked devices, sync, migration and the agent (store/apps/devices, store/apps/sync, store/apps/migrate, store/apps/agent).
 
 Three kinds of check: each app packs through the proof gate (no decimals, nothing forbidden); each manifest asks
 for exactly one service group and every service an app calls is one the OS has, with the arguments the OS's spec
@@ -24,6 +24,8 @@ from kos.kapp import KApp, Manifest, pack_tree  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 APPS = ROOT / "apps"
 GROUP_OF = {"devices": "link", "sync": "sync", "migrate": "migrate", "agent": "agent", "zip": "zip"}
+APPS = ROOT / "store" / "apps"
+GROUP_OF = {"devices": "link", "sync": "sync", "migrate": "migrate", "agent": "agent"}
 EXPECTED = {
     "devices": ["devices.list", "devices.pair", "devices.scope", "devices.unlink"],
     "sync": ["sync.folders", "sync.run", "sync.serve", "sync.share", "sync.unshare"],

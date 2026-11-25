@@ -12,7 +12,7 @@ A group of apps for a smart home of devices that run KOS. This folder has no `ma
 They never call each other. They share one folder, `home`, and the owner decides who may touch it:
 
 ```
-kos pack apps/home -o dist/home
+kos pack store/apps/home -o dist/home
 kos install dist/home                       # each asks for the password
 kos permit home.devices                     # one app at a time
 kos grant home.pair    space:home --level write

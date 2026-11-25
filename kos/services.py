@@ -26,7 +26,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from . import firewall, kernel
 from .auth import AUDIT_KEY_LABEL, AuditLog, AuthError, Authority, AuthorizationDenied
@@ -747,6 +747,81 @@ def _zip_run(ctx: Ctx, path: str, seconds: int) -> dict:
     except ziprun.ZipRunError as e:
         raise ServiceError(str(e)) from None
     return {**res, "output": lines[:200]}
+# ---- no reboot ----------------------------------------------------------------------------------
+# The logic is in kos/norestart.py (its own tests). Here is only the door: the password is asked before
+# anything is read or swapped, the caller's manifest already asked for 'service:norestart', and a domain error
+# becomes a refusal the app can show. The watcher is not started here: it is a fresh process that is handed
+# three derived keys over a pipe (never the password), and this process wipes its own copy at once.
+
+def _norestart(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def run(ctx, **args):
+        from .norestart import NoRestartError
+        try:
+            return fn(ctx, **args)
+        except NoRestartError as e:
+            raise ServiceError(str(e)) from None
+    return run
+
+
+def _nr_row(r) -> dict:
+    return {"id": r.id, "name": r.name, "mode": r.mode, "running": r.running, "installed": r.installed,
+            "state": r.state, "why": r.why}
+
+
+@service("norestart.status")
+@_norestart
+def _nr_status(ctx: Ctx) -> dict:
+    from . import norestart
+    with ctx.authority.authorize("norestart.read"):
+        rep = norestart.report(ctx.paths)
+    auto = None if rep.auto is None else {**rep.auto, "minutes_left": max(0, (rep.auto["until"] - time.time_ns() // 1_000_000_000) // 60)}
+    return {"reboot_needed": rep.reboot_needed, "reboot": rep.reboot, "session": rep.session,
+            "apps": [_nr_row(r) for r in rep.apps[:MAX_ENTRIES]], "auto": auto}
+
+
+@service("norestart.refresh")
+@_norestart
+def _nr_refresh(ctx: Ctx, app: Optional[str]) -> dict:
+    from . import norestart
+    app = app or ""                                           # no app named: every one that is safe to swap
+    with ctx.authority.authorize("norestart.refresh", app) as grant:
+        lease = norestart.Lease.from_grant(grant, 120)          # for this call only
+    try:
+        results = norestart.refresh(ctx.paths, lease, only=app)
+        rows = norestart.scan(ctx.paths)
+    finally:
+        lease.wipe()
+    return {"results": [{"name": r.name, "from": r.old, "to": r.new, "outcome": r.outcome, "why": r.why}
+                        for r in results],
+            "apps": [_nr_row(r) for r in rows[:MAX_ENTRIES]]}
+
+
+@service("norestart.auto")
+@_norestart
+def _nr_auto(ctx: Ctx, hours: int) -> dict:
+    from . import norestart
+    if norestart.watcher_state(ctx.paths) is not None:           # say so before the password is asked
+        raise ServiceError("automatic swapping is already on (stop it first to change the hours)")
+    seconds = hours * 3600
+    with ctx.authority.authorize("norestart.auto", f"{hours}h") as grant:
+        lease = norestart.Lease.from_grant(grant, seconds)
+    try:
+        pid = norestart.start_watcher(ctx.paths, lease, seconds)
+    finally:
+        lease.wipe()
+    return {"pid": pid, "hours": hours, "until": time.time_ns() // 1_000_000_000 + seconds}
+
+
+@service("norestart.stop")
+@_norestart
+def _nr_stop(ctx: Ctx) -> dict:
+    from . import norestart
+    with ctx.authority.authorize("norestart.stop"):
+        stopped = norestart.stop_watcher(ctx.paths)
+    return {"stopped": stopped}
 
 
 # ---- the door -----------------------------------------------------------------------------------

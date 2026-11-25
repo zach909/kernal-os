@@ -1,4 +1,4 @@
-"""The device chooser: kos/compute.py (the decision), the compute.* services (the door) and apps/device-chooser.
+"""The device chooser: kos/compute.py (the decision), the compute.* services (the door) and store/apps/device-chooser.
 
 What is proved and how. The decision has no maths a prover needs, so it is not in kos/proofs.py; instead the
 exhaustive test below tries every task against every subset of a device set and checks the two properties that
@@ -28,7 +28,7 @@ from kos.services import HANDLERS, ServiceHost  # noqa: E402
 from test_linkdev import Device as TestDevice  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / "apps" / "device-chooser"
+APP = ROOT / "store" / "apps" / "device-chooser"
 PW = "compute owner password"
 
 CPU = Device("cpu", "cpu", "host", units=8, memory_mb=16_384)
