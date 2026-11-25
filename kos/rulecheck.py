@@ -53,7 +53,7 @@ def scan_file(path: Path) -> list[tuple[int, str]]:
         return []
 
 
-def scan_tree(root: Path, dirs=("kos", "apps", "examples", "suite", "bin")) -> dict[str, int]:
+def scan_tree(root: Path, dirs=("kos", "store", "examples", "suite", "bin")) -> dict[str, int]:
     """Count of breaches per file, only files with at least one."""
     out: dict[str, int] = {}
     for d in dirs:

@@ -200,6 +200,28 @@ SPECS: dict[str, Spec] = _specs(
          "unpack a bundle; verified completely first, never overwrites"),
     Spec("agent.run", {"task": text(4000), "workspace": path(), "steps": num(1, 20, 8)},
          "run a local AI agent in one folder; every tool use asks your password"),
+    # senses: what the OS reads for an app that maps the world (kos/camera.py, kos/sensors.py); one password per call
+    Spec("camera.list", {}, "the cameras plugged in (names only)"),
+    Spec("camera.capture", {"cams": words(required=True), "width": num(32, 320, 128), "height": num(24, 240, 96),
+                            "count": num(1, 8, 1), "every_ms": num(0, 30000, 0)},
+         "take greyscale pictures with one or more cameras (video0, video1...): at most 30 seconds, then they are closed"),
+    Spec("sensor.list", {}, "the plain sensors plugged in (temperature, humidity, pressure, light, gas)"),
+    Spec("sensor.read", {"index": num(0, 999, required=True)}, "read every channel of one sensor, as whole numbers"),
+    Spec("sensor.sweep", {}, "read every channel of every plugged-in sensor in one call (one password), as whole numbers"),
+    Spec("clock.now", {}, "the time, in whole seconds since 1970 (UTC): apps have no clock of their own"),
+    # a whole folder tree in one go (kos/filewalk.py)
+    Spec("files.walk", {"path": path(), "limit": num(1, 2000, 500), "depth": num(1, 8, 4), "heads": flag(False)},
+         "list a folder tree in one call (never through symlinks); with heads, the start of small text files"),
+    # a zip dropped in runs sandboxed with nothing (kos/ziprun.py)
+    Spec("zip.run", {"path": path(), "seconds": num(1, 300, 30)},
+         "scan, check and run a zip's program in the sandbox with no permissions; what it asked for is shown, not granted"),
+    # no reboot (kos/norestart.py): out-of-date apps swapped without restarting the machine
+    Spec("norestart.status", {}, "which apps are out of date, whether a reboot is really needed, and the watcher"),
+    Spec("norestart.refresh", {"app": name(default=None, required=False)},
+         "swap out-of-date apps for their new files now (one app, or every one that is safe to swap)"),
+    Spec("norestart.auto", {"hours": num(1, 24, 8)},
+         "let the OS do that by itself for some hours: the password is typed once, here"),
+    Spec("norestart.stop", {}, "stop the automatic swapping and wipe its keys"),
     # code as a command
     Spec("code.run", {"code": text(20_000), "lang": name(default="python", required=False)},
          "run one line of code as a sandboxed one-shot app"),

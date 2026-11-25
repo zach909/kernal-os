@@ -26,7 +26,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from . import firewall, kernel
 from .auth import AUDIT_KEY_LABEL, AuditLog, AuthError, Authority, AuthorizationDenied
@@ -665,6 +665,163 @@ def _agent_run(ctx: Ctx, task: str, workspace: str, steps: int) -> dict:
                              max_steps=steps)
     return {"stopped": res.stopped, "final": res.final,
             "steps": [{"n": s.n, "kind": s.kind, "tool": s.tool, "detail": s.detail[:200]} for s in res.steps]}
+
+
+# ---- senses, folder trees and zips ----------------------------------------------------------------------
+# The reading is in kos/camera.py, kos/sensors.py, kos/filewalk.py and kos/ziprun.py. Here is only the door:
+# the password is asked first, and a domain error becomes a refusal the app can show.
+
+@service("camera.list")
+def _camera_list(ctx: Ctx) -> dict:
+    from . import camera
+    with ctx.authority.authorize("camera.list"):
+        return {"cameras": camera.list_cameras()}
+
+
+@service("camera.capture")
+def _camera_capture(ctx: Ctx, cams: list, width: int, height: int, count: int, every_ms: int) -> dict:
+    import re
+    from . import camera
+    nodes = []
+    for c in cams:
+        m = re.match(r"^video([0-9]{1,3})$", c)
+        if not m:
+            raise ServiceError(f"{c[:20]!r} is not a camera name: use video0, video1, ...")
+        nodes.append(int(m.group(1)))
+    try:
+        camera.check_budget(len(nodes), width, height, count, every_ms)       # refuse before asking
+    except camera.CameraError as e:
+        raise ServiceError(str(e)) from None
+    with ctx.authority.authorize("camera.capture", ",".join(f"video{n}" for n in nodes)):
+        try:
+            return camera.capture(nodes, width, height, count, every_ms)
+        except camera.CameraError as e:
+            raise ServiceError(str(e)) from None
+
+
+@service("sensor.list")
+def _sensor_list(ctx: Ctx) -> dict:
+    from . import sensors
+    with ctx.authority.authorize("sensor.list"):
+        return {"sensors": sensors.list_sensors()}
+
+
+@service("sensor.read")
+def _sensor_read(ctx: Ctx, index: int) -> dict:
+    from . import sensors
+    with ctx.authority.authorize("sensor.read", f"iio:device{index}"):
+        try:
+            return sensors.read_sensor(index)
+        except sensors.SensorError as e:
+            raise ServiceError(str(e)) from None
+
+
+@service("sensor.sweep")
+def _sensor_sweep(ctx: Ctx) -> dict:
+    from . import sensors
+    with ctx.authority.authorize("sensor.sweep"):
+        return sensors.sweep()
+
+
+@service("clock.now")
+def _clock_now(ctx: Ctx) -> dict:
+    with ctx.authority.authorize("clock.read"):
+        return {"t": time.time_ns() // 1_000_000_000}
+
+
+@service("files.walk")
+def _files_walk(ctx: Ctx, path: str, limit: int, depth: int, heads: bool) -> dict:
+    from . import filewalk
+    root = os.path.abspath(path)
+    with ctx.authority.authorize("file.view", root + (" (the whole tree, with the start of its text files)" if heads
+                                                      else " (the whole tree)")):
+        return filewalk.walk(root, limit, depth, heads)
+
+
+@service("zip.run")
+def _zip_run(ctx: Ctx, path: str, seconds: int) -> dict:
+    from . import ziprun
+    lines: list[str] = []
+    try:
+        res = ziprun.run_zip(ctx.paths, lambda: ctx.authority, path, seconds, out=lambda s: lines.append(str(s)[:2000]))
+    except ziprun.ZipRunError as e:
+        raise ServiceError(str(e)) from None
+    return {**res, "output": lines[:200]}
+# ---- no reboot ----------------------------------------------------------------------------------
+# The logic is in kos/norestart.py (its own tests). Here is only the door: the password is asked before
+# anything is read or swapped, the caller's manifest already asked for 'service:norestart', and a domain error
+# becomes a refusal the app can show. The watcher is not started here: it is a fresh process that is handed
+# three derived keys over a pipe (never the password), and this process wipes its own copy at once.
+
+def _norestart(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def run(ctx, **args):
+        from .norestart import NoRestartError
+        try:
+            return fn(ctx, **args)
+        except NoRestartError as e:
+            raise ServiceError(str(e)) from None
+    return run
+
+
+def _nr_row(r) -> dict:
+    return {"id": r.id, "name": r.name, "mode": r.mode, "running": r.running, "installed": r.installed,
+            "state": r.state, "why": r.why}
+
+
+@service("norestart.status")
+@_norestart
+def _nr_status(ctx: Ctx) -> dict:
+    from . import norestart
+    with ctx.authority.authorize("norestart.read"):
+        rep = norestart.report(ctx.paths)
+    auto = None if rep.auto is None else {**rep.auto, "minutes_left": max(0, (rep.auto["until"] - time.time_ns() // 1_000_000_000) // 60)}
+    return {"reboot_needed": rep.reboot_needed, "reboot": rep.reboot, "session": rep.session,
+            "apps": [_nr_row(r) for r in rep.apps[:MAX_ENTRIES]], "auto": auto}
+
+
+@service("norestart.refresh")
+@_norestart
+def _nr_refresh(ctx: Ctx, app: Optional[str]) -> dict:
+    from . import norestart
+    app = app or ""                                           # no app named: every one that is safe to swap
+    with ctx.authority.authorize("norestart.refresh", app) as grant:
+        lease = norestart.Lease.from_grant(grant, 120)          # for this call only
+    try:
+        results = norestart.refresh(ctx.paths, lease, only=app)
+        rows = norestart.scan(ctx.paths)
+    finally:
+        lease.wipe()
+    return {"results": [{"name": r.name, "from": r.old, "to": r.new, "outcome": r.outcome, "why": r.why}
+                        for r in results],
+            "apps": [_nr_row(r) for r in rows[:MAX_ENTRIES]]}
+
+
+@service("norestart.auto")
+@_norestart
+def _nr_auto(ctx: Ctx, hours: int) -> dict:
+    from . import norestart
+    if norestart.watcher_state(ctx.paths) is not None:           # say so before the password is asked
+        raise ServiceError("automatic swapping is already on (stop it first to change the hours)")
+    seconds = hours * 3600
+    with ctx.authority.authorize("norestart.auto", f"{hours}h") as grant:
+        lease = norestart.Lease.from_grant(grant, seconds)
+    try:
+        pid = norestart.start_watcher(ctx.paths, lease, seconds)
+    finally:
+        lease.wipe()
+    return {"pid": pid, "hours": hours, "until": time.time_ns() // 1_000_000_000 + seconds}
+
+
+@service("norestart.stop")
+@_norestart
+def _nr_stop(ctx: Ctx) -> dict:
+    from . import norestart
+    with ctx.authority.authorize("norestart.stop"):
+        stopped = norestart.stop_watcher(ctx.paths)
+    return {"stopped": stopped}
 
 
 # ---- the door -----------------------------------------------------------------------------------

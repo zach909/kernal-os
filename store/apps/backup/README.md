@@ -10,7 +10,7 @@ each app below has its own manifest and asks only for what it needs.
 | `backup.remove` | `remove/` | `ask:backup`, `ask:backup_remove` (see the list, forget one item) |
 
 ```
-kos pack apps/backup -o dist/backup      # one .kapp per app
+kos pack store/apps/backup -o dist/backup      # one .kapp per app
 kos install dist/backup                  # each asks for the password
 kos permit backup.list                   # one app at a time; `kos permit backup` is refused
 run backup.list

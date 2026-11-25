@@ -464,7 +464,7 @@ def cmd_desktop(args, paths: Paths) -> int:
     from . import sysapps
     from .permit import PermitStore
 
-    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "apps"
+    src = Path(args.src) if args.src else Path(loader.SDK_DIR) / "store" / "apps"
     authority, _ = _authority(paths)
     store, have = AppStore(paths), {a.name for a in AppStore(paths).installed()}
     with tempfile.TemporaryDirectory() as tmp:

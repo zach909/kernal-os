@@ -470,6 +470,7 @@ class TestInstallingTheOsApps(Os):
         import contextlib
         import io
         prompter = ScriptedPrompter([PW] * 10)  # 4 desktop apps (desktop, taskbar, library, search) + 4 function apps, one bundle, one permit
+        prompter = ScriptedPrompter([PW] * 9)   # 2 desktop apps + 5 function apps, one bundle, one permit
         authority = Authority(self.paths, prompter, Throttle(self.paths, base=0))
         with mock.patch.object(cli, "_authority", lambda paths: (authority, prompter)), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
@@ -481,6 +482,7 @@ class TestInstallingTheOsApps(Os):
         for e in ENTRIES:
             self.assertTrue(permits.is_permitted(e.name), e.name)
         for n in ("desktop", "taskbar", "app-library", "search", "mouse", "keyboard", "display", "wallpaper"):
+        for n in ("taskbar", "app-library", "mouse", "keyboard", "display", "wallpaper", "app-builder"):
             self.assertTrue(permits.is_permitted(n), n)
         self.assertEqual(sum("install the OS's own apps" in p for p in prompter.asked), 1)
         # running it again changes nothing and asks for nothing

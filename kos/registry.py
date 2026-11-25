@@ -44,6 +44,9 @@ class Instance:
     asks: list = field(default_factory=list)   # the single requests its manifest allows (ask:ACTION), set by the OS
     admin: bool = False       # manifest has the 'admin' permission (set by the OS, never the app)
     address: str = ""         # the path+query of the kos:// address it was opened with (checked by the OS)
+    sha256: str = ""          # the file this instance was launched from, set by the OS after the seal check;
+    version: str = ""         # "" on a record made before this existed: kos/norestart.py reports it, never swaps it
+    attached: bool = False    # a terminal or the desktop is attached right now (kept by the broker)
 
 
 def _alive(pid: int) -> bool:
