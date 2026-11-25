@@ -159,7 +159,7 @@ class TestArrival(unittest.TestCase):
     def test_seed_then_bands_grow_to_the_box_then_shrink_to_the_hull(self):
         s = R.Scene(demo(), 0, 0, 1)
         n = 4
-        fr = s.frames(steps=n)
+        fr = s.frames(steps=n, band_lines=True)
         bands = lambda ops: [o for o in ops if o[-1] == R.BAND_COLOR]   # noqa: E731
         self.assertTrue(all(o[0] == "rect" and o[3] == 3 for o in bands(fr[0])))      # a point each
         last_expand = bands(fr[n])                                       # the biggest box
@@ -184,6 +184,81 @@ class TestArrival(unittest.TestCase):
 
     def test_the_same_picture_gives_the_same_frames(self):
         self.assertEqual(R.Scene(demo(), 5, 5, 2).frames(), R.Scene(demo(), 5, 5, 2).frames())
+
+
+def area(ops, colour):
+    """Pixels covered by the rects of one colour (the silhouette of one thing)."""
+    return sum(o[3] * o[4] for o in ops if o[0] == "rect" and o[-1] == colour)
+
+
+class TestTheBandIsNotDrawn(unittest.TestCase):
+    def setUp(self):
+        self.s = R.Scene(demo(), 20, 20, 3, ui_color="#101820", layer_height=12)
+        self.circle = [t for t in self.s.things if t.color == 0xe8d040][0]
+        self.colour = R._hex(R.mix(0xe8d040, self.s.ui, self.s.levels()[0][1]))
+
+    def test_no_yellow_band_anywhere_unless_asked(self):
+        for kw in (dict(), dict(three_d=True, vp=(150, 120))):
+            for f in self.s.frames(steps=4, **kw):
+                self.assertFalse([o for o in f if o[-1] == R.BAND_COLOR], kw)
+        self.assertTrue([o for f in self.s.frames(steps=4, band_lines=True) for o in f if o[-1] == R.BAND_COLOR])
+
+    def test_a_thing_grows_from_a_point_to_its_box_then_tightens_to_its_outline(self):
+        n = 5
+        fr = self.s.frames(steps=n)
+        areas = [area(f, self.colour) for f in fr]
+        self.assertEqual(areas[0], 9)                                     # the seed is a 3 x 3 point
+        expand, vacuum = areas[0:n + 1], areas[n:2 * n + 1]
+        self.assertEqual(expand, sorted(expand))                          # it only grows
+        self.assertEqual(vacuum, sorted(vacuum, reverse=True))            # then it only tightens
+        x0, y0, x1, y1 = self.circle.bbox
+        box = (x1 - x0 + 1) * (y1 - y0 + 1) * 9
+        self.assertAlmostEqual(areas[n], box, delta=box // 10)            # biggest = about its box
+        hull = areas[2 * n]
+        self.assertLess(hull, areas[n])                                   # the outline is tighter than the box
+        self.assertGreaterEqual(hull, len(self.circle.pixels) * 9 - 9 * 4 * (x1 - x0 + y1 - y0))
+
+    def test_unblur_steps_follow_the_outline_and_the_last_frame_is_exact(self):
+        fr = self.s.frames(steps=3)
+        self.assertEqual(fr[-1], self.s.flat().ops)
+
+    def test_each_layer_arrives_at_its_own_distance_nearer_is_bigger(self):
+        n, vp = 4, (215, 165)
+        flat, deep = self.s.frames(steps=n), self.s.frames(steps=n, three_d=True, vp=vp)
+        red = R._hex(R.mix(0xd05050, self.s.ui, self.s.levels()[0][1]))
+        white = R._hex(R.mix(0xf0f0f0, self.s.ui, self.s.levels()[0][1]))
+        wide = lambda f, c: max(o[3] for o in f if o[0] == "rect" and o[-1] == c)         # noqa: E731
+        r_flat, r_deep = wide(flat[n], red), wide(deep[n], red)
+        w_flat, w_deep = wide(flat[n], white), wide(deep[n], white)
+        self.assertGreater(r_deep, r_flat)                                # raised: closer, so bigger
+        self.assertGreater(w_deep * r_flat, r_deep * w_flat)              # the white label sits higher: scaled more
+        self.assertEqual(deep[-1], self.s.render(vp).ops)                 # and it ends standing
+
+    def test_every_3d_frame_passes_the_protocol_for_any_mouse_and_budget(self):
+        for vp in ((0, 0), (120, 90), (239, 179), (-400, 900)):
+            for budget in (40, 300, 4000):
+                for f in self.s.frames(steps=3, three_d=True, vp=vp, max_ops=budget):
+                    self.assertLessEqual(len(f), budget)
+                    ok_frame(self, f)
+
+    def test_bad_arguments_are_a_value_error(self):
+        for kw in (dict(vp=(1,)), dict(vp="xy"), dict(vp=(1.5, 2)), dict(vp=(10 ** 9, 0))):
+            with self.assertRaises(ValueError):
+                self.s.frames(**kw)
+
+    def test_blurred_boxes_stay_inside_the_picture_and_the_exact_ones_are_kept_at_one(self):
+        rnd = random.Random(11)
+        for _ in range(20):
+            g = blank(37, 29)
+            for _ in range(5):
+                x, y = rnd.randrange(0, 30), rnd.randrange(0, 22)
+                fill(g, x, y, x + rnd.randrange(1, 9), y + rnd.randrange(1, 9), rnd.choice([A, B, C]))
+            sc = R.Scene(g)
+            for th in sc.things:
+                self.assertEqual(sc._coarse(th, 1), th.boxes)
+                for d in (2, 4, 8):
+                    for x0, x1, y0, y1 in sc._coarse(th, d):
+                        self.assertTrue(0 <= x0 <= x1 < 37 and 0 <= y0 <= y1 < 29)
 
 
 class TestVectorizeBlur(unittest.TestCase):
@@ -426,6 +501,7 @@ class TestShowScene(unittest.TestCase):
         out, frames = self.run_it("1 1 -1 -1 10")
         self.assertIsInstance(out, R.Rendered)
         self.assertEqual(frames[-1][1:], out.ops)
+        self.assertEqual(len(frames), len(R.Scene(demo(), 20, 20, 3).frames(vp=(100, 80), three_d=True)))
         out2, frames2 = self.run_it("0 1 1 1 10")
         self.assertEqual(len(frames2), 1)                      # no arrival, straight to 3D
         self.assertEqual(frames2[0][1:], R.Scene(demo(), 20, 20, 3, light=(1, 1)).render((100, 80)).ops)
