@@ -8,17 +8,21 @@ geometry made from those, on the app side (standard library only, whole numbers 
 
 1. *seed*: a point, at the middle of the thing.
 2. *expand*: a rubber band grows out of the point until it is the thing's bounding box, the biggest
-   it will be.
+   room it will take up. With 3D on that box is seen in perspective at the thing's distance, so a nearer
+   layer takes up more room: the band's size is how far away it is.
 3. *vacuum*: the band shrinks inwards until it presses on every outer edge. That is the convex hull,
    the tightest rubber band round the thing.
-4. *unblur*: the band goes, and the picture, which has been blurred into the interface background
-   all along, sharpens step by step until it is exact.
+4. *unblur*: the picture, blurred into the interface background all along, sharpens step by step until
+   it is exact.
+
+The band is the method, not something you see: it is not drawn (``frames(band_lines=True)`` draws it as an
+outline to look at the method). What is drawn is the thing itself, a dim filled shape the size of the band.
 
 Blur here is what the box drawer can do: cells of ``d`` x ``d`` source pixels averaged
 (``vectorize(min_downscale=d)``), each mixed with the interface background colour. It is a blocky
 blur, not a Gaussian.
 
-**Standing up** (``Scene.render``). Every thing gets a layer: a thing inside another thing's box is
+**Standing up** (``Scene.render``; ``frames(three_d=True)`` arrives straight into it). Every thing gets a layer: a thing inside another thing's box is
 one layer above it. Each layer is one ``layer_height`` higher. The picture is drawn in one-point
 perspective: the vanishing point is the mouse, a raised thing is scaled out from it, and the walls
 that face the vanishing point are filled in. A light direction (the sun) shades the walls and throws
@@ -354,47 +358,181 @@ class Scene:
         start = MIX // 4
         return [(s, start + (MIX - start) * i // (count - 1)) for i, s in enumerate(sizes)]
 
-    def frames(self, steps: int = 6, levels: int = 4, max_ops: int = V.DEFAULT_BUDGET) -> list:
+    def frames(self, steps: int = 6, levels: int = 4, max_ops: int = V.DEFAULT_BUDGET,
+               vp: Optional[tuple] = None, three_d: bool = False, band_lines: bool = False) -> list:
         """The arrival as a list of frames; each is the ops for the picture's area, to draw after the
-        app's own background. Seed, ``steps`` of expanding, ``steps`` of vacuuming, then the unblur.
-        The last frame is exactly ``flat()``."""
+        app's own background. Every thing starts as a point, grows to the biggest box it will take up,
+        tightens inwards to its outline, and the blur clears. The band that does the measuring is **not
+        drawn** (``band_lines=True`` draws it as a yellow outline, for looking at the method): what you
+        see is the thing itself, a filled blur the shape of the band, until it sharpens.
+
+        With ``three_d`` every thing arrives at its own distance: the biggest box is its box in
+        one-point perspective from ``vp`` (the mouse), so a nearer layer takes up more room, and the last
+        frame is exactly ``render(vp)``. Without it the last frame is exactly ``flat()``."""
         steps = _int(steps, "steps", 1, 60)
         max_ops = _int(max_ops, "max_ops", 1, V.MAX_OPS)
         lv = self.levels(levels)
-        blurred = self._blurred(lv[0][0], lv[0][1], max_ops)
-        frames = [self._with_bands(blurred, 0, 1, steps, max_ops)]            # the seed
-        for t in range(1, steps + 1):
-            frames.append(self._with_bands(blurred, 1, t, steps, max_ops))
-        for t in range(1, steps + 1):
-            frames.append(self._with_bands(blurred, 2, t, steps, max_ops))
-        for d, m in lv[1:-1]:
-            frames.append(self._blurred(d, m, max_ops))
-        frames.append(self.flat(max_ops).ops)
-        return frames
+        vp = self._vp(vp)
+        three_d = bool(three_d)
+        heights = self._heights((1, 1) if three_d else (0, 1))
+        top = max(heights.values(), default=0)
+        lift = self._lifter(vp, top)
+        moving = [th for th in self.things if not three_d or th.boxes is not None]
+        erase = {id(th) for th in moving}
+        d0, m0 = lv[0]
+        pre = [self._clear(top)] if top else []
+        ground = self._ground_at(d0, m0, erase, max(1, max_ops - len(pre)))
+        colour = {id(th): _hex(mix(th.color, self.ui, m0)) for th in moving}
 
-    def _with_bands(self, base: list, phase: int, t: int, steps: int, max_ops: int) -> list:
+        def band(phase: int, t: int) -> list:
+            groups = []
+            for th in moving:
+                z = heights.get(id(th), 0)
+                groups.append((len(th.pixels), (z, -len(th.pixels)),
+                               self._silhouette(th, phase, t, steps, lift, z, colour[id(th)], band_lines)))
+            return self._clip(self._fit(pre + ground, groups, max_ops))
+
+        out = [band(0, 1)]                                                   # the seed: a point
+        out += [band(1, t) for t in range(1, steps + 1)]                     # out to the biggest box
+        out += [band(2, t) for t in range(1, steps + 1)]                     # in to the outline
+        for d, m in lv[1:-1]:                                                # the unblur
+            out.append(self._stand_blurred(moving, heights, top, lift, d, m, erase, max_ops)
+                       if three_d else self._blurred(d, m, max_ops))
+        out.append(self.render(vp, (1, 1), max_ops).ops if three_d else self.flat(max_ops).ops)
+        return out
+
+    def _vp(self, vp: Optional[tuple]) -> tuple:
+        if vp is None:
+            return (self._sx(self.w // 2), self._sy(self.h // 2))
+        if (not isinstance(vp, (tuple, list)) or len(vp) != 2
+                or any(type(v) is not int or not -V.MAX_COORD <= v <= V.MAX_COORD for v in vp)):
+            raise ValueError("vp must be two whole screen coordinates")
+        return (vp[0], vp[1])
+
+    def _lifter(self, vp: tuple, top: int, distance: Optional[int] = None):
+        """lift(px, py, z): where source corner (px, py), raised z screen pixels, lands on screen when seen
+        in one-point perspective from ``vp``. z = 0 is the picture plane and does not move."""
+        vx, vy = vp
+        dist = max(4 * max(self.w, self.h) * self.scale, 4 * top) if distance is None else _int(
+            distance, "distance", 4 * top, 1 << 20)
+
+        def lift(px: int, py: int, z: int):
+            return (vx + (self._sx(px) - vx) * dist // (dist - z), vy + (self._sy(py) - vy) * dist // (dist - z))
+        return lift
+
+    def _clear(self, top: int) -> list:
+        """The interface colour over the picture and the room a raised, shadowed picture can reach."""
+        lx, ly = self.light
+        pad = max(top * 4, 8) + abs(max(lx, ly, key=abs)) * top
+        return ["rect", self.x - pad, self.y - pad, self.w * self.scale + 2 * pad,
+                self.h * self.scale + 2 * pad, _hex(self.ui)]
+
+    def _fit(self, base: list, groups: list, max_ops: int) -> list:
+        """``base`` plus as many groups of ops as fit, the biggest things first, drawn lowest layer first.
+        A group is (size, draw order, ops)."""
+        room = max_ops - len(base)
+        keep = []
+        for g in sorted(groups, key=lambda g: -g[0]):
+            if len(g[2]) <= room:
+                room -= len(g[2])
+                keep.append(g)
         ops = list(base)
-        for th in self.things:
-            lines = self._band_ops(th, phase, t, steps)
-            if len(ops) + len(lines) > max_ops:
-                break                                  # the biggest things first; the rest just wait
-            ops += lines
-        return self._clip(ops)
+        for g in sorted(keep, key=lambda g: g[1]):
+            ops += g[2]
+        return ops
 
-    def _band_ops(self, th: Thing, phase: int, t: int, steps: int) -> list:
-        cx, cy = th.center
-        sx, sy = self._sx(cx), self._sy(cy)
-        if phase == 0:                                  # the seed: a point
-            return [["rect", sx - 1, sy - 1, 3, 3, BAND_COLOR]]
-        if phase == 1:                                  # the band grows out to the biggest box
-            x0, y0, x1, y1 = th.bbox[0], th.bbox[1], th.bbox[2] + 1, th.bbox[3] + 1
-            ax, bx = _lerp(sx, self._sx(x0), t, steps), _lerp(sx, self._sx(x1), t, steps)
-            ay, by = _lerp(sy, self._sy(y0), t, steps), _lerp(sy, self._sy(y1), t, steps)
-            pts = [(ax, ay), (bx, ay), (bx, by), (ax, by)]
-        else:                                           # the vacuum: box -> hull
-            pts = [(self._sx(_lerp(a[0], b[0], t, steps)), self._sy(_lerp(a[1], b[1], t, steps)))
-                   for a, b in th.band]
-        return [["line", *pts[i], *pts[(i + 1) % len(pts)], BAND_COLOR] for i in range(len(pts))]
+    def _ground_at(self, d: int, m: int, erase: set, max_ops: int) -> list:
+        """The picture without the things in ``erase`` (they are drawn on top), blurred to cells of ``d``
+        and mixed ``m`` parts in ``MIX`` with the interface colour."""
+        grid = [row[:] for row in self.grid]
+        for th in self.things:
+            if id(th) in erase:
+                for px, py in th.pixels:
+                    grid[py][px] = self.bg
+        if m < MIX:
+            grid = [[mix(c, self.ui, m) for c in row] for row in grid]
+        return V.from_grid(grid, self.x, self.y, self.scale, max(1, max_ops), d).ops
+
+    def _coarse(self, th: Thing, d: int) -> list:
+        """The thing's boxes seen through blur cells of ``d`` x ``d`` pixels: a cell is in if at least half of it
+        is the thing. ``d`` = 1 is the exact boxes. A small thing can blur away; that is the blur."""
+        if d == 1:
+            return th.boxes
+        cache = th.__dict__.setdefault("_coarse_cache", {})
+        if d not in cache:
+            counts: dict = {}
+            for px, py in th.pixels:
+                k = (px // d, py // d)
+                counts[k] = counts.get(k, 0) + 1
+            x0, y0, x1, y1 = th.bbox
+            cx0, cy0 = x0 // d, y0 // d
+
+            def inside(cx: int, cy: int) -> int:
+                area = (min((cx + 1) * d, self.w) - cx * d) * (min((cy + 1) * d, self.h) - cy * d)
+                return th.color if counts.get((cx, cy), 0) * 2 >= area else -1
+            grid = [[inside(cx, cy) for cx in range(cx0, x1 // d + 1)] for cy in range(cy0, y1 // d + 1)]
+            raw = V._boxes(grid, -1, MAX_BOX_PIECES)
+            cache[d] = th.boxes if raw is None else [
+                (max(0, (bx0 + cx0) * d), min(self.w - 1, (bx1 + cx0 + 1) * d - 1),
+                 max(0, (by0 + cy0) * d), min(self.h - 1, (by1 + cy0 + 1) * d - 1)) for bx0, bx1, by0, by1, _ in raw]
+        return cache[d]
+
+    def _stand_blurred(self, moving: list, heights: dict, top: int, lift, d: int, m: int, erase: set,
+                       max_ops: int) -> list:
+        """One unblur step of the 3D picture: every thing at its own distance, its top face blurred to
+        cells of ``d`` and mixed with the interface colour. Walls and shadows arrive with the last step."""
+        pre = [self._clear(top)]
+        ground = self._ground_at(d, m, erase, max(1, max_ops - 1))
+        groups = []
+        for th in moving:
+            z = heights[id(th)]
+            colour = _hex(mix(shade(th.color, 100 + 5 * (th.layer + 1)), self.ui, m))
+            ops = []
+            for x0, x1, y0, y1 in self._coarse(th, d):
+                ax, ay = lift(x0, y0, z)
+                bx, by = lift(x1 + 1, y1 + 1, z)
+                ops.append(["rect", ax, ay, max(1, bx - ax), max(1, by - ay), colour])
+            groups.append((len(th.pixels), (z, -len(th.pixels)), ops))
+        return self._clip(self._fit(pre + ground, groups, max_ops))
+
+    def _silhouette(self, th: Thing, phase: int, t: int, steps: int, lift, z: int, colour: str, lines: bool) -> list:
+        """The thing during the measuring: a point (phase 0), the box it is growing to (phase 1, ``t`` of
+        ``steps``), then the band shrinking from that box to the hull (phase 2), filled in ``colour``."""
+        sx, sy = lift(th.center[0], th.center[1], z)
+        if phase == 0:
+            return [["rect", sx - 1, sy - 1, 3, 3, colour]]
+        if phase == 1:
+            ax, ay = lift(th.bbox[0], th.bbox[1], z)
+            bx, by = lift(th.bbox[2] + 1, th.bbox[3] + 1, z)
+            ax, bx, ay, by = _lerp(sx, ax, t, steps), _lerp(sx, bx, t, steps), _lerp(sy, ay, t, steps), _lerp(sy, by, t, steps)
+            poly = [(ax, ay), (bx, ay), (bx, by), (ax, by)]
+            ops = [["rect", ax, ay, max(1, bx - ax), max(1, by - ay), colour]]
+        else:
+            poly = []
+            for a, b in th.band:
+                (x0, y0), (x1, y1) = lift(a[0], a[1], z), lift(b[0], b[1], z)
+                poly.append((_lerp(x0, x1, t, steps), _lerp(y0, y1, t, steps)))
+            ops = self._fill(poly, colour)
+        if lines:
+            ops += [["line", *poly[i], *poly[(i + 1) % len(poly)], BAND_COLOR] for i in range(len(poly))]
+        return ops
+
+    def _fill(self, poly: list, colour: str) -> list:
+        """Fill a polygon with rows one source pixel tall (even-odd, so a star-shaped band is fine)."""
+        lo, hi = min(p[1] for p in poly), max(p[1] for p in poly)
+        step, n, out = self.scale, len(poly), []
+        for y in range(lo, hi, step):
+            yy = y + step // 2
+            xs = []
+            for i in range(n):
+                (x0, y0), (x1, y1) = poly[i], poly[(i + 1) % n]
+                if y0 != y1 and min(y0, y1) <= yy < max(y0, y1):
+                    xs.append(x0 + (x1 - x0) * (yy - y0) // (y1 - y0))
+            xs.sort()
+            for i in range(0, len(xs) - 1, 2):
+                if xs[i + 1] > xs[i]:
+                    out.append(["rect", xs[i], y, xs[i + 1] - xs[i], min(step, hi - y), colour])
+        return out
 
     # ------------------------------------------------------------ standing up
     def _heights(self, grow: tuple):
@@ -456,21 +594,13 @@ class Scene:
         if (not isinstance(rise, (tuple, list)) or len(rise) != 2 or type(rise[0]) is not int
                 or type(rise[1]) is not int or rise[1] < 1 or not 0 <= rise[0] <= rise[1]):
             raise ValueError("rise must be (n, d) with 0 <= n <= d")
-        if vp is None:
-            vp = (self._sx(self.w // 2), self._sy(self.h // 2))
-        if (not isinstance(vp, (tuple, list)) or len(vp) != 2
-                or any(type(v) is not int or not -V.MAX_COORD <= v <= V.MAX_COORD for v in vp)):
-            raise ValueError("vp must be two whole screen coordinates")
+        vp = self._vp(vp)
         vx, vy = vp
         heights = self._heights(rise)
         top = max(heights.values(), default=0)
         if top == 0:
             return Rendered(self.flat(max_ops).ops, "" if not self.things else "flat", 0)
-        dist = max(4 * max(self.w, self.h) * self.scale, 4 * top) if distance is None else _int(
-            distance, "distance", 4 * top, 1 << 20)
-
-        def lift(px: int, py: int, z: int):
-            return (vx + (self._sx(px) - vx) * dist // (dist - z), vy + (self._sy(py) - vy) * dist // (dist - z))
+        lift = self._lifter(vp, top, distance)
 
         lx, ly = self.light
         m = max(abs(lx), abs(ly))
@@ -501,10 +631,8 @@ class Scene:
                              _hex(shade(th.color, 100 + 5 * (th.layer + 1)))])
             bodies.append((walls, tops))
 
-        pad = max(top * 4, 8) + abs(max(lx, ly, key=abs)) * top
         ground = self._ground_ops(max_ops)
-        clear = ["rect", self.x - pad, self.y - pad, self.w * self.scale + 2 * pad,
-                 self.h * self.scale + 2 * pad, _hex(self.ui)]
+        clear = self._clear(top)
         walls_all = [op for w, _ in bodies for op in w]
         tops_all = [op for _, t in bodies for op in t]
         sections = (("", True, True), ("walls left out", False, True), ("walls and shadows left out", False, False))

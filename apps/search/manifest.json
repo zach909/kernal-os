@@ -1,0 +1,15 @@
+{
+  "name": "search",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui",
+    "graphical"
+  ],
+  "permissions": [
+    "system",
+    "uses:wallpaper"
+  ],
+  "description": "The popup the Windows key opens: type a few letters, pick an app, press enter. Escape goes back. Searches installed app names only."
+}

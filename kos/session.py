@@ -116,6 +116,7 @@ class Session:
                  boot_devices: tuple[str, ...] = BOOT_ORDER, log=None, prompter=None,
                  detach_on_interrupt: bool = False, bridge=None,
                  preboot: tuple[str, ...] = (), right_click_to: Optional[str] = None,
+                 search_to: Optional[str] = None,
                  outcome: Optional[dict] = None, vault=None, extensions: Optional[dict] = None,
                  guard: Optional[Guard] = None, allow_network: Optional[bool] = None,
                  app_pid: Optional[int] = None, status_ok: bool = False, services=None):
@@ -139,6 +140,7 @@ class Session:
         self.status_ok = status_ok       # from the verified manifest ('ask:status' or 'system'), never the app
         self.services = services           # a services.ServiceHost, or None: no 'service:' permission
         self.right_click_to = right_click_to
+        self.search_to = search_to         # the Windows key opens this instance (the search popup)
         self.outcome = outcome
         self.switch: Optional[tuple[str, str]] = None
         self.log = log
@@ -220,6 +222,12 @@ class Session:
             if self.detach_on_interrupt:
                 self.detached = True
             self.stop_requested = True
+            return
+        if t == "search":
+            # The Windows key is the OS's, like the right button: the app never sees it. It does nothing
+            # until the keyboard is booted (no device does anything before the password) or with no search app.
+            if "keyboard" in self.booted and self.search_to:
+                self._switch(("instance", self.search_to))
             return
         if t == "key":
             if "keyboard" not in self.booted:
@@ -337,7 +345,8 @@ class Session:
         if topic == "keyboard":
             return [["state", "booted" if "keyboard" in self.booted else "not booted"],
                     ["backend", backend],
-                    ["Ctrl-C", "always the OS's"]]
+                    ["Ctrl-C", "always the OS's"],
+                    ["Windows key", "search popup (the OS keeps it)" if self.search_to else "does nothing here"]]
         w, h = self.surface.hello_size()
         return [["mode", self.mode], ["width", str(w)], ["height", str(h)],
                 ["surface", type(self.surface).__name__.lower()]]

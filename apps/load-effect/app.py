@@ -30,9 +30,9 @@ def decode(raw):
 
 def rows(st):
     return [("e", "Arrival effect", "ON" if st["on"] else "off",
-             "point, band out, band in to the edges, unblur"),
+             "point, out to full size, in to the outline, unblur"),
             ("d", "3D layers", "ON" if st["d3"] else "off",
-             "one-point perspective, the mouse is the vanishing point"),
+             "each layer arrives at its own distance, mouse = vanishing point"),
             ("s", "Sun", SUN[st["sun"]][0], "where the light comes from"),
             ("+/-", "Frame pause", f"{st['ms']} ms", "smaller is faster")]
 

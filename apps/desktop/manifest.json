@@ -1,0 +1,15 @@
+{
+  "name": "desktop",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui",
+    "graphical"
+  ],
+  "permissions": [
+    "system",
+    "uses:wallpaper"
+  ],
+  "description": "The desktop screen: wallpaper colour, an icon per installed app, and a bottom bar with Start and what is open. The Windows key opens the search popup."
+}

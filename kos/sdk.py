@@ -228,8 +228,9 @@ class App:
     def show_scene(self, canvas: Canvas, scene, vp=None, effect: Optional[dict] = None, max_ops: Optional[int] = None):
         """Put a ``kos.reveal.Scene`` on the screen the way the owner asked. ``canvas`` holds the app's
         own background and interface (start it with a ``clear``). With the effect on, the picture arrives
-        (seed, band out, band in, unblur), pausing ``ms`` between frames; with 3D on it then stands up
-        in perspective from ``vp`` (the mouse). On a pointer event call it again with the new ``vp`` and
+        (a point, out to the biggest box, in to the outline, unblur; the measuring band is not drawn),
+        pausing ``ms`` between frames; with 3D on every layer arrives at its own distance in perspective
+        from ``vp`` (the mouse). On a pointer event call it again with the new ``vp`` and
         ``effect={**fx, "on": False}`` (``fx`` from ``load_effect()``) so the arrival does not replay.
         Returns the ``reveal.Rendered`` when it drew 3D (check ``.note``), else None."""
         from .reveal import DEFAULT_SETTING
@@ -243,14 +244,13 @@ class App:
         def show(ops):
             self.present(_canvas_with(canvas, ops))
         if fx["on"]:
-            for ops in scene.frames(max_ops=room):
+            # one arrival: with 3D on, every layer arrives at its own distance and the last frame is the
+            # standing picture, so there is no separate rise
+            for ops in scene.frames(max_ops=room, vp=vp, three_d=fx["three_d"]):
                 show(ops)
                 _pause(ms)
+            return scene.render(vp, max_ops=room) if fx["three_d"] else None
         if fx["three_d"]:
-            if fx["on"]:
-                for ops in scene.rise_frames(vp, max_ops=room)[:-1]:
-                    show(ops)
-                    _pause(ms)
             standing = scene.render(vp, max_ops=room)
             show(standing.ops)
             return standing
