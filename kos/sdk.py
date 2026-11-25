@@ -28,6 +28,8 @@ import select
 from collections import deque
 from typing import Iterator, Optional
 
+from .ui import Frame, div, render, text      # GPUI-style elements: div() / text() -> Canvas.paint
+
 
 class Canvas:
     """Collects draw ops for one graphical frame."""
@@ -62,6 +64,15 @@ class Canvas:
         v = vectorize(pixels, x, y, scale, min(max_ops or DEFAULT_BUDGET, room) if room >= 1 else 0)
         self.ops.extend(v.ops)
         return v
+
+    def paint(self, root, width: int, height: int) -> Frame:
+        """Lay out and paint a ``div()``/``text()`` tree (see ``kos.ui``) into this frame. Returns the
+        ``Frame``: ``frame.hit(x, y)`` names the element id under a click. ValueError if it won't fit
+        in what is left of the op budget."""
+        from .vectorize import MAX_OPS
+        frame = render(root, width, height, room=MAX_OPS - len(self.ops))
+        self.ops.extend(frame.ops)
+        return frame
 
 
 def _pause(ms: int) -> None:
