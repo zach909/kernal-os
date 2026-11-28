@@ -1,4 +1,4 @@
-# kernal-os (KOS) - a password-first, security-focused Linux operating system
+# kernal-os (KOS) - a layer an app first operating system modification first/ security
 
 **KOS** (also searched as *kernal os* / *kernel os*) is an open-source,
 security-first operating system built on its own patched Linux kernel (`kernel/`), written in Python.
