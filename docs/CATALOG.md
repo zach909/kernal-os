@@ -170,8 +170,7 @@ Shared folders: an app that **owns** one creates it (and its permission); an app
 
 Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Every app here also has the built-in agent (Ctrl-N). `docs/CAPABILITIES.md` maps every capability that was asked for to the app, OS command or reason that covers it.
 
-**92 products: 16 full, 53 partial, 23 not built.**
-**105 products: 16 full, 50 partial, 39 not built.**
+**158 products: 18 full, 86 partial, 54 not built.**
 
 | Product | App | Scope | What it is / what it is not |
 |---|---|---|---|
@@ -245,13 +244,6 @@ Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Eve
 | System Information and Diagnostics | `system-info` | partial | Which kernel protections this machine has, whether this is the KOS kernel, firmware control and the firmware plan. Replaces `kos doctor` and `kos firmware`. It reports only what KOS checks; it is not a hardware inventory. |
 | Software Updates | `software-updates` | partial | Installed apps with their run permits: install, update, remove, permit and revoke. Each scans first, then asks your password. Replaces `kos install`, `update`, `remove`, `permit`, `list`. Apps only: there is no OS update, and `kos update all` is not here. |
 | Firewall Management | `firewall` | partial | Rules that let one app make one kind of connection to one typed-out address and port; everything else is blocked by the KOS kernel. The OS's own connections and connections from outside the sandbox are not covered yet, and a change reaches an app the next time it is opened. |
-| Storage and Disk Management | - | none | Not an app: apps cannot see or change disks. Partly covered by OS commands: `kos ls` lists directories, `kos optimize` reclaims app disk space, `kos usb list` lists USB disks. |
-| Network and Wireless | - | none | Not an app: apps run in an empty network namespace and cannot configure networks. KOS has no network or Wi-Fi manager and no firewall yet (a README gap); nothing covers it. |
-| Printer Management | - | none | Not an app: apps cannot reach printers or drivers, and KOS has no printing support. No `kos` command or other app covers it; nothing in KOS talks to a printer. |
-| Process and Resource Monitor | - | none | Not an app: sandboxed apps cannot see processes. Partly covered by the OS: `kos ps` lists apps opened with `kos open`, and `kos activity` shows them with recent password decisions. |
-| System Information and Diagnostics | - | none | Not an app: apps cannot inspect the host. Covered in part by OS commands: `kos doctor` reports kernel security features, `kos security` checks KOS itself, `kos firmware` lists chips. |
-| Software Updates | - | none | Not an app: apps cannot replace themselves or the OS. `kos update` updates installed apps only (newer version, scanned first, downgrades refused). There is no OS update mechanism. |
-| Firewall Management | - | none | Not an app yet: there is no firewall. README lists this as an open Rule 3 gap: an app has all hosts or none, and OS traffic is not blocked or logged. A firewall app would need OS support. |
 | Credential Manager | - | none | Not built: nothing in KOS is encrypted yet, and storing secrets safely needs a vetted crypto library, which is an open owner decision (README). No `kos` command covers it. |
 | Device Pairing | - | none | Not an app: apps cannot reach Bluetooth or other devices, and KOS has no pairing support. Nothing covers it; `kos usb` only writes boot images to USB sticks. |
 | Window and Desktop Management | - | none | Not an app: there is no window manager. `kos boot desktop` runs the taskbar and App Library, which are themselves apps that ask the OS to open, close or focus apps. |
@@ -270,21 +262,76 @@ Built after the first 149, from the capability lists in docs/REQUESTED2.txt. Eve
 | Wireless Sharing and Streaming | - | none | Needs radio hardware (Wi-Fi, Bluetooth), a network and other devices. Apps never open devices and every connection is blocked by default. Nothing covers it today. |
 | Accessibility Services | - | none | Screen reader, magnifier, voice control, text-to-speech and speech recognition need audio devices and OS-level access that apps do not get. Text-to-Speech Tool and Speech Recognition Tool are not built. |
 | Get to Know KOS | `get-to-know-kos` | full | A guide to KOS as it is today: ten short quiz games, one per part of the OS, each with a one-line explanation. It lists nothing that is not built, and says plainly where something (encryption, the OS's own connections) is not done yet. |
-| Calls and Conferencing | - | none | Needs live audio and video, a network and other machines. Every connection is blocked by default and no firewall exists yet. Video Conferencing Tool covers only scheduling, roster, agenda and notes. |
-| Remote Access and Screen Sharing | - | none | Needs a network, another machine and reading the screen. Apps cannot read the screen, every connection is blocked by default, no firewall exists yet and nothing is encrypted yet. Nothing covers it. |
-| Spatial Tracking and Calibration | - | none | Needs motion, position or depth sensors and calibration of real devices. Apps never open devices and the command protocol carries only text and pixels. Nothing covers it today. |
-| Immersive and Mixed Reality | - | none | Needs a headset, tracking sensors, cameras and a 3D display pipeline. Apps get no devices and send only text and pixels to the OS. Nothing covers it today. |
-| Payments and Digital Keys | - | none | Storing payment credentials, contactless payment and digital keys need a secure element and encryption KOS does not have (nothing is encrypted yet). KOS will not fake one, so none is built. |
-| Navigation and Traffic | - | none | Needs a location sensor, map data and live traffic over a network. Apps get no sensors, every connection is blocked by default and no firewall exists yet. Nothing covers it today. |
-| Weather | - | none | Needs a network and live weather data. Every connection is blocked by default and no firewall exists yet, so an app cannot fetch forecasts. Nothing covers it today. |
-| Cloud and Device Synchronization | - | none | Needs a network, a remote service and other machines; every connection is blocked by default, no firewall exists yet and nothing is encrypted yet. `kos backup` keeps local copies only, not sync. |
-| Wireless Sharing and Streaming | - | none | Needs radio hardware (Wi-Fi, Bluetooth), a network and other devices. Apps never open devices and every connection is blocked by default. Nothing covers it today. |
-| Accessibility Services | - | none | Screen reader, magnifier, voice control, text-to-speech and speech recognition need audio devices and OS-level access that apps do not get. Text-to-Speech Tool and Speech Recognition Tool are not built. |
-| Get to Know KOS | `get-to-know-kos` | full | A guide to KOS as it is today: ten short quiz games, one per part of the OS, each with a one-line explanation. It lists nothing that is not built, and says plainly where something (a firewall, encryption) is not done yet. |
 | Signal Lab | `signal-lab` | partial | Offline analysis of a RECORDED signal you paste (CSV, one column per channel; empty or nan cells are dropped samples). It does not acquire signals, decode intent or control anything. Limits: 8 channels, 4096 samples. |
 | Neural Data Manager | `neural-data-manager` | partial | Register of recording sessions: subject pseudonym only (never real names), consent yes/no/date, device, rate, channels, duration, tags, storage location, retention expiry, notes; reports on expired retention, missing consent and totals. It lists recordings, it does not hold or read them. Neural recordings are sensitive personal data: the register is stored UNENCRYPTED in this app's private vault because KOS has no encryption yet. |
 | Neural Interface Devices | - | none | Brain-computer interfaces, signal acquisition, thought-to-text, neural keyboard/mouse, intent recognition and device monitoring need sensors, real-time processing and device access apps never get. Signal Lab covers recorded data only; `kos usb` and `kos firmware` are not neural links. |
 | Assistive and Clinical Control | - | none | Prosthetic and mobility control, sensory/haptic feedback, neurofeedback, rehabilitation and memory aids are safety-critical medical functions. KOS will not simulate them or imply they work, and a sandboxed app has no device path to them. |
+| Semantic Graph | `semantic-graph` | partial | A graph of this app's own notes, tasks and people: shared metadata, content stored once by SHA-256, a dependency DAG, queries, project/state matrix, critical path and a hash-chained history. Not a file system and sees no OS files; no encryption yet. |
+| Rule Router | `rule-router` | partial | Event-condition-action rules in a versioned declarative text. Actions only change the router's own state and log: it cannot mute alerts, commit code or switch views, and nothing fires events for you. |
+| Semantic Object Kernel | - | none | Not buildable as an app: KOS runs on Linux, whose I/O is byte streams, and kernel transactions are out of reach for sandboxed apps. Apps already talk to the OS in schema-checked JSON commands. |
+| Workflow Engine Isolation | - | none | Partly covered by design: every app is its own sandboxed process, and `kos cell` runs code in KVM micro-VMs. KOS has no organizational automation daemons to separate from drivers. |
+| Workspace Resource Scheduler | - | none | Not built: the OS does not schedule CPU or memory per workspace. Each app gets fixed limits from the sandbox (1 GiB memory, 64 MiB per file); apps cannot set priorities. |
+| Native Graph File System | - | none | Not a file system. Semantic Graph keeps nodes and content hashes for one app's own items; `kos ls` still shows ordinary folders, and nothing in the OS indexes or deduplicates files. |
+| Matrix Workspaces and Layouts | - | none | Not built: there is no window manager (`kos boot desktop` lists apps one at a time), so no workspace matrix or semantic layouts. Semantic Graph's matrix only counts its own nodes. |
+| Deep State Snapshots | - | none | Not built: running apps cannot be paused, forked or restored, and registers and memory are out of reach. Semantic Graph can show its own data as of a past date. |
+| Universal Data Bus | - | none | Not built: apps cannot pass rich objects to each other. They share records only through shared folders the owner grants (`kos grant`, `kos spaces`); there is no common clipboard or drag-and-drop. |
+| Structured Terminal Pipelines | - | none | Not built: `kos line` runs one command per line with no pipes, and command output is text. The app-to-OS channel is already JSON lines, but nothing chains commands as objects. |
+| Atomic Component Applications | - | none | Not built: an app is a whole sandboxed program with its own screen, and one app cannot embed another's view. Shared folders are the only way apps combine today. |
+| Kernel Event Router | - | none | Not an app: the OS has no event bus and sandboxed apps cannot observe or change the system. Rule Router reacts only to events you fire inside it. |
+| Declarative System Configuration | - | none | Not built: OS state lives in several files and the kernel command line, and nothing rebuilds it from one config. Rule Router versions its own rules only. |
+| Authenticator Codes | `authenticator-codes` | partial | Works out one-time codes (RFC 4226 / 6238: SHA-1, SHA-256, SHA-512, 6-10 digits) from a base32 secret you type. It never saves a secret, because the vault is not encrypted yet (rule 8), so you type it each time. No QR scanning and no sync. |
+| Sudoku Puzzles | `sudoku-puzzles` | full | Unique-solution puzzles at three levels, conflict marking and a solved counter. Turn-based; no timer. |
+| Minesweeper Puzzles | `minesweeper-puzzles` | full | 9x9 board with 10 mines, a safe first click, flags, and win/loss counts. Turn-based; no timer. |
+| Mahjong Solitaire | `mahjong-solitaire` | partial | Tile matching on a flat 4x9 board: a tile is free when a side is open, and every deal is solvable. No stacked layers and no tile artwork; letters stand for tiles. |
+| Digital Card Games | `digital-card-games` | partial | Blackjack against a dealer who stands on 17, with win/loss counts and no money. Solitaire and other card games are not built. |
+| Virtual Keyboard | `virtual-keyboard` | partial | An on-screen keyboard that composes text inside this app. It cannot type into other apps: an app may not send keys elsewhere. |
+| Trend Analyzer | `trend-analyzer` | partial | Analyses a series of numbers you paste: change, growth, index, moving average. It cannot fetch search or market data; that needs the network. |
+| Trip Planner | `trip-planner` | partial | Bookings, places and costs per trip with exact totals. Single-user and offline: it keeps what you type in your own vault and calculates from it. It books nothing. |
+| Flight Planner | `flight-planner` | partial | Compares itineraries you type in (price, duration, stops). It does not search airlines or prices; that needs the network. |
+| Product Comparison | `product-comparison` | partial | Compares offers you typed in and shows the best price per product. It does not look prices up online. |
+| Blog Manager | `blog-manager` | partial | Drafts, schedules and a published index. It does not host or publish a blog; the Website Builder turns text into static pages. |
+| Business Listings | `business-listings` | partial | Keeps your business details and flags missing fields. It does not publish to any directory or verify you with anyone. |
+| Site Ad Revenue | `site-ad-revenue` | partial | Impressions, clicks and revenue you copy in, with exact click-through rate and revenue per 1000. It reads no ad network. |
+| App Ad Revenue | `app-ad-revenue` | partial | Requests, impressions and revenue you copy in, with exact fill rate and eCPM. It reads no ad network. |
+| Tag Manager | `tag-manager` | partial | A register of tracking tags with duplicate detection. It cannot inject or fire tags on any site. |
+| Search Performance | `search-performance` | partial | Queries, impressions, clicks and positions you import, with exact click-through rates. It reads no search engine's data. |
+| Parental Controls | `parental-controls` | partial | Rules for each child written down. It enforces nothing on any device: only the OS can limit apps, and KOS apps cannot manage other devices. |
+| Screen Time Log | `screen-time-log` | partial | Daily totals from minutes you log, against a fixed 120-minute line. It cannot measure other apps' usage: an app cannot see another app. |
+| Lost and Found Registry | `lost-and-found-registry` | partial | Records where you last saw an item. It cannot locate anything: it has no radio, no location and no network. |
+| Art and Culture Collection | `art-and-culture-collection` | partial | A register of works, artists and museums you want to remember. It holds no images and does not browse any museum's collection. |
+| Movies and TV Watchlist | `movies-and-tv-watchlist` | partial | What to watch, what you watched and your ratings. It plays nothing and finds nothing online. |
+| Kids Video Lists | `kids-video-lists` | partial | An approved list of videos by minimum age. It plays no video and filters nothing on any site. |
+| Video Channel Manager | `video-channel-manager` | partial | Plans videos from idea to published with view counts you type in. It uploads nothing and reads no channel. |
+| Live TV Guide | `live-tv-guide` | partial | A programme guide you fill in, with overlap checks for what you want to record. It streams and records nothing. |
+| Cloud Resource Inventory | `cloud-resource-inventory` | partial | A register of cloud resources and their monthly cost you typed in. It reads no cloud account and manages nothing remotely. |
+| AI Experiment Log | `ai-experiment-log` | partial | Logs model runs you did elsewhere with params, ratings and results. It runs no model; for a local model see the AI Assistant. |
+| App Release Tracker | `app-release-tracker` | partial | Versions, tracks and review status for your apps. It publishes nothing to any store. |
+| Rewards Tracker | `rewards-tracker` | partial | Counts points you earned and redeemed. It earns or redeems nothing on any service. |
+| Gaming Accessory Profiles | `gaming-accessory-profiles` | partial | Notes of the key bindings you want per accessory and game. It cannot configure any device: apps get no device access. |
+| Children's Gaming Log | `children-s-gaming-log` | partial | Minutes per child and game you log. It cannot see what any console records. |
+| Font Catalogue | `font-catalogue` | partial | A register of fonts with style and licence, flagging missing licences. It holds no font files and renders no specimen. |
+| Academic Reference Library | `academic-reference-library` | partial | Keeps references and formats a sorted author-year bibliography. It does not search papers; that needs the network. |
+| Book Catalogue | `book-catalogue` | partial | Your books by shelf, with ISBN-10 and ISBN-13 check-digit validation. It does not search a library or bookshop. |
+| Web Search | - | none | Needs the network, and every connection is blocked until a firewall rule allows it. The browser app (examples/web) opens pages once its firewall rule exists; there is no search engine inside KOS. |
+| Web Browser | - | none | Not in the suite: the browser is its own sandboxed app under examples/web, https only, and only reaches hosts the firewall allows. |
+| Voice Assistant | - | none | Needs a microphone, speech recognition and a speaker. Apps get no audio device. The AI Assistant answers typed questions only. |
+| Earth Explorer | - | none | A 3D globe needs map tiles from the network, a 3D renderer and the GPU. The command protocol carries text and pixels only. |
+| Street Imagery Viewer | - | none | Needs panoramic photos from a server and the network. There is no imagery on this device. |
+| Image Recognition | - | none | Needs a camera and a trained vision model. No model ships with KOS and apps get no camera. |
+| Text Messaging | - | none | Needs a cellular modem and a carrier. KOS apps have no telephony, and the Messaging Platform keeps messages on this device only. |
+| Phone Calls | - | none | Needs a modem and real-time audio. See Calls and Conferencing: the command protocol carries no audio. |
+| Virtual Phone Number | - | none | Needs a telephone service provider and network access. Nothing local can own a phone number. |
+| Handwriting Input | - | none | Needs a pen or touch device and a recognition model. Apps get only the pointer events the OS forwards, and no model ships. |
+| Earth Timelapse | - | none | Needs years of satellite images from a server and video rendering. The Animation Maker draws your own frames. |
+| Satellite Imagery Analysis | - | none | Needs large image archives and compute from a remote service. Nothing local holds them. |
+| Python Notebooks | - | none | Would run code a user typed. Apps may not eval, exec or compile user text (kos-rules). The Script Editor edits scripts; it does not run them in an app. |
+| Flight Simulator | - | none | Needs a 3D engine, physics and a real-time loop. KOS apps are turn-based text and pixels; nothing runs on a timer. |
+| Block World Game | - | none | Needs a 3D engine and real-time play. KOS apps are turn-based; no 3D renderer exists. |
+| Movie and TV Streaming | - | none | Needs the network, a video decoder and licensed content. The Movies and TV Watchlist records what you want to watch. |
+| Music Streaming | - | none | Needs the network, an audio device and a licensed catalogue. The Music Library keeps a register of your own tracks. |
+| Audiobook Player | - | none | Needs an audio device. The Book Reader reads text; no app can play sound. |
+| Live TV Streaming | - | none | Needs the network and a video decoder. The Live TV Guide is a schedule you fill in; it plays nothing. |
+| Find My Device | - | none | Needs location, a radio and the network, held by the OS. A register of lost items exists (Lost and Found Registry). |
 
 ## The OS's own apps
 
@@ -308,16 +355,3 @@ The OS's own commands, as apps (`kos/office/pack_system.py`, and five titles in 
 | `system-info` | System Information and Diagnostics | `service:system` | `doctor`, `firmware` | Which kernel protections this machine has, whether this is the KOS kernel, firmware control and the firmware plan. Replaces `kos doctor` and `kos firmware`. It reports only what KOS checks; it is not a hardware inventory. |
 | `software-updates` | Software Updates | `service:packages` | `install`, `update`, `remove`, `permit`, `list` | Installed apps with their run permits: install, update, remove, permit and revoke. Each scans first, then asks your password. Replaces `kos install`, `update`, `remove`, `permit`, `list`. Apps only: there is no OS update, and `kos update all` is not here. |
 | `firewall` | Firewall Management | `service:firewall` | - | Rules that let one app make one kind of connection to one typed-out address and port; everything else is blocked by the KOS kernel. The OS's own connections and connections from outside the sandbox are not covered yet, and a change reaches an app the next time it is opened. |
-| Semantic Graph | `semantic-graph` | partial | A graph of this app's own notes, tasks and people: shared metadata, content stored once by SHA-256, a dependency DAG, queries, project/state matrix, critical path and a hash-chained history. Not a file system and sees no OS files; no encryption yet. |
-| Rule Router | `rule-router` | partial | Event-condition-action rules in a versioned declarative text. Actions only change the router's own state and log: it cannot mute alerts, commit code or switch views, and nothing fires events for you. |
-| Semantic Object Kernel | - | none | Not buildable as an app: KOS runs on Linux, whose I/O is byte streams, and kernel transactions are out of reach for sandboxed apps. Apps already talk to the OS in schema-checked JSON commands. |
-| Workflow Engine Isolation | - | none | Partly covered by design: every app is its own sandboxed process, and `kos cell` runs code in KVM micro-VMs. KOS has no organizational automation daemons to separate from drivers. |
-| Workspace Resource Scheduler | - | none | Not built: the OS does not schedule CPU or memory per workspace. Each app gets fixed limits from the sandbox (1 GiB memory, 64 MiB per file); apps cannot set priorities. |
-| Native Graph File System | - | none | Not a file system. Semantic Graph keeps nodes and content hashes for one app's own items; `kos ls` still shows ordinary folders, and nothing in the OS indexes or deduplicates files. |
-| Matrix Workspaces and Layouts | - | none | Not built: there is no window manager (`kos boot desktop` lists apps one at a time), so no workspace matrix or semantic layouts. Semantic Graph's matrix only counts its own nodes. |
-| Deep State Snapshots | - | none | Not built: running apps cannot be paused, forked or restored, and registers and memory are out of reach. Semantic Graph can show its own data as of a past date. |
-| Universal Data Bus | - | none | Not built: apps cannot pass rich objects to each other. They share records only through shared folders the owner grants (`kos grant`, `kos spaces`); there is no common clipboard or drag-and-drop. |
-| Structured Terminal Pipelines | - | none | Not built: `kos line` runs one command per line with no pipes, and command output is text. The app-to-OS channel is already JSON lines, but nothing chains commands as objects. |
-| Atomic Component Applications | - | none | Not built: an app is a whole sandboxed program with its own screen, and one app cannot embed another's view. Shared folders are the only way apps combine today. |
-| Kernel Event Router | - | none | Not an app: the OS has no event bus and sandboxed apps cannot observe or change the system. Rule Router reacts only to events you fire inside it. |
-| Declarative System Configuration | - | none | Not built: OS state lives in several files and the kernel command line, and nothing rebuilds it from one config. Rule Router versions its own rules only. |
