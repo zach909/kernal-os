@@ -1,0 +1,11 @@
+{
+  "name": "store.game-bar",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Overlay for capture and game stats (Xbox Game Bar)."
+}

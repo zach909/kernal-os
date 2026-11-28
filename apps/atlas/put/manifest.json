@@ -1,0 +1,14 @@
+{
+  "name": "atlas.put",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "uses:atlas",
+    "service:clock"
+  ],
+  "description": "Puts anything you type into the map, time-stamped. Writes to the 'atlas' folder."
+}

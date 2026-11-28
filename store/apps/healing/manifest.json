@@ -1,0 +1,14 @@
+{
+  "name": "healing",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui",
+    "graphical"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "description": "A self-healing counter: one whole number in three checksummed copies that repairs a damaged or stale copy by itself. Says so when nothing can be recovered."
+}

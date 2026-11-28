@@ -1,0 +1,13 @@
+{
+  "name": "atlas.find",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "owns:atlas"
+  ],
+  "description": "Ask the map: words, /about, /similar, /near, /stats. Owns the 'atlas' shared folder; read-only screen."
+}

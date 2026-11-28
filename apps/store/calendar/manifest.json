@@ -1,0 +1,11 @@
+{
+  "name": "store.calendar",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "A month grid for any year, today marked, with left/right for months and up/down for years. Dates only: no events, invitations or accounts. Uses UTC for 'today'."
+}

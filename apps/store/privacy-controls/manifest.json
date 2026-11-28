@@ -1,0 +1,11 @@
+{
+  "name": "store.privacy-controls",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Choose which apps may use which parts of the device."
+}

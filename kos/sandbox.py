@@ -26,6 +26,7 @@ import resource
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Optional
 
 _libc = ctypes.CDLL(None, use_errno=True)
 
@@ -198,6 +199,12 @@ class SandboxPolicy:
     # Largest single file an app may write (its cache directory is the only place it can).
     max_file_size: int = 64 << 20
     seccomp: bool = True
+    # The KOS kernel's id for this run (kos/kernel.py); 0: the KOS kernel is not in use. When set,
+    # the child confines itself first, before it can run any app code.
+    kernel_app_id: int = 0
+    # Called by whoever owns the process when it ends (like wiping its cache): takes the app's
+    # firewall rules back and moves the kernel's connection log into the audit log.
+    on_exit: Optional[Callable[[], None]] = None
     # Development escape hatch; never set on a real install.
     weak: bool = False
 
@@ -209,6 +216,12 @@ class SandboxPolicy:
 
     def probe(self) -> int:
         """Called in the parent before launching; refuses if we can't confine."""
+        from . import kernel
+        k = kernel.default()
+        if k.required() and not self.kernel_app_id and not self.weak:
+            raise SandboxError(
+                "this boot requires the KOS kernel (kos.require_kernel=1) and this app was not "
+                "confined by it; KOS refuses to run it")
         abi = landlock_abi()
         if abi < MIN_LANDLOCK_ABI and not self.weak:
             raise SandboxError(
@@ -222,6 +235,12 @@ class SandboxPolicy:
         policy = self
 
         def apply() -> None:
+            if policy.kernel_app_id:
+                from . import kernel
+                try:
+                    kernel.default().confine(policy.kernel_app_id)   # first: nothing below can undo it
+                except kernel.KernelError as e:
+                    raise SandboxError(str(e)) from None
             policy._drop_root()
             if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
                 raise SandboxError("no_new_privs failed")
@@ -312,4 +331,19 @@ def report() -> dict:
         "vhost_vsock": os.path.exists("/dev/vhost-vsock"),
         "framebuffer": os.path.exists("/dev/fb0"),
         "evdev": os.path.isdir("/dev/input"),
+        "kos_kernel": _kos_kernel(),
     }
+
+
+def _kos_kernel() -> dict:
+    """What this kernel is, for ``kos doctor``: the KOS module present or not, whether this process
+    is its core, and whether this boot requires it."""
+    from . import kernel
+    k = kernel.default()
+    out = {"present": k.present(), "role": k.role(), "required": k.required()}
+    if out["present"]:
+        try:
+            out.update(k.status())
+        except kernel.KernelError:
+            pass
+    return out

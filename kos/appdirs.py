@@ -15,13 +15,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .kapp import NAME_RE, KAppError
+from .kapp import ID_RE, KAppError
 from .paths import Paths
 
 
 class AppDirs:
     def __init__(self, paths: Paths, name: str):
-        if not NAME_RE.match(name):
+        if not ID_RE.match(name):
             raise KAppError(f"invalid app name {name!r}")
         self.name = name
         self.root = paths.state / "appdata" / name

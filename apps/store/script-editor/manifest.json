@@ -1,0 +1,11 @@
+{
+  "name": "store.script-editor",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Write and run automation scripts. Anything that runs code must pass the proof gate; a script runner would need its own design."
+}

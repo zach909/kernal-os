@@ -1,0 +1,903 @@
+KOS: add the KOS security module (security/kos)
+
+The kernel half of KOS, against Linux 6.12.116 (see kernel/KERNEL_VERSION).
+Tells apps from the core, and for every confined process: default-deny
+connect/bind/listen/send unless the core wrote an exact rule, device nodes
+limited to null/zero/full/random/urandom, no bpf/perf_event_open/ptrace, and
+a log of every allowed and denied connection attempt.
+
+Registers LSM_ID_KOS (114) - this number is not allocated upstream.
+include/linux/lsm_count.h must count the module or the LSM framework silently
+drops it for lack of static-call slots.
+
+--- a/include/uapi/linux/lsm.h
++++ b/include/uapi/linux/lsm.h
+@@ -65,6 +65,7 @@
+ #define LSM_ID_IMA		111
+ #define LSM_ID_EVM		112
+ #define LSM_ID_IPE		113
++#define LSM_ID_KOS		114
+ 
+ /*
+  * LSM_ATTR_XXX definitions identify different LSM attributes
+--- a/include/linux/lsm_count.h
++++ b/include/linux/lsm_count.h
+@@ -84,6 +84,12 @@
+ #define LANDLOCK_ENABLED
+ #endif
+ 
++#if IS_ENABLED(CONFIG_SECURITY_KOS)
++#define KOS_ENABLED 1,
++#else
++#define KOS_ENABLED
++#endif
++
+ #if IS_ENABLED(CONFIG_IMA)
+ #define IMA_ENABLED 1,
+ #else
+@@ -122,6 +128,7 @@
+ 		SAFESETID_ENABLED	\
+ 		BPF_LSM_ENABLED		\
+ 		LANDLOCK_ENABLED	\
++		KOS_ENABLED		\
+ 		IMA_ENABLED		\
+ 		EVM_ENABLED		\
+ 		IPE_ENABLED)
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -224,6 +224,7 @@
+ source "security/safesetid/Kconfig"
+ source "security/lockdown/Kconfig"
+ source "security/landlock/Kconfig"
++source "security/kos/Kconfig"
+ source "security/ipe/Kconfig"
+ 
+ source "security/integrity/Kconfig"
+@@ -265,11 +266,11 @@
+ config LSM
+ 	string "Ordered list of enabled LSMs"
+ 	depends on SECURITY
+-	default "landlock,lockdown,yama,loadpin,safesetid,smack,selinux,tomoyo,apparmor,ipe,bpf" if DEFAULT_SECURITY_SMACK
+-	default "landlock,lockdown,yama,loadpin,safesetid,apparmor,selinux,smack,tomoyo,ipe,bpf" if DEFAULT_SECURITY_APPARMOR
+-	default "landlock,lockdown,yama,loadpin,safesetid,tomoyo,ipe,bpf" if DEFAULT_SECURITY_TOMOYO
+-	default "landlock,lockdown,yama,loadpin,safesetid,ipe,bpf" if DEFAULT_SECURITY_DAC
+-	default "landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf"
++	default "landlock,lockdown,yama,loadpin,safesetid,smack,selinux,tomoyo,apparmor,ipe,kos,bpf" if DEFAULT_SECURITY_SMACK
++	default "landlock,lockdown,yama,loadpin,safesetid,apparmor,selinux,smack,tomoyo,ipe,kos,bpf" if DEFAULT_SECURITY_APPARMOR
++	default "landlock,lockdown,yama,loadpin,safesetid,tomoyo,ipe,kos,bpf" if DEFAULT_SECURITY_TOMOYO
++	default "landlock,lockdown,yama,loadpin,safesetid,ipe,kos,bpf" if DEFAULT_SECURITY_DAC
++	default "landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,kos,bpf"
+ 	help
+ 	  A comma-separated list of LSMs, in initialization order.
+ 	  Any LSMs left off this list, except for those with order
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -25,6 +25,7 @@
+ obj-$(CONFIG_CGROUPS)			+= device_cgroup.o
+ obj-$(CONFIG_BPF_LSM)			+= bpf/
+ obj-$(CONFIG_SECURITY_LANDLOCK)		+= landlock/
++obj-$(CONFIG_SECURITY_KOS)		+= kos/
+ obj-$(CONFIG_SECURITY_IPE)		+= ipe/
+ 
+ # Object integrity file lists
+--- /dev/null
++++ b/security/kos/Kconfig
+@@ -0,0 +1,26 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config SECURITY_KOS
++	bool "KOS security module"
++	depends on SECURITY
++	select SECURITYFS
++	select SECURITY_NETWORK
++	select SECURITY_PATH
++	default n
++	help
++	  The kernel half of KOS. It tells apps (processes the KOS core has
++	  confined) from the core, and for every confined process:
++
++	  - denies every connection (connect, bind, listen, send to an
++	    address) unless a firewall rule written by the core allows exactly
++	    that app, protocol, address and port;
++	  - denies opening any device node except null, zero, full, random and
++	    urandom, and creating any device node;
++	  - denies bpf(2), perf_event_open(2) and ptrace;
++	  - logs every allowed and every denied connection attempt, for the
++	    core to read into the audit log.
++
++	  Nothing is confined until the first process (init) claims the core
++	  and the core confines a child. Confinement is one way: it is
++	  inherited by every child and can never be lifted.
++
++	  If you are unsure how to answer this question, answer N.
+--- /dev/null
++++ b/security/kos/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_SECURITY_KOS) := kos.o
+--- /dev/null
++++ b/security/kos/kos.c
+@@ -0,0 +1,784 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * KOS LSM - the kernel half of KOS.
++ *
++ * Two kinds of process exist: the core (init and what it starts for its own
++ * use) and apps (processes the core confined). Everything here applies to
++ * apps only; an unconfined process is not touched.
++ *
++ *   prctl(KOS_PR_CLAIM_CORE)  init only, once per boot: this process is the core.
++ *   prctl(KOS_PR_CONFINE, id) core only: this process (and every child, forever)
++ *                             is app <id> and is no longer the core.
++ *   prctl(KOS_PR_STATUS)      app id | KOS_STATUS_CORE if this process is the core.
++ *
++ * securityfs/kos/rules  core: write firewall rules, read them back.
++ * securityfs/kos/log    core: read (and so drain) the connection log.
++ * securityfs/kos/status anyone: whether the module is up and the core claimed.
++ */
++
++#define pr_fmt(fmt) "kos: " fmt
++
++#include <linux/bpf.h>
++#include <linux/cred.h>
++#include <linux/fs.h>
++#include <linux/in.h>
++#include <linux/in6.h>
++#include <linux/inet.h>
++#include <linux/init.h>
++#include <linux/kdev_t.h>
++#include <linux/lsm_hooks.h>
++#include <linux/net.h>
++#include <linux/pid.h>
++#include <linux/sched.h>
++#include <linux/security.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/socket.h>
++#include <linux/spinlock.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
++#include <net/inet_sock.h>
++#include <net/ipv6.h>
++#include <net/sock.h>
++#include <uapi/linux/lsm.h>
++
++#define KOS_PR_CLAIM_CORE	0x4b4f5301
++#define KOS_PR_CONFINE		0x4b4f5302
++#define KOS_PR_STATUS		0x4b4f5303
++#define KOS_APP_MAX		0x3fffffff
++#define KOS_STATUS_CORE		0x40000000
++
++#define KOS_MAX_RULES		256
++#define KOS_RULE_LINE_MAX	160
++#define KOS_LOG_ENTRIES		256
++#define KOS_LOG_LINE		160
++
++enum { KOS_TCP = 1, KOS_UDP = 2 };
++enum { KOS_CONNECT = 1, KOS_LISTEN = 2 };
++
++struct kos_cred {
++	u32 app_id;		/* 0: not an app */
++	bool core;
++};
++
++struct kos_rule {
++	u32 app;
++	u16 port;		/* host order, never 0 */
++	u8 proto;		/* 0: slot is free */
++	u8 dir;
++	u8 family;		/* AF_INET or AF_INET6 */
++	union {
++		__be32 v4;
++		struct in6_addr v6;
++	} addr;
++};
++
++static struct lsm_blob_sizes kos_blob_sizes __ro_after_init = {
++	.lbs_cred = sizeof(struct kos_cred),
++};
++
++static const struct lsm_id kos_lsmid = {
++	.name = "kos",
++	.id = LSM_ID_KOS,
++};
++
++static atomic_t kos_core_claimed = ATOMIC_INIT(0);
++static bool kos_up __ro_after_init;	/* set once the LSM framework has started us */
++
++static DEFINE_SPINLOCK(kos_lock);
++static struct kos_rule kos_rules[KOS_MAX_RULES];
++static char kos_log_buf[KOS_LOG_ENTRIES][KOS_LOG_LINE];
++static u64 kos_log_head;	/* sequence number of the next line */
++static u64 kos_log_tail;	/* sequence number of the oldest unread line */
++static u64 kos_log_dropped;
++
++static inline struct kos_cred *kos_cred(const struct cred *cred)
++{
++	return cred->security + kos_blob_sizes.lbs_cred;
++}
++
++static inline u32 kos_app(void)
++{
++	return kos_cred(current_cred())->app_id;
++}
++
++static inline bool kos_is_core(void)
++{
++	return kos_cred(current_cred())->core;
++}
++
++/* ---- the log ------------------------------------------------------------ */
++
++static __printf(3, 4) void kos_log(u32 app, bool allow, const char *fmt, ...)
++{
++	char line[KOS_LOG_LINE];
++	unsigned long flags;
++	va_list args;
++	int n;
++
++	n = scnprintf(line, sizeof(line), "%s app=%u ", allow ? "allow" : "deny", app);
++	va_start(args, fmt);
++	vscnprintf(line + n, sizeof(line) - n, fmt, args);
++	va_end(args);
++
++	spin_lock_irqsave(&kos_lock, flags);
++	if (kos_log_head - kos_log_tail >= KOS_LOG_ENTRIES) {
++		kos_log_tail++;			/* overwrite the oldest */
++		kos_log_dropped++;
++	}
++	scnprintf(kos_log_buf[kos_log_head % KOS_LOG_ENTRIES], KOS_LOG_LINE,
++		  "%llu %s", kos_log_head, line);
++	kos_log_head++;
++	spin_unlock_irqrestore(&kos_lock, flags);
++
++	if (!allow)
++		pr_notice_ratelimited("denied: %s\n", line);
++}
++
++static ssize_t log_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
++{
++	size_t used = 0, room;
++	unsigned long flags;
++	char *kbuf;
++	ssize_t ret;
++
++	if (!kos_is_core())
++		return -EPERM;
++	if (count < KOS_LOG_LINE + 32)
++		return -EINVAL;
++	room = min_t(size_t, count, KOS_LOG_ENTRIES * (KOS_LOG_LINE + 2));
++	kbuf = kmalloc(room, GFP_KERNEL);
++	if (!kbuf)
++		return -ENOMEM;
++
++	spin_lock_irqsave(&kos_lock, flags);
++	if (kos_log_dropped) {
++		used += scnprintf(kbuf + used, room - used, "dropped %llu\n", kos_log_dropped);
++		kos_log_dropped = 0;
++	}
++	while (kos_log_tail < kos_log_head) {
++		const char *l = kos_log_buf[kos_log_tail % KOS_LOG_ENTRIES];
++		size_t len = strlen(l);
++
++		if (used + len + 1 > room)
++			break;
++		memcpy(kbuf + used, l, len);
++		kbuf[used + len] = '\n';
++		used += len + 1;
++		kos_log_tail++;
++	}
++	spin_unlock_irqrestore(&kos_lock, flags);
++
++	ret = used;
++	if (used && copy_to_user(ubuf, kbuf, used))
++		ret = -EFAULT;
++	kfree(kbuf);
++	return ret;
++}
++
++/* ---- the rules ---------------------------------------------------------- */
++
++static const char *kos_proto_name(u8 p) { return p == KOS_TCP ? "tcp" : "udp"; }
++static const char *kos_dir_name(u8 d) { return d == KOS_CONNECT ? "connect" : "listen"; }
++
++static bool kos_rule_is(const struct kos_rule *r, u32 app, u8 proto, u8 dir, u8 family,
++			const void *addr, u16 port)
++{
++	if (r->proto != proto || r->app != app || r->dir != dir ||
++	    r->family != family || r->port != port)
++		return false;
++	return family == AF_INET ? !memcmp(&r->addr.v4, addr, 4) :
++				   !memcmp(&r->addr.v6, addr, 16);
++}
++
++static bool kos_has_rule(u32 app, u8 proto, u8 dir, u8 family, const void *addr, u16 port)
++{
++	unsigned long flags;
++	bool found = false;
++	int i;
++
++	spin_lock_irqsave(&kos_lock, flags);
++	for (i = 0; i < KOS_MAX_RULES && !found; i++)
++		found = kos_rules[i].proto &&
++			kos_rule_is(&kos_rules[i], app, proto, dir, family, addr, port);
++	spin_unlock_irqrestore(&kos_lock, flags);
++	return found;
++}
++
++static bool kos_app_has_any_rule(u32 app, int dir)
++{
++	unsigned long flags;
++	bool found = false;
++	int i;
++
++	spin_lock_irqsave(&kos_lock, flags);
++	for (i = 0; i < KOS_MAX_RULES && !found; i++)
++		found = kos_rules[i].proto && kos_rules[i].app == app &&
++			(!dir || kos_rules[i].dir == dir);
++	spin_unlock_irqrestore(&kos_lock, flags);
++	return found;
++}
++
++static int kos_rule_change(bool add, u32 app, u8 proto, u8 dir, u8 family,
++			   const void *addr, u16 port)
++{
++	unsigned long flags;
++	int i, free = -1, hit = -1;
++
++	spin_lock_irqsave(&kos_lock, flags);
++	for (i = 0; i < KOS_MAX_RULES; i++) {
++		if (!kos_rules[i].proto) {
++			if (free < 0)
++				free = i;
++		} else if (kos_rule_is(&kos_rules[i], app, proto, dir, family, addr, port)) {
++			hit = i;
++			break;
++		}
++	}
++	if (add && hit < 0 && free < 0) {
++		spin_unlock_irqrestore(&kos_lock, flags);
++		return -ENOSPC;
++	}
++	if (add && hit < 0) {
++		struct kos_rule *r = &kos_rules[free];
++
++		memset(r, 0, sizeof(*r));
++		r->app = app;
++		r->port = port;
++		r->dir = dir;
++		r->family = family;
++		if (family == AF_INET)
++			memcpy(&r->addr.v4, addr, 4);
++		else
++			memcpy(&r->addr.v6, addr, 16);
++		r->proto = proto;	/* last: this makes the slot live */
++	} else if (!add && hit >= 0) {
++		memset(&kos_rules[hit], 0, sizeof(kos_rules[hit]));
++	}
++	spin_unlock_irqrestore(&kos_lock, flags);
++	return 0;
++}
++
++static void kos_revoke_app(u32 app)
++{
++	unsigned long flags;
++	int i;
++
++	spin_lock_irqsave(&kos_lock, flags);
++	for (i = 0; i < KOS_MAX_RULES; i++)
++		if (kos_rules[i].proto && kos_rules[i].app == app)
++			memset(&kos_rules[i], 0, sizeof(kos_rules[i]));
++	spin_unlock_irqrestore(&kos_lock, flags);
++}
++
++/*
++ * One command per write:
++ *   allow|revoke APP tcp|udp connect|listen ADDR PORT
++ *   revoke-app APP
++ * Addresses are typed out: there are no wildcards, no ranges, no port 0.
++ */
++static int kos_rule_command(char *line)
++{
++	char *tok[8], *p = line;
++	const char *end;
++	union { __be32 v4; struct in6_addr v6; } addr;
++	u32 app;
++	u16 port;
++	u8 proto, dir, family;
++	int n = 0;
++	bool add;
++
++	while (p && n < 8)
++		tok[n++] = strsep(&p, " ");
++	if (p)
++		return -EINVAL;				/* too many words */
++	for (int i = 0; i < n; i++)
++		if (!tok[i][0])
++			return -EINVAL;			/* empty word: double or edge space */
++
++	if (n == 2 && !strcmp(tok[0], "revoke-app")) {
++		if (kstrtou32(tok[1], 10, &app) || !app || app > KOS_APP_MAX)
++			return -EINVAL;
++		kos_revoke_app(app);
++		return 0;
++	}
++	if (n != 6)
++		return -EINVAL;
++	if (!strcmp(tok[0], "allow"))
++		add = true;
++	else if (!strcmp(tok[0], "revoke"))
++		add = false;
++	else
++		return -EINVAL;
++	if (kstrtou32(tok[1], 10, &app) || !app || app > KOS_APP_MAX)
++		return -EINVAL;
++	if (!strcmp(tok[2], "tcp"))
++		proto = KOS_TCP;
++	else if (!strcmp(tok[2], "udp"))
++		proto = KOS_UDP;
++	else
++		return -EINVAL;
++	if (!strcmp(tok[3], "connect"))
++		dir = KOS_CONNECT;
++	else if (!strcmp(tok[3], "listen"))
++		dir = KOS_LISTEN;
++	else
++		return -EINVAL;
++	if (kstrtou16(tok[5], 10, &port) || !port)
++		return -EINVAL;
++	memset(&addr, 0, sizeof(addr));
++	/*
++	 * With no delimiter, in4_pton() and in6_pton() treat any unknown character as the end
++	 * of the address ("10.0.0.0/8" parses as 10.0.0.0), so insist that the whole word was used.
++	 */
++	if (in4_pton(tok[4], -1, (u8 *)&addr.v4, -1, &end) && !*end)
++		family = AF_INET;
++	else if (in6_pton(tok[4], -1, (u8 *)&addr.v6, -1, &end) && !*end)
++		family = AF_INET6;
++	else
++		return -EINVAL;
++	return kos_rule_change(add, app, proto, dir, family, &addr, port);
++}
++
++static ssize_t rules_write(struct file *file, const char __user *ubuf, size_t len, loff_t *ppos)
++{
++	char buf[KOS_RULE_LINE_MAX + 1];
++	size_t i, written = len;
++	int ret;
++
++	if (!kos_is_core())
++		return -EPERM;
++	if (*ppos || !len || len > KOS_RULE_LINE_MAX)
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++	if (buf[len - 1] == '\n')
++		len--;
++	buf[len] = '\0';
++	for (i = 0; i < len; i++)			/* printable ASCII only */
++		if (buf[i] < 0x20 || buf[i] > 0x7e)
++			return -EINVAL;
++	ret = kos_rule_command(buf);
++	return ret ? ret : (ssize_t)written;
++}
++
++static int rules_show(struct seq_file *m, void *v)
++{
++	struct kos_rule *snap;
++	unsigned long flags;
++	int i;
++
++	if (!kos_is_core())
++		return -EPERM;
++	snap = kmalloc(sizeof(kos_rules), GFP_KERNEL);
++	if (!snap)
++		return -ENOMEM;
++	spin_lock_irqsave(&kos_lock, flags);
++	memcpy(snap, kos_rules, sizeof(kos_rules));
++	spin_unlock_irqrestore(&kos_lock, flags);
++	for (i = 0; i < KOS_MAX_RULES; i++) {
++		const struct kos_rule *r = &snap[i];
++
++		if (!r->proto)
++			continue;
++		if (r->family == AF_INET)
++			seq_printf(m, "allow %u %s %s %pI4 %u\n", r->app, kos_proto_name(r->proto),
++				   kos_dir_name(r->dir), &r->addr.v4, r->port);
++		else
++			seq_printf(m, "allow %u %s %s %pI6c %u\n", r->app, kos_proto_name(r->proto),
++				   kos_dir_name(r->dir), &r->addr.v6, r->port);
++	}
++	kfree(snap);
++	return 0;
++}
++
++static int rules_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, rules_show, NULL);
++}
++
++static int status_show(struct seq_file *m, void *v)
++{
++	unsigned long flags;
++	u64 logged, dropped;
++	int rules = 0, i;
++
++	spin_lock_irqsave(&kos_lock, flags);
++	for (i = 0; i < KOS_MAX_RULES; i++)
++		rules += kos_rules[i].proto ? 1 : 0;
++	logged = kos_log_head;
++	dropped = kos_log_dropped;
++	spin_unlock_irqrestore(&kos_lock, flags);
++	seq_printf(m, "kos-lsm 1\ncore=%s\nrules=%d\nlogged=%llu\ndropped=%llu\n",
++		   atomic_read(&kos_core_claimed) ? "claimed" : "unclaimed", rules, logged, dropped);
++	return 0;
++}
++
++static int status_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, status_show, NULL);
++}
++
++static const struct file_operations rules_fops = {
++	.open = rules_open, .read = seq_read, .llseek = seq_lseek,
++	.release = single_release, .write = rules_write,
++};
++static const struct file_operations log_fops = { .read = log_read, .llseek = noop_llseek };
++static const struct file_operations status_fops = {
++	.open = status_open, .read = seq_read, .llseek = seq_lseek, .release = single_release,
++};
++
++/* ---- who is the core, who is an app ------------------------------------- */
++
++static int kos_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp)
++{
++	*kos_cred(new) = *kos_cred(old);
++	return 0;
++}
++
++static void kos_cred_transfer(struct cred *new, const struct cred *old)
++{
++	*kos_cred(new) = *kos_cred(old);
++}
++
++static int kos_task_prctl(int option, unsigned long a2, unsigned long a3,
++			  unsigned long a4, unsigned long a5)
++{
++	struct cred *new;
++	struct kos_cred *kc;
++
++	switch (option) {
++	case KOS_PR_STATUS:
++		if (a2 || a3 || a4 || a5)
++			return -EINVAL;
++		kc = kos_cred(current_cred());
++		return kc->app_id | (kc->core ? KOS_STATUS_CORE : 0);
++
++	case KOS_PR_CLAIM_CORE:
++		if (a2 || a3 || a4 || a5)
++			return -EINVAL;
++		if (!is_global_init(current))
++			return -EPERM;
++		if (atomic_cmpxchg(&kos_core_claimed, 0, 1))
++			return -EBUSY;
++		new = prepare_creds();
++		if (!new) {
++			atomic_set(&kos_core_claimed, 0);
++			return -ENOMEM;
++		}
++		kos_cred(new)->core = true;
++		commit_creds(new);
++		return 0;
++
++	case KOS_PR_CONFINE:
++		if (a3 || a4 || a5)
++			return -EINVAL;
++		if (!kos_is_core())
++			return -EPERM;
++		if (!a2 || a2 > KOS_APP_MAX)
++			return -EINVAL;
++		new = prepare_creds();
++		if (!new)
++			return -ENOMEM;
++		kc = kos_cred(new);
++		kc->app_id = a2;
++		kc->core = false;		/* an app is never the core */
++		commit_creds(new);
++		return 0;
++	}
++	return -ENOSYS;				/* not ours: let the next module look */
++}
++
++/* ---- connections -------------------------------------------------------- */
++
++static int kos_deny(u32 app, const char *what)
++{
++	kos_log(app, false, "%s", what);
++	return -EACCES;
++}
++
++static int kos_check_v4(const char *op, u32 app, u8 proto, u8 dir, __be32 addr, __be16 port)
++{
++	if (kos_has_rule(app, proto, dir, AF_INET, &addr, ntohs(port))) {
++		kos_log(app, true, "%s %s %pI4 %u", op, kos_proto_name(proto), &addr, ntohs(port));
++		return 0;
++	}
++	kos_log(app, false, "%s %s %pI4 %u", op, kos_proto_name(proto), &addr, ntohs(port));
++	return -EACCES;
++}
++
++static int kos_check_v6(const char *op, u32 app, u8 proto, u8 dir,
++			const struct in6_addr *addr, __be16 port)
++{
++	if (kos_has_rule(app, proto, dir, AF_INET6, addr, ntohs(port))) {
++		kos_log(app, true, "%s %s %pI6c %u", op, kos_proto_name(proto), addr, ntohs(port));
++		return 0;
++	}
++	kos_log(app, false, "%s %s %pI6c %u", op, kos_proto_name(proto), addr, ntohs(port));
++	return -EACCES;
++}
++
++/* The kernel looks at the address's own family, so this does too (see udp_sendmsg and
++ * ip6_datagram_connect: an AF_INET address on an AF_INET6 socket is an IPv4 destination). */
++static int kos_check_name(const char *op, u32 app, struct socket *sock,
++			  const struct sockaddr *a, int len, u8 dir)
++{
++	u8 proto;
++
++	if (sock->type == SOCK_STREAM)
++		proto = KOS_TCP;
++	else if (sock->type == SOCK_DGRAM)
++		proto = KOS_UDP;
++	else
++		return kos_deny(app, "socket type");
++	if (len < (int)sizeof(a->sa_family))
++		return kos_deny(app, "short address");
++
++	switch (a->sa_family) {
++	case AF_INET: {
++		const struct sockaddr_in *s = (const struct sockaddr_in *)a;
++
++		if (len < (int)sizeof(*s))
++			return kos_deny(app, "short address");
++		return kos_check_v4(op, app, proto, dir, s->sin_addr.s_addr, s->sin_port);
++	}
++	case AF_INET6: {
++		const struct sockaddr_in6 *s = (const struct sockaddr_in6 *)a;
++
++		if (len < SIN6_LEN_RFC2133)
++			return kos_deny(app, "short address");
++		return kos_check_v6(op, app, proto, dir, &s->sin6_addr, s->sin6_port);
++	}
++	}
++	return kos_deny(app, "address family");
++}
++
++static int kos_socket_create(int family, int type, int protocol, int kern)
++{
++	u32 app = kos_app();
++	int base = type & SOCK_TYPE_MASK;
++
++	if (kern || !app)
++		return 0;
++	if (family == AF_UNIX)
++		return 0;			/* a pair is harmless; connect and bind are denied */
++	if ((family == AF_INET || family == AF_INET6) &&
++	    ((base == SOCK_STREAM && (!protocol || protocol == IPPROTO_TCP)) ||
++	     (base == SOCK_DGRAM && (!protocol || protocol == IPPROTO_UDP))) &&
++	    kos_app_has_any_rule(app, 0))
++		return 0;
++	kos_log(app, false, "create family=%d type=%d protocol=%d", family, base, protocol);
++	return -EACCES;
++}
++
++static int kos_socket_connect(struct socket *sock, struct sockaddr *addr, int len)
++{
++	u32 app = kos_app();
++	int family;
++
++	if (!app)
++		return 0;
++	family = sock->sk ? sock->sk->sk_family : AF_UNSPEC;
++	if (family == AF_UNIX)
++		return kos_deny(app, "connect unix");
++	if (family != AF_INET && family != AF_INET6)
++		return kos_deny(app, "connect family");
++	if (len >= (int)sizeof(addr->sa_family) && addr->sa_family == AF_UNSPEC)
++		return 0;			/* disconnect: connects nothing */
++	return kos_check_name("connect", app, sock, addr, len, KOS_CONNECT);
++}
++
++static int kos_socket_bind(struct socket *sock, struct sockaddr *addr, int len)
++{
++	u32 app = kos_app();
++	int family;
++
++	if (!app)
++		return 0;
++	family = sock->sk ? sock->sk->sk_family : AF_UNSPEC;
++	if (family == AF_UNIX)
++		return kos_deny(app, "bind unix");
++	if (family != AF_INET && family != AF_INET6)
++		return kos_deny(app, "bind family");
++	return kos_check_name("bind", app, sock, addr, len, KOS_LISTEN);
++}
++
++static int kos_socket_listen(struct socket *sock, int backlog)
++{
++	u32 app = kos_app();
++	int family;
++
++	if (!app)
++		return 0;
++	family = sock->sk ? sock->sk->sk_family : AF_UNSPEC;
++	if (family == AF_UNIX)
++		return kos_deny(app, "listen unix");
++	/* a listener must have been bound, and the bind was checked against a rule */
++	if (!sock->sk || !inet_sk(sock->sk)->inet_num)
++		return kos_deny(app, "listen unbound");
++	return 0;
++}
++
++static int kos_socket_sendmsg(struct socket *sock, struct msghdr *msg, int size)
++{
++	u32 app = kos_app();
++	const struct sockaddr *a = msg->msg_name;
++	int family, len = msg->msg_namelen;
++
++	if (!app)
++		return 0;
++	family = sock->sk ? sock->sk->sk_family : AF_UNSPEC;
++	if (family == AF_UNIX)
++		return (a && len) ? kos_deny(app, "sendto unix") : 0;
++	if (family != AF_INET && family != AF_INET6)
++		return kos_deny(app, "send family");
++	if (!a || !len)
++		return 0;			/* a connected socket: connect was checked */
++
++	if (len >= (int)sizeof(a->sa_family) && a->sa_family == AF_UNSPEC) {
++		/* IPv6 ignores such a name; IPv4 datagram sends use the address in it. */
++		if (family == AF_INET6 || sock->type != SOCK_DGRAM)
++			return 0;
++		if (len < (int)sizeof(struct sockaddr_in))
++			return kos_deny(app, "short address");
++		return kos_check_v4("send", app, KOS_UDP, KOS_CONNECT,
++				    ((const struct sockaddr_in *)a)->sin_addr.s_addr,
++				    ((const struct sockaddr_in *)a)->sin_port);
++	}
++	return kos_check_name("send", app, sock, a, len, KOS_CONNECT);
++}
++
++/* ---- hardware and kernel interfaces ------------------------------------- */
++
++static bool kos_device_ok(const struct inode *inode)
++{
++	dev_t d = inode->i_rdev;
++
++	if (!S_ISCHR(inode->i_mode))
++		return false;
++	return d == MKDEV(1, 3) || d == MKDEV(1, 5) || d == MKDEV(1, 7) ||
++	       d == MKDEV(1, 8) || d == MKDEV(1, 9);	/* null zero full random urandom */
++}
++
++static int kos_file_open(struct file *file)
++{
++	struct inode *inode = file_inode(file);
++	u32 app = kos_app();
++
++	if (!app || !(S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)))
++		return 0;
++	if (kos_device_ok(inode))
++		return 0;
++	kos_log(app, false, "open device %u:%u", MAJOR(inode->i_rdev), MINOR(inode->i_rdev));
++	return -EACCES;
++}
++
++static int kos_path_mknod(const struct path *dir, struct dentry *dentry, umode_t mode,
++			  unsigned int dev)
++{
++	u32 app = kos_app();
++
++	if (app && (S_ISCHR(mode) || S_ISBLK(mode))) {
++		kos_log(app, false, "mknod device");
++		return -EPERM;
++	}
++	return 0;
++}
++
++static int kos_ptrace_access_check(struct task_struct *child, unsigned int mode)
++{
++	u32 app = kos_app();
++
++	if (!app)
++		return 0;
++	kos_log(app, false, "ptrace");
++	return -EPERM;
++}
++
++static int kos_ptrace_traceme(struct task_struct *parent)
++{
++	u32 theirs;
++
++	rcu_read_lock();
++	theirs = kos_cred(__task_cred(parent))->app_id;
++	rcu_read_unlock();
++	if (!kos_app() && !theirs)
++		return 0;
++	kos_log(kos_app() ? kos_app() : theirs, false, "ptrace traceme");
++	return -EPERM;
++}
++
++#ifdef CONFIG_BPF_SYSCALL
++static int kos_bpf(int cmd, union bpf_attr *attr, unsigned int size)
++{
++	u32 app = kos_app();
++
++	if (!app)
++		return 0;
++	kos_log(app, false, "bpf");
++	return -EPERM;
++}
++#endif
++
++#ifdef CONFIG_PERF_EVENTS
++static int kos_perf_event_open(int type)
++{
++	u32 app = kos_app();
++
++	if (!app)
++		return 0;
++	kos_log(app, false, "perf_event_open");
++	return -EPERM;
++}
++#endif
++
++static struct security_hook_list kos_hooks[] __ro_after_init = {
++	LSM_HOOK_INIT(cred_prepare, kos_cred_prepare),
++	LSM_HOOK_INIT(cred_transfer, kos_cred_transfer),
++	LSM_HOOK_INIT(task_prctl, kos_task_prctl),
++	LSM_HOOK_INIT(socket_create, kos_socket_create),
++	LSM_HOOK_INIT(socket_connect, kos_socket_connect),
++	LSM_HOOK_INIT(socket_bind, kos_socket_bind),
++	LSM_HOOK_INIT(socket_listen, kos_socket_listen),
++	LSM_HOOK_INIT(socket_sendmsg, kos_socket_sendmsg),
++	LSM_HOOK_INIT(file_open, kos_file_open),
++	LSM_HOOK_INIT(path_mknod, kos_path_mknod),
++	LSM_HOOK_INIT(ptrace_access_check, kos_ptrace_access_check),
++	LSM_HOOK_INIT(ptrace_traceme, kos_ptrace_traceme),
++#ifdef CONFIG_BPF_SYSCALL
++	LSM_HOOK_INIT(bpf, kos_bpf),
++#endif
++#ifdef CONFIG_PERF_EVENTS
++	LSM_HOOK_INIT(perf_event_open, kos_perf_event_open),
++#endif
++};
++
++static int __init kos_init(void)
++{
++	security_add_hooks(kos_hooks, ARRAY_SIZE(kos_hooks), &kos_lsmid);
++	kos_up = true;
++	pr_info("up: nothing is confined until the core claims itself and confines an app\n");
++	return 0;
++}
++
++static int __init kos_fs_init(void)
++{
++	struct dentry *dir;
++
++	if (!kos_up)			/* not in lsm= : no files, nothing to trust */
++		return 0;
++	dir = securityfs_create_dir("kos", NULL);
++	if (IS_ERR(dir))
++		return PTR_ERR(dir);
++	securityfs_create_file("rules", 0600, dir, NULL, &rules_fops);
++	securityfs_create_file("log", 0400, dir, NULL, &log_fops);
++	securityfs_create_file("status", 0444, dir, NULL, &status_fops);
++	return 0;
++}
++fs_initcall(kos_fs_init);
++
++DEFINE_LSM(kos) = {
++	.name = "kos",
++	.init = kos_init,
++	.blobs = &kos_blob_sizes,
++};

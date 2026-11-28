@@ -13,6 +13,11 @@ example.com/news?page=2 - an app opened the way a browser opens a website.
 Extensions: an extension the owner switched on for this app (`kos extend NAME`) can add bookmarks,
 shown on the start page. They are data: entries whose address is `kos://web/SITE`.
 
+AI: type `ask WHAT YOU WANT TO KNOW` and the browser hands the OS your question and this page's text.
+The OS asks for your password (and says which host gets the text), sends it to the AI you set up with
+`kos ai set`, and shows the answer here. The page text is marked as untrusted; the answer is only text
+you read - it cannot open, run or change anything. Backspace on an empty line closes the answer.
+
 Every page it fetches goes through the same static scanner everything else
 in KOS goes through, before you ever see a byte of it: pages with a flagged
 pattern are still shown (the scanner is heuristic, not a reason to hide
@@ -35,6 +40,14 @@ MAX_PAGE = 2 << 20
 # Shown on every screen, including the empty start screen. A website you open
 # learns where the request came from; the browser says so instead of hiding it.
 IP_NOTICE = "Websites you visit can see your IP address."
+AI_NOTICE = "ask QUESTION sends this page's text to your AI (password asked)."
+MAX_CONTEXT = 12000        # kos.ai.MAX_CONTEXT: the most page text the OS will pass on
+
+
+def split_ask(typed):
+    """('ask', QUESTION) if the line is an `ask` command (a bare host like ask.com is not), else None."""
+    parts = typed.strip().split(None, 1)
+    return (parts[1] if len(parts) > 1 else "",) if parts and parts[0] == "ask" else None
 
 
 def start_target(address):
@@ -169,7 +182,7 @@ def build_lines(page, viewing, sel, rows, typed, msg):
 
 def main():
     app = App()
-    history, page, sel, typed, viewing, msg = [], None, 0, "", False, ""
+    history, page, sel, typed, viewing, msg, answer = [], None, 0, "", False, "", None
     for ev in app.events():
         cmd = ev["cmd"]
         rows = max(5, app.height - 4)
@@ -187,10 +200,19 @@ def main():
             if k == "enter":
                 if typed.strip() == "run":
                     viewing, typed = True, ""
+                elif split_ask(typed) is not None:
+                    question, typed = split_ask(typed)[0], ""
+                    if not question:
+                        msg = "ask what? e.g.  ask what is this page about"
+                    else:
+                        context = "\n".join(page.text)[:MAX_CONTEXT] if page else ""
+                        answer = app.ask(question, context, page.base if page else "")
+                        msg = "" if answer else f"AI: {app.ai_error}"
+                        answer = answer or None
                 elif typed.strip():
                     target, typed = typed.strip(), ""
                     try:
-                        history.append(fetch(target)); sel, viewing, msg = 0, False, ""
+                        history.append(fetch(target)); sel, viewing, msg, answer = 0, False, "", None
                     except Exception as e:
                         msg = f"error: {e}"
                 elif page is None and marks:
@@ -206,6 +228,8 @@ def main():
             elif k == "backspace":
                 if typed:
                     typed = typed[:-1]
+                elif answer:
+                    answer = None
                 elif viewing:
                     viewing = False
                 elif len(history) > 1:
@@ -229,6 +253,9 @@ def main():
                 lines += ["", "  Bookmarks (from your extensions) - up/down, Enter:"]
                 for i, (label, site) in enumerate(marks):
                     lines.append(("  > " if i == sel else "    ") + f"{label[:24]:<24} {site[:40]}")
+        elif answer:
+            lines = ["  AI (advice only: it saw this page's text and cannot act on anything)", ""] \
+                + ["  " + t for t in answer][:rows]
         elif viewing:
             lines = [f"  {page.base}", ""] + ["  " + t for t in page.text][:rows]
         else:
@@ -238,7 +265,7 @@ def main():
                 lines.append(("> " if i == sel else "  ") + f"[{label[:70]}]/")
             if not page.links:
                 lines.append("  (empty folder: no links; type 'run' to view the page)")
-        lines += ["", f"  > {typed}_", f"  {msg}"]
+        lines += ["", f"  ! {IP_NOTICE}", f"  ! {AI_NOTICE}", f"  > {typed}_", f"  {msg}"]
         title = (page.title.strip() if page else "") or "web"
         scan_note = ""
         if page is not None and getattr(page, "scan", None) is not None:

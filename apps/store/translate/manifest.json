@@ -1,0 +1,11 @@
+{
+  "name": "store.translate",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Translate text and speech (Translate, Translation)."
+}

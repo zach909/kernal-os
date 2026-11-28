@@ -20,10 +20,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .kapp import NAME_RE, KAppError
+from .kapp import ID_RE, KAppError
 
 SCHEME = "kos://"
-MODES = ("tui", "graphical", "cmd")
+MODES = ("tui", "text", "graphical", "cmd")
 MAX_LAUNCH = 256
 MAX_ADDRESS = 300
 # No '%', '#', '?' (only as the query separator), space or control characters.
@@ -77,8 +77,9 @@ def parse(text: str) -> Address:
         raise AddressError(f"only {SCHEME} addresses open apps")
     head, sep, query = text.partition("?")
     app, slash, rest = head.partition("/")
-    if not NAME_RE.match(app):
-        raise AddressError(f"{app!r} is not an app name (lowercase letters, digits and - , starting with a letter)")
+    if not ID_RE.match(app):
+        raise AddressError(f"{app!r} is not an app name (lowercase letters, digits and - , starting with a letter; "
+                           "a program of an app is APP.PROGRAM)")
     path = slash + rest if slash else ""
     mode, kept = "", []
     for part in query.split("&") if query else []:

@@ -24,8 +24,11 @@ from __future__ import annotations
 import json
 import os
 import socket
+import select
 from collections import deque
 from typing import Iterator, Optional
+
+from .ui import Frame, div, render, text      # GPUI-style elements: div() / text() -> Canvas.paint
 
 
 class Canvas:
@@ -50,6 +53,39 @@ class Canvas:
         self.ops.append(["text", int(x), int(y), s, color, int(scale)])
         return self
 
+    def image(self, pixels, x: int = 0, y: int = 0, scale: int = 1, max_ops: Optional[int] = None):
+        """Draw a picture. KOS has no image command, so the pixels (rows of
+        '#rrggbb' or (r, g, b)) are turned into rects and lines first; see
+        ``kos.vectorize``. Fits in what is left of the frame's op budget, and
+        degrades (fewer colours, then blockier) rather than overflow. Returns
+        the ``Vectorized`` result: check ``.lossless``. Raises ValueError."""
+        from .vectorize import DEFAULT_BUDGET, MAX_OPS, vectorize
+        room = MAX_OPS - len(self.ops)
+        v = vectorize(pixels, x, y, scale, min(max_ops or DEFAULT_BUDGET, room) if room >= 1 else 0)
+        self.ops.extend(v.ops)
+        return v
+
+    def paint(self, root, width: int, height: int) -> Frame:
+        """Lay out and paint a ``div()``/``text()`` tree (see ``kos.ui``) into this frame. Returns the
+        ``Frame``: ``frame.hit(x, y)`` names the element id under a click. ValueError if it won't fit
+        in what is left of the op budget."""
+        from .vectorize import MAX_OPS
+        frame = render(root, width, height, room=MAX_OPS - len(self.ops))
+        self.ops.extend(frame.ops)
+        return frame
+
+
+def _pause(ms: int) -> None:
+    """Wait ``ms`` whole milliseconds (poll takes milliseconds as an integer, so no fractions of a second)."""
+    select.poll().poll(ms)
+
+
+def _canvas_with(base: Canvas, ops: list) -> Canvas:
+    """A new canvas holding ``base``'s ops followed by ``ops``."""
+    c = Canvas()
+    c.ops = list(base.ops) + list(ops)
+    return c
+
 
 class App:
     def __init__(self, sock: Optional[socket.socket] = None):
@@ -69,6 +105,7 @@ class App:
         self.extensions: list = []
         self._queue: deque = deque()     # events that arrived while waiting for a vault reply
         self._seq = 0
+        self.ai_error = ""              # why the last ask was refused
         self.vault_error = ""           # why the last vault call was refused, for the app to show
 
     def send(self, obj: dict) -> None:
@@ -106,7 +143,8 @@ class App:
     # --- durable storage (needs the 'storage' permission) -----------------
     # Blocking round trips: the OS answers a vault command straight away and
     # never prompts. Any other event that arrives meanwhile is kept for events().
-    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None) -> dict:
+    def _vault(self, op: str, key: str = "", value: Optional[str] = None, space: Optional[str] = None,
+               store: Optional[str] = None) -> dict:
         self._seq += 1
         msg = {"cmd": "vault", "op": op, "id": self._seq}
         if op not in ("list", "spaces"):
@@ -115,6 +153,8 @@ class App:
             msg["value"] = value
         if space is not None:
             msg["space"] = space
+        if store is not None:
+            msg["store"] = store
         self.send(msg)
         while True:
             ev = self._read_event()
@@ -144,10 +184,90 @@ class App:
     def vault_delete(self, key: str, space: Optional[str] = None) -> bool:
         return bool(self._vault("delete", key, space=space).get("ok"))
 
+    # Cookies and saved passwords: separate stores behind the 'cookies' and 'passwords' manifest permissions.
+    # Without the permission the OS refuses (and logs it). ``store`` is "cookies" or "passwords".
+    def secret_put(self, store: str, key: str, value: str) -> bool:
+        return bool(self._vault("put", key, value, store=store).get("ok"))
+
+    def secret_get(self, store: str, key: str) -> Optional[str]:
+        r = self._vault("get", key, store=store)
+        return r.get("value") if r.get("ok") else None
+
+    def secret_keys(self, store: str) -> list:
+        r = self._vault("list", store=store)
+        return list(r.get("keys", [])) if r.get("ok") else []
+
+    def secret_delete(self, store: str, key: str) -> bool:
+        return bool(self._vault("delete", key, store=store).get("ok"))
+
     def vault_spaces(self) -> list:
         """Shared spaces this app can open right now: [{space, access, owner}]."""
         r = self._vault("spaces")
         return list(r.get("spaces", [])) if r.get("ok") else []
+
+    # --- the OS's own functions (needs a 'service:GROUP' permission) ------
+    # A blocking round trip like the vault: the OS checks the call against servicespec.py, asks the
+    # owner for the password in its own prompt where the service needs one, and answers
+    # {"ok": bool, "detail": str, "data": {..}}. Events that arrive meanwhile are kept for events().
+    def service(self, name: str, /, **args) -> dict:       # positional-only: services have arguments called 'name'
+        self._seq += 1
+        self.send({"cmd": "service", "id": self._seq, "name": name, "args": args})
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                return {"ok": False, "detail": "channel closed", "data": {}}
+            if ev.get("cmd") == "service" and ev.get("id") == self._seq:
+                return ev
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                return {"ok": False, "detail": "quit", "data": {}}
+            self._queue.append(ev)
+
+    # --- the load effect (needs 'uses:load-effect' and the owner's grant) ----
+    def load_effect(self) -> dict:
+        """What the owner chose in the load-effect app: {"on", "three_d", "light", "ms"}. Off if the
+        app has no access to the ``load-effect`` space or nothing was saved. See ``kos.reveal``."""
+        from .reveal import SETTING_KEY, SETTING_SPACE, parse_setting
+        return parse_setting(self.vault_get(SETTING_KEY, space=SETTING_SPACE))
+
+    def scene(self, pixels, x: int = 0, y: int = 0, scale: int = 1, **options):
+        """Find the things in a picture for the load effect. Same arguments as ``Canvas.image`` plus the
+        options of ``kos.reveal.Scene`` (``ui_color``, ``layer_height``, ``light``). Raises ValueError."""
+        from .reveal import Scene
+        return Scene(pixels, x, y, scale, **options)
+
+    def show_scene(self, canvas: Canvas, scene, vp=None, effect: Optional[dict] = None, max_ops: Optional[int] = None):
+        """Put a ``kos.reveal.Scene`` on the screen the way the owner asked. ``canvas`` holds the app's
+        own background and interface (start it with a ``clear``). With the effect on, the picture arrives
+        (a point, out to the biggest box, in to the outline, unblur; the measuring band is not drawn),
+        pausing ``ms`` between frames; with 3D on every layer arrives at its own distance in perspective
+        from ``vp`` (the mouse). On a pointer event call it again with the new ``vp`` and
+        ``effect={**fx, "on": False}`` (``fx`` from ``load_effect()``) so the arrival does not replay.
+        Returns the ``reveal.Rendered`` when it drew 3D (check ``.note``), else None."""
+        from .reveal import DEFAULT_SETTING
+        from .vectorize import DEFAULT_BUDGET
+        fx = effect if effect is not None else self.load_effect()
+        fx = {**DEFAULT_SETTING, **fx}
+        room = max(1, min(max_ops or DEFAULT_BUDGET, 5000 - len(canvas.ops)))
+        scene.set_light(tuple(fx["light"]))
+        ms = fx["ms"]
+
+        def show(ops):
+            self.present(_canvas_with(canvas, ops))
+        if fx["on"]:
+            # one arrival: with 3D on, every layer arrives at its own distance and the last frame is the
+            # standing picture, so there is no separate rise
+            for ops in scene.frames(max_ops=room, vp=vp, three_d=fx["three_d"]):
+                show(ops)
+                _pause(ms)
+            return scene.render(vp, max_ops=room) if fx["three_d"] else None
+        if fx["three_d"]:
+            standing = scene.render(vp, max_ops=room)
+            show(standing.ops)
+            return standing
+        if not fx["on"]:
+            show(scene.flat(room).ops)
+        return None
 
     # --- commands the app can issue -------------------------------------
     def screen(self, title: str, lines: list[str], status: str = "") -> None:
@@ -187,6 +307,32 @@ class App:
     # Backups (needs the 'system' permission). The OS asks for the password in
     # its own prompt for every one of these; the app only ever sees the answer:
     # {"cmd": "backup", "stats": {...}, "items": [...]} or a "result" event.
+    def ask(self, text: str, context: str = "", source: str = "") -> list:
+        """Ask the AI (needs the 'ai' permission). The OS asks the owner for the password and says
+        what leaves the computer; this blocks until it answers. Returns lines of text, or [] and
+        ``self.ai_error`` says why. ``context`` is untrusted text you hand over (a page, a file)."""
+        self.send({"cmd": "request", "action": "ask", "text": text, "context": context, "source": source})
+        self.ai_error = ""
+        while True:
+            ev = self._read_event()
+            if ev is None:
+                self.ai_error = "channel closed"
+                return []
+            if ev.get("cmd") == "answer":
+                if not ev.get("ok"):
+                    self.ai_error = ev.get("detail", "refused")
+                return list(ev.get("lines", [])) if ev.get("ok") else []
+            if ev.get("cmd") == "quit":
+                self._queue.append(ev)
+                self.ai_error = "quit"
+                return []
+            self._queue.append(ev)
+
+    def request_status(self, topic: str) -> None:
+        """Ask how 'mouse', 'keyboard' or 'display' stands (needs 'ask:status'). The answer is an event:
+        {"cmd": "status", "topic": T, "ok": true, "fields": [[name, value], ...]} or a "result" refusal."""
+        self.send({"cmd": "request", "action": "status", "topic": topic})
+
     def request_backup(self) -> None:
         self.send({"cmd": "request", "action": "backup"})
 
@@ -195,6 +341,19 @@ class App:
 
     def request_backup_remove(self, item_id: str) -> None:
         self.send({"cmd": "request", "action": "backup_remove", "id": item_id})
+
+    def request_kernel(self) -> None:
+        """Ask what the Linux kernel protects (needs ``ask:kernel``). Answered by one ``kernel`` event."""
+        self.send({"cmd": "request", "action": "kernel"})
+
+    def request_admin(self) -> None:
+        """Ask whether the administrator keyboard is on (needs ``admin``). Answered by a ``result`` event."""
+        self.send({"cmd": "request", "action": "admin"})
+
+    def request_write(self, path: str, text: str) -> None:
+        """Ask the OS to write a file as the administrator (needs ``admin``). The OS asks the owner for the
+        password, scans and optimizes; the answer is one ``result`` event that says ok or not."""
+        self.send({"cmd": "request", "action": "write", "path": path, "text": text})
 
     def cache_dir(self) -> Optional[str]:
         """This run's private scratch directory, or None if this launch

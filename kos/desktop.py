@@ -6,6 +6,7 @@ attaches your terminal to one of them at a time:
 
 * start on the taskbar;
 * the taskbar (or the App Library) asks the OS to ``focus`` an app -> attach there;
+* the Windows key, anywhere, -> the search popup (also the OS's; no app sees it);
 * the right mouse button, anywhere, -> the App Library (the OS handles it; no
   app ever sees it);
 * Ctrl-C detaches from an app and returns to the taskbar; Ctrl-C on the
@@ -19,12 +20,16 @@ a new app still costs a password, in the OS's own prompt.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 from .kapp import KAppError
 from .registry import RegistryError
 
-SYSTEM_APPS = ("taskbar", "app-library")
+SYSTEM_APPS = ("desktop", "taskbar", "app-library", "search")
+# One more app per function of the OS that has a screen of its own (rule 5: everything is separate). They
+# are ordinary apps in ``store/apps/``; ``kos desktop install`` installs them with the two above, and you reach
+# them from the App Library. The desktop itself only ever opens SYSTEM_APPS.
+FUNCTION_APPS = ("mouse", "keyboard", "display", "wallpaper", "app-builder")
 
 
 class DesktopError(Exception):
@@ -36,6 +41,7 @@ class Desktop:
     home: str      # instance id of the taskbar
     library: str   # instance id of the App Library
     attach: Callable[[str, dict], dict]
+    search: Optional[str] = None   # instance id of the search popup (the Windows key opens it)
     """attach(instance_id, ctx) runs one attached session and returns its
     outcome: {"switch": ("instance", id) | None, "booted": [...], "exit_code": n}"""
 
@@ -43,7 +49,8 @@ class Desktop:
         target, booted = self.home, ()
         while True:
             ctx = {"preboot": booted,
-                   "right_click_to": None if target == self.library else self.library}
+                   "right_click_to": None if target == self.library else self.library,
+                   "search_to": None if target == self.search else self.search}
             try:
                 out = self.attach(target, ctx)
             except (KAppError, RegistryError, OSError) as e:

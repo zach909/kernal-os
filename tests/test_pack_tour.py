@@ -83,9 +83,17 @@ class TestTourFacts(unittest.TestCase):
             for w in ("firewall", "encrypt", "hardware", "camera", "microphone"):
                 if w in right_and_why.lower():
                     self.assertRegex(right_and_why, neg, right_and_why)
-        for _, q in QS:   # the right answer never says yes to "is it encrypted / is there a firewall"
-            if re.search(r"firewall|encrypted", q[0], re.I) and q[0].lower().startswith(("does", "is ")):
+        for _, q in QS:   # the right answer never says yes to "is it encrypted"
+            if re.search(r"encrypted", q[0], re.I) and q[0].lower().startswith(("does", "is ")):
                 self.assertTrue(q[1].startswith("No"), q[0])
+        # The firewall exists, with limits. The tour may say so, but any firewall claim must carry its limit:
+        # nothing is said to cover the OS's own connections, host names or encryption.
+        limit = re.compile(r"only|cannot|not|nothing|until|blocked|stock|default|edits|each|no ", re.I)
+        for _, q in QS:
+            about = f"{q[0]} {q[1]} {q[3]}"
+            if "firewall" in about.lower():
+                self.assertRegex(about, limit, about)
+                self.assertNotRegex(q[1], r"(?i)\b(all|every) (connection|traffic)s? (is|are) (encrypted|covered)", q[0])
 
 
 class TestTourPlay(unittest.TestCase):

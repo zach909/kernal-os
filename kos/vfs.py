@@ -169,3 +169,18 @@ class VFS:
         if len(data) > MAX_READ:
             raise VFSError(f"'{escape_text(name)}' is too large to view")
         return data
+
+
+def resolve_mixed(path: str):
+    """Walk a path that may cross from the real disk into a zip and, once inside, into further
+    nested zips - e.g. ``apps/hello.kapp/manifest.json``. ``VFS.cd`` already treats a zip entry
+    as just another directory, so this is a plain walk down the real, absolute path one component
+    at a time. Returns (VFS positioned at the parent, final component name; "" for the root)."""
+    import os
+    parts = [p for p in os.path.abspath(path).split(os.sep) if p]
+    vfs = VFS("/")
+    if not parts:
+        return vfs, ""              # the root itself: already there
+    for part in parts[:-1]:
+        vfs.cd(part)
+    return vfs, parts[-1]

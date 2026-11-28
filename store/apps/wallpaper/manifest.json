@@ -1,0 +1,9 @@
+{
+  "name": "wallpaper",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui", "graphical"],
+  "permissions": ["owns:wallpaper"],
+  "description": "Picks the desktop background colour. Saved in the 'wallpaper' shared folder; the taskbar reads it once you grant it."
+}

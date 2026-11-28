@@ -1,0 +1,11 @@
+{
+  "name": "store.photos",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "View and organise pictures (Photos, Preview, Image Viewer, Shotwell, VR Photos). `Canvas.image` can draw pixels, but there is no image decoder app yet."
+}

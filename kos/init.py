@@ -171,6 +171,37 @@ def firmware_gate(paths: Paths, prompter, root: Path = Path("/")) -> firmware.Ve
         time.sleep(3600)
 
 
+def kernel_gate(paths: Paths, prompter, k=None) -> bool:
+    """Claim the KOS kernel for the core (kos/kernel.py). Returns True if the core is claimed.
+
+    On a boot that requires the KOS kernel (``kos.require_kernel=1`` on the signed command line)
+    a stock kernel, or a refused claim, stops the boot: apps would run without the firewall."""
+    from . import kernel
+    k = k or kernel.default()
+    audit = AuditLog(paths)
+    problem = ""
+    if not k.present():
+        problem = "this is not the KOS kernel (no KOS security module)"
+    else:
+        try:
+            k.claim_core()
+            audit.record("kernel.core", "", "claimed")
+            return True
+        except kernel.KernelError as e:
+            problem = str(e)
+    audit.record("kernel.core", "", f"not-claimed: {problem}")
+    if not k.required():
+        prompter.info(f"\nKOS kernel: {problem}. Apps run in the sandbox only: no firewall, "
+                      "no device gate. (Boot with kos.require_kernel=1 to refuse this.)")
+        return False
+    prompter.info(f"\nKOS kernel: {problem}.\nThis boot requires it, so KOS will not start. "
+                  "Power the machine off.")
+    if os.getpid() != 1:
+        raise SystemExit(71)
+    while True:
+        time.sleep(3600)
+
+
 def login_loop(paths: Paths, console: str) -> None:
     prompter = TTYPrompter(console)
     store = PasswordStore(paths)
@@ -225,6 +256,7 @@ def main() -> None:
     console = os.environ.get("KOS_CONSOLE", "/dev/console")
     paths = Paths.from_env()
     firmware_gate(paths, TTYPrompter(console))
+    kernel_gate(paths, TTYPrompter(console))
     while True:
         try:
             login_loop(paths, console)

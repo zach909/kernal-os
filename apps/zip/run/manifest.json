@@ -1,0 +1,9 @@
+{
+  "name": "zip.run",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["service:zip"],
+  "description": "Drop in a zip file and its program runs, sandboxed with no permissions. The OS scans it, checks its proof, asks your password naming the zip's fingerprint and what it asked for, then runs it."
+}

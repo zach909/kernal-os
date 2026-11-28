@@ -46,6 +46,7 @@ _NAMED = {1: "escape", 14: "backspace", 15: "tab", 28: "enter", 96: "enter",
           107: "end", 108: "down", 109: "pagedown", 111: "delete"}
 _SHIFT = {42, 54}
 _CTRL = {29, 97}
+_META = {125, 126}        # KEY_LEFTMETA, KEY_RIGHTMETA: the Windows key
 
 
 class DeviceError(RuntimeError):
@@ -159,6 +160,9 @@ class EvdevTranslator:
                     self.shift = value != 0
                 elif code in _CTRL:
                     self.ctrl = value != 0
+                elif code in _META:
+                    if value == 1:                      # a press, never an autorepeat or the release
+                        out.append({"type": "search"})
                 elif value in (1, 2):  # press or autorepeat
                     ev = self._key(code)
                     if ev:

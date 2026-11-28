@@ -578,19 +578,6 @@ class TestPlan(FirmwareCase):
         self.t.write("sys/class/dmi/id/bios_vendor", "American Megatrends\n")
         self.assertIn("vendor firmware", firmware.platform_firmware(self.t.root))
 
-    def test_cli_plan_runs_read_only(self):
-        from contextlib import redirect_stdout
-        from kos import cli
-        buf = io.StringIO()
-        with tempfile.TemporaryDirectory() as d, redirect_stdout(buf):
-            os.environ["KOS_ROOT"] = d
-            try:
-                cli.main(["firmware", "plan"])
-            finally:
-                del os.environ["KOS_ROOT"]
-        self.assertIn("read-only", buf.getvalue())
-
-
 class TestProtections(FirmwareCase):
     def by_name(self):
         return {n: (st, note) for n, st, note in firmware.protections(self.t.root)}
@@ -624,19 +611,54 @@ class TestProtections(FirmwareCase):
         self.assertEqual(firmware.probe(self.t.root).ok, before)
 
 
-class TestCli(unittest.TestCase):
-    def test_firmware_command_is_read_only_and_reports(self):
-        from contextlib import redirect_stdout
-        from kos import cli
-        buf = io.StringIO()
-        with tempfile.TemporaryDirectory() as d, redirect_stdout(buf):
-            os.environ["KOS_ROOT"] = d
-            try:
-                code = cli.main(["firmware"])
-            finally:
-                del os.environ["KOS_ROOT"]
-        self.assertIn("boot:", buf.getvalue())
-        self.assertIn(code, (0, 1))
+class TestFirmwareService(unittest.TestCase):
+    """`kos firmware` and `kos doctor` are the System Information app now; it asks the OS through the
+    system.firmware and system.report services (kos/services.py), and the password is the permission."""
+
+    def setUp(self):
+        from kos.auth import Authority, KdfParams, PasswordStore, Throttle
+        from kos.paths import Paths
+        from kos.prompt import ScriptedPrompter
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.paths = Paths(Path(self.tmp.name))
+        PasswordStore(self.paths).create(b"correct horse battery", KdfParams.fresh(n=2**10), throttle_base=0)
+        self._mk = lambda *a: Authority(self.paths, ScriptedPrompter(a), Throttle(self.paths, base=0))
+
+    def _service(self, name, args, *answers):
+        from kos.protocol import validate_app_message
+        from kos.services import ServiceHost
+        msg = validate_app_message({"cmd": "service", "id": 1, "name": name, "args": args}, "tui")
+        return ServiceHost(self.paths, "test", frozenset({"system"})).call(msg, self._mk(*answers))
+
+    def test_firmware_reports_the_gate_and_what_narrows_the_remaining_chips(self):
+        r = self._service("system.firmware", {"plan": False}, "correct horse battery")
+        self.assertTrue(r["ok"], r)
+        d = r["data"]
+        self.assertIn(d["policy"], ("enforce", "warn"))
+        self.assertIsInstance(d["ok"], bool)
+        self.assertEqual(d["ok"], not d["reason"], "a refusal always says why")
+        self.assertTrue(d["protections"])
+        self.assertNotIn("plan", d)
+
+    def test_the_plan_is_advice_only(self):
+        r = self._service("system.firmware", {"plan": True}, "correct horse battery")
+        self.assertTrue(r["ok"], r)
+        self.assertIn("plan", r["data"])
+        self.assertTrue(r["data"]["summary"])
+        self.assertTrue(r["data"]["platform"])
+
+    def test_it_needs_the_password_and_gives_nothing_without_it(self):
+        r = self._service("system.firmware", {"plan": False}, "no", "no", "no")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["data"], {})
+
+    def test_the_system_report_says_whether_this_is_the_kos_kernel(self):
+        r = self._service("system.report", {}, "correct horse battery")
+        self.assertTrue(r["ok"], r)
+        k = r["data"]["kos_kernel"]
+        self.assertEqual(set(k) >= {"present", "role", "required"}, True)
+        self.assertIsInstance(k["present"], bool)
 
 
 if __name__ == "__main__":

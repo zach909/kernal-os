@@ -49,6 +49,7 @@ from typing import Callable, Iterator, Optional
 from .auth import Authority, Grant
 from .paths import Paths, atomic_write
 from .scan import MAX_SCAN, ScanResult, scan_bytes
+from .summary import SummaryStore
 
 INDEX_KEY_LABEL = "backup-index"
 MAX_FILE = MAX_SCAN            # a file the scanner can't fully read is not stored
@@ -290,6 +291,7 @@ def add(paths: Paths, authority: Authority, sources: list[str], *,
     with authority.authorize("backup.add", target) as grant, _locked(paths):
         items = load_items(paths, grant)
         have = {(i.path, i.sha256) for i in items}
+        sums = SummaryStore(paths)
         for p in files:
             try:
                 data = _read_file(p)
@@ -307,6 +309,7 @@ def add(paths: Paths, authority: Authority, sources: list[str], *,
                 report.flagged.append((p, ", ".join(sorted({f.rule for f in result.findings}))))
                 continue
             digest = hashlib.sha256(data).hexdigest()
+            sums.put(os.path.basename(p), data)            # every backed-up file has a text summary
             if (p, digest) in have:
                 report.unchanged += 1
                 continue

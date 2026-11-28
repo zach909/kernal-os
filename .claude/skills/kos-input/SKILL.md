@@ -40,6 +40,9 @@ mouse/keyboard --> devices.py (OS only) --> session.py route() --> app (as a com
   password). "Booting" it means *starting to forward keys to the app*. Until
   then keystrokes reach only the OS prompt.
 - **Ctrl-C is reserved by the OS in every mode.** An app can never trap you.
+- **Windows key** (evdev KEY_LEFTMETA/KEY_RIGHTMETA, a press only) becomes a `search` event: `Session.route`
+  switches to `search_to` (the search popup) once the keyboard is booted and never forwards it. A terminal cannot
+  send it, so it only works on the real keyboard.
 - **Right mouse** is consumed by `Session.route` when `right_click_to` is set
   (the App Library). It is never forwarded to the app.
 - While a trusted prompt is up, the app gets nothing.
@@ -54,6 +57,16 @@ mouse/keyboard --> devices.py (OS only) --> session.py route() --> app (as a com
   `device.keyboard`). Carrying booted devices over (desktop `preboot`) must
   stay OS-driven, never app-driven.
 - Encryption: the input channel is plain JSON today (see `kos-rules`).
+
+## The guard (`kos/guard.py`)
+
+`event-shape`: `Session.route` first passes every device event through `Guard.input_event`. Only a
+well-formed key (one printable character or a plain name such as `up`, `f5`, `ctrl-x`), button (left,
+middle, right, with `pressed` a bool) or scroll goes on, rebuilt from known fields, coordinates clamped
+to the surface. A bad one is dropped and audited (the first five of a kind), the app lives. Pointer
+moves and scrolls beyond 2,000 a second are dropped; a click is never dropped (a lost release leaves a
+button stuck). Ctrl-C is never judged. A layer with `has_pointer = False` (text) drops every pointer
+event and is never offered the mouse to boot. There is no key-rate limit.
 
 ## Testing without hardware
 

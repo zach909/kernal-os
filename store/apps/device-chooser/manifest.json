@@ -1,0 +1,13 @@
+{
+  "name": "device-chooser",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "service:compute"
+  ],
+  "description": "Chooses which device a task should run on, and says why each other device was refused."
+}

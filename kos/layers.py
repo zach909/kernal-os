@@ -34,8 +34,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import firewall
 from .auth import AuditLog
-from .kapp import KApp, KAppError
+from .kapp import KApp, KAppError, supports_mode
 from .permit import PermitStore
 from .registry import Instance, Registry
 from .sandbox import SandboxPolicy
@@ -44,6 +45,12 @@ from .store import AppStore
 LAYERS = ("gui", "app", "kernel")
 LAUNCH = ("open", "run")
 VERBS = (*LAUNCH, "close", "focus", "extend", "unextend")
+
+# The two password actions the kernel layer asks for that a lease (kos/norestart.py) may stand in for when an app
+# is swapped for its updated file with nobody at the keyboard. They are named here and nowhere else: the swap
+# still goes through ``traverse``, so the gui and app layers still run and every layer still writes its line.
+OPEN, CLOSE = "app.open", "app.close"
+UNATTENDED = (OPEN, CLOSE)
 
 
 @dataclass(frozen=True)
@@ -73,7 +80,7 @@ def _gui(paths, get_authority, req: Request, p: Passage) -> str:
             raise KAppError(f"{req.target} has no button: it is not installed (kos install)")
         p.row = row
         if req.verb in LAUNCH:
-            if req.mode not in row["modes"]:
+            if not supports_mode(row["modes"], req.mode):
                 raise KAppError(f"{req.target} has no {req.mode} mode (it has: {', '.join(row['modes'])})")
             return f"App Library lists {req.target} [{req.mode}]"
         if row["kind"] == "app":
@@ -100,16 +107,19 @@ def _kernel(paths, get_authority, req: Request, p: Passage) -> str:
     store = AppStore(paths)
     if req.verb in LAUNCH:
         action = "app.graphical" if req.mode == "graphical" else \
-            ("app.open" if req.verb == "open" else "app.run")
+            (OPEN if req.verb == "open" else "app.run")
         with authority.authorize(action, req.target) as grant:
             app = store.load_verified(req.target, grant)
+            fw_key = grant.key(firewall.KEY_LABEL)       # to check the firewall's rules are the owner's
         PermitStore(paths).check_declared(req.target, app.manifest.permissions)
+        PermitStore(paths).check_pin(req.target, app.sha256)
         if req.sandbox_prompt:
             policy = authorize_app_action(req.target, app, req.mode, authority, authority.prompter)
         else:
             policy = SandboxPolicy(weak=os.environ.get("KOS_DEV_WEAK_SANDBOX") == "1")
+        firewall.prepare_launch(paths, req.target, policy, fw_key)     # app id + kernel rules, before the fork
         p.app, p.policy = app, policy
-        return "password, seal and sandbox"
+        return "password, seal, sandbox and the KOS kernel"
     if req.verb == "extend":
         action = "app.mod" if p.row["kind"] == "mod" else "app.extend"
         with authority.authorize(action, req.target) as grant:
@@ -121,7 +131,7 @@ def _kernel(paths, get_authority, req: Request, p: Passage) -> str:
         authority.authorize("app.unextend", req.target).close()
         return "password"
     if req.verb == "close":
-        authority.authorize("app.close", p.instance.id).close()
+        authority.authorize(CLOSE, p.instance.id).close()
         return "password"
     # focus: switching is an attach; the kernel's word is whether the process is really there
     if p.instance.status != "running":

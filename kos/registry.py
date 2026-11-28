@@ -18,10 +18,10 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .kapp import NAME_RE
+from .kapp import ID_RE
 from .paths import Paths, atomic_write
 
 
@@ -41,7 +41,12 @@ class Instance:
     app_pid: int = 0
     status: str = "starting"  # starting -> running -> exited
     system: bool = False      # manifest has the 'system' permission (set by the OS, never the app)
+    asks: list = field(default_factory=list)   # the single requests its manifest allows (ask:ACTION), set by the OS
+    admin: bool = False       # manifest has the 'admin' permission (set by the OS, never the app)
     address: str = ""         # the path+query of the kos:// address it was opened with (checked by the OS)
+    sha256: str = ""          # the file this instance was launched from, set by the OS after the seal check;
+    version: str = ""         # "" on a record made before this existed: kos/norestart.py reports it, never swaps it
+    attached: bool = False    # a terminal or the desktop is attached right now (kept by the broker)
 
 
 def _alive(pid: int) -> bool:
@@ -65,7 +70,7 @@ class Registry:
 
     def _file(self, instance_id: str) -> Path:
         name = instance_id.rsplit("-", 1)[0]
-        if "/" in instance_id or instance_id in ("", ".", "..") or not NAME_RE.match(name):
+        if "/" in instance_id or instance_id in ("", ".", "..") or not ID_RE.match(name):
             raise RegistryError(f"invalid instance id {instance_id!r}")
         return self.base / name / "run" / f"{instance_id}.json"
 

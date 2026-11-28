@@ -1,0 +1,11 @@
+{
+  "name": "store.video-calls",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Video calling (FaceTime, Meet, Teams, Video Calling are one function)."
+}

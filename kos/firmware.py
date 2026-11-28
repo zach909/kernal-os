@@ -55,7 +55,8 @@ Allow list: ``etc/kos/firmware.allow`` (``boot/firmware.allow`` in the pre-boot 
 ``pci VVVV:DDDD`` or ``kind NAME`` entries the owner accepts, for example after reflashing a
 chip with firmware they trust. Allowed chips are still printed (ALLOWED), never hidden. The OS
 does not check that the firmware is what the list claims - it cannot - so the list is the owner
-vouching for the hardware. KOS never uploads firmware to a chip.
+vouching for the hardware. This gate never uploads firmware; the separate, password-gated
+``kos/fwflash.py`` can write the system flash from an image the owner signed.
 
 Policy comes from the signed kernel command line (``kos.firmware=``):
 ``enforce`` (default, also for any unknown value) halts; ``warn`` mitigates,

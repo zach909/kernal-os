@@ -4,6 +4,6 @@
   "runtime": "python",
   "entry": "web:main",
   "modes": ["tui"],
-  "permissions": ["network"],
-  "description": "Text web browser (https only, certificates verified): pages are folders of links you click through; 'run' shows the page"
+  "permissions": ["network", "ai"],
+  "description": "Text web browser (https only, certificates verified): pages are folders of links; 'ask ...' asks your AI about the page (password, advice only)"
 }

@@ -41,6 +41,14 @@ Limits live in `protocol.py` (`MAX_OPS`, `MAX_COORD`, `MAX_LINES`,
 `MAX_LINE_CHARS`). Text is stripped of control characters so an app cannot
 inject terminal escape sequences. `cmd` mode refuses `screen`/`frame` entirely.
 
+## GPUI-style drawing (`kos/ui.py`, app side)
+
+Apps describe a tree (`div().flex_col().p(8).bg(..).rounded(4).child(text(..))`), `Canvas.paint(root, w, h)`
+measures, lays out (whole-number flexbox: `//`, remainder to the last item) and paints it into the same
+`clear/rect/line/text` ops, then `frame.hit(x, y)` names the element id under a click. It adds **no wire op**:
+`protocol.py` still validates every op, the frame budget and overlay are unchanged. Over budget drops rounded
+corners first, then raises. Tests: `tests/test_ui.py`.
+
 ## Rules that apply here
 
 - **The password overlay is the OS's.** It is drawn last, the app receives no
@@ -50,6 +58,12 @@ inject terminal escape sequences. `cmd` mode refuses `screen`/`frame` entirely.
   bound, and a hostile-input test (wrong types, huge values, control chars).
 - Never trust an app-supplied string on screen; run it through `clean_text`.
 - Encryption: the frame channel is plain JSON today (see `kos-rules`).
+
+## The guard (`kos/guard.py`)
+
+`frame-budget`: more than 1,000,000 draw ops in a second (200 full frames) ends the app. It is checked
+in `Session.handle_app` after the frame is validated. A budget is a guess, not a measurement. The text
+layer (`kos-text`) sits just under this one: `text` mode never receives `frame`.
 
 ## Testing without hardware
 

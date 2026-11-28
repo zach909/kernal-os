@@ -33,7 +33,7 @@ are separate computers that start before the OS and keep running under it.
 Limits, stated plainly:
 * **The OS cannot disable these.** They have their own CPU and flash. KOS only detaches itself;
   the ME keeps its memory access and (with AMT) its network path. Actually disabling means the
-  flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; KOS does not write flash.
+  flash (`me_cleaner`/HAP, coreboot, a BIOS switch), done offline; the boot gate never writes flash (the separate `kos/fwflash.py` flasher can, for images you sign; see README).
 * **Almost no physical machine boots under `enforce`.** Besides the ME/PSP/BMC, any chip with its own
   firmware blocks it too: Thunderbolt/USB4, USB-C port controller, embedded controller, and network, GPU,
   NVMe and wireless controllers (PCI classes in `FIRMWARE_CLASSES`), and so does DMA hardware with no
@@ -42,11 +42,11 @@ Limits, stated plainly:
 * **Power-down for optional chips.** Thunderbolt/USB4 and wireless controllers are unbound and asked for D3cold
   (`d3cold_allowed`, `power/control=auto`); they stop blocking only if `power_state` then reads D3cold, in both the
   shell and Python scanners. The ME, PSP, EC, GPU, NIC and boot NVMe cannot be powered down on a running machine.
-  KOS does not erase, corrupt or overvolt anything, and does not try to rewrite other chips' firmware.
+  KOS does not erase, corrupt or overvolt anything, and the gate does not rewrite other chips' firmware. `kos/fwflash.py` is a separate, password-gated flasher that writes only the system flash; every other chip class refuses.
 * **`kos firmware plan` is read-only advice**, from a static table (`PLAN`): per blocking chip, whether open firmware
   exists (coreboot + me_cleaner for some Intel boards, OpenBMC for some servers, open EC for Framework/Chromebook/
   System76; none for PSP, USB-C/Thunderbolt, NIC, GPU, NVMe), and a verdict on whether this machine can pass. The OS
-  cannot verify any of it on the hardware in front of it, and flashing is an offline job KOS does not do.
+  cannot verify any of it on the hardware in front of it, and flashing is a separate step (`kos/fwflash.py`, system flash only).
 * **`kos.machine=framework`** (signed command line, shipped off) refuses to boot on anything whose DMI `sys_vendor` is
   not `Framework`. The vendor string is what the firmware reports: it prevents mistakes and swapped hardware, not a
   hostile BIOS. The allow list cannot waive it. Turning it on makes VMs and the QEMU flow refuse to boot.
@@ -55,6 +55,26 @@ Limits, stated plainly:
   nothing visible KOS prints a caveat and boots.
 * The HFSTS1 decoding follows coreboot/intelmetool and is untested on hardware here; the tests use
   synthetic config space. The kernel config also drops the in-kernel MEI, CCP and IPMI drivers.
+
+## The KOS kernel and the services (`kernel/`, `kos/kernel.py`, `kos/firewall.py`, `kos/services.py`)
+KOS runs on its own patched Linux (docs/KERNEL.md). PID 1 claims the **core** once per boot
+(`init.kernel_gate`); every app launch then gets a never-reused id from `kernel.AppIds` and its
+firewall rules from `firewall.prepare_launch` *before the fork*, and the child confines itself first
+thing in `SandboxPolicy.preexec` (one way: inherited, survives `exec`). On exit the owner's rules for
+that id are revoked and the kernel's log is copied into the audit log (`SandboxPolicy.on_exit`, run by
+whoever owns the process: `cmd_run` or the broker). On a boot with `kos.require_kernel=1` a missing
+module stops `init` and makes `SandboxPolicy.probe` refuse every app.
+Gap: the module governs only confined tasks, so the OS's own connections, processes outside the
+sandbox and kernel cells are unprotected; it cannot tell encrypted from plain traffic.
+
+An app asks the OS for its own functions with `{"cmd":"service",...}` (`servicespec.SPECS` is the whole
+list). `ServiceHost.call` runs, in this order, before any handler: the schema check, the manifest
+permission `service:GROUP`, and then the handler asks for the password in the OS's own prompt before it
+reads anything; the reply is scrubbed of control characters and size-bounded. The OS's own commands are
+apps built on this (`kos/office/pack_system.py`); `kos/launchmap.py` says where each of the 45 commands
+lives. Gap: the Python core (password check, seals, loader, protocol validation, session loop, audit chain,
+drawing and input) is still there; only the enforcement of apps' network, device and ptrace access is in
+the kernel.
 
 ## Keys
 `master = scrypt(password, salt)`. Stored: salt, params, `HMAC(master,
@@ -80,8 +100,11 @@ Every line is a command. Human language becomes one structured argv for
 nothing to attach to. Code is a command too (`kos exec`), but is never run on
 the host: it is scanned, needs `code.run` (the password), and runs as an
 in-memory one-shot `.kapp` under the normal sandbox with a timeout and a
-wiped cache dir. Only Python has a runtime in the sandbox; other languages
-report that and run nothing. Everything the shell can start still passes
+wiped cache dir. Python is the fast path. Other languages are rows in
+`kos/runtimes.py` (trusted interpreter + one argv template; custom ones are
+added with `kos runtimes add`, password, SHA-256 pinned); they run directly
+under the same `SandboxPolicy` with a scratch dir, timeout and output cap.
+A language with no row reports that and runs nothing. Everything the shell can start still passes
 through the same `Authority.authorize` gates.
 
 ## Requires (`kos/requires.py`)
@@ -339,3 +362,35 @@ KOS carries requests, NeuroClaw does the work and decides (no KOS password). `PO
 through its normal tool gate. Gap: the NeuroClaw engine is a separate process that must already be
 running (KOS does not start it, by the no-background-services rule), and if it has a password set the
 request is refused until the call is made from an admin session on this computer.
+
+## The pipeline's six layers and their guards
+
+Two different things are called layers here, and they are not the same list:
+
+* **Action layers** (`layers.py`, above): `gui`, `app`, `kernel`. Every *use of an app* passes through all three,
+  once, in that order. Unchanged.
+* **Pipeline layers** (`guard.PIPELINE`): the path data takes between the screen and the hardware, which every
+  *running session* is guarded on, continuously: **graphics, text, button clicker (input), app commands, kernel,
+  hardware**. The text layer (`textsurface.py`, `run text NAME`) was added between graphics and the button clicker.
+
+| layer | guard | where it runs | on a hit |
+|---|---|---|---|
+| graphics | `frame-budget` | `Session.handle_app`, after a `frame` validates | app ends (125) |
+| text | `page-budget` | `Session.handle_app`, after a `screen` validates (text and tui) | app ends |
+| input | `event-shape` | `Session.route`, before anything is forwarded | event dropped, audited (first 5) |
+| commands | `message-budget` | `Session.handle_app`, before validation | app ends |
+| commands | `prompt-budget`, `failed-requests` | `Session._on_request`, before the bridge | request answered "no", nobody is asked for a password |
+| kernel | `attest-process` | session start, then every 2 s: `/proc/PID` status and namespaces | app ends |
+| hardware | `no-device-handles` | the same look: `/proc/PID/fd` | app ends |
+
+Every refusal is `guard.LAYER.CHECK` `refused` in `kos audit` (the first five of a kind; the rest are counted in
+`Guard.stats`). The first successful kernel and hardware look is written as `pass`; under `KOS_DEV_WEAK_SANDBOX` the
+kernel look is skipped and written as `weak`.
+
+What each guard does not do is in the README gaps table ("Layer guards", "Text layer"). In short: the limits are
+guesses, not measurements; the kernel guard cannot see Landlock and skips cells; the hardware guard only sees handles
+open at the moment it looks; nothing here is encryption of the channels (see "Pipeline encrypted").
+
+**The text layer** prints a transcript: every OS line starts `KOS| `, every app line `app| ` (each wrapped piece too),
+anything unprintable becomes `?`, the password prompt is printed once and never echoed, and there is no pointer. An
+app with a `tui` mode runs as text unchanged (`kapp.supports_mode`) and is told `tui` (`kapp.wire_mode`).

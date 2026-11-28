@@ -68,12 +68,45 @@ class TestPacksAreLight(unittest.TestCase):
             self.assertEqual(heavy_loaded, [], p)
             self.assertEqual(foreign, [], p)
 
+    BANNED_MODULES = {"socket", "urllib", "subprocess", "pickle", "ctypes", "requests", "http", "ssl",
+                      "asyncio", "multiprocessing", "shelve", "marshal", "importlib"}
+    BANNED_CALLS = {"eval", "exec", "compile", "__import__", "os.system", "os.popen", "os.execv", "os.execl",
+                    "os.spawnl", "os.fork"}
+
+    @classmethod
+    def violations(cls, source: str) -> list:
+        """By syntax, not by text: a pack may *mention* 'subprocess' (the Code Review app flags it in other
+        people's code) but may not import it, or any other way to reach a socket, a program or arbitrary code."""
+        import ast
+
+        def dotted(n):
+            parts = []
+            while isinstance(n, ast.Attribute):
+                parts.append(n.attr)
+                n = n.value
+            return ".".join([n.id, *reversed(parts)]) if isinstance(n, ast.Name) else ""
+
+        out = []
+        for n in ast.walk(ast.parse(source)):
+            if isinstance(n, ast.Import):
+                out += [f"line {n.lineno}: import {a.name}" for a in n.names if a.name.split(".")[0] in cls.BANNED_MODULES]
+            elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0 and n.module.split(".")[0] in cls.BANNED_MODULES:
+                out.append(f"line {n.lineno}: from {n.module} import ...")
+            elif isinstance(n, ast.Call) and dotted(n.func) in cls.BANNED_CALLS:
+                out.append(f"line {n.lineno}: call {dotted(n.func)}")
+        return out
+
     def test_a_pack_does_not_open_sockets_or_run_programs(self):
-        banned = ("import socket", "urllib", "subprocess", "os.system", "eval(", "exec(", "pickle", "ctypes", "import requests")
         for p in PACKS:
-            src = (ROOT / "kos" / "office" / f"{p}.py").read_text()
-            for b in banned:
-                self.assertNotIn(b, src, f"{p}: {b}")
+            self.assertEqual(self.violations((ROOT / "kos" / "office" / f"{p}.py").read_text()), [], p)
+
+    def test_the_guard_catches_what_it_is_for_and_ignores_mentions(self):
+        for bad in ("import subprocess", "from socket import socket", "import urllib.request", "x = eval('1')",
+                    "import os\nos.system('ls')", "__import__('subprocess')", "import os, ctypes", "exec('x')"):
+            self.assertTrue(self.violations(bad), bad)
+        for fine in ("x = 'subprocess.run'", "d = {'os.system': 1}", "# import socket", '"""uses eval( and pickle"""',
+                     "def evaluate(): return 1", "import json, re"):
+            self.assertEqual(self.violations(fine), [], fine)
 
 
 class TestEveryPackAppRuns(unittest.TestCase):
