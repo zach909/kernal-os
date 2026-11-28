@@ -24,6 +24,9 @@
     kos ps                          list apps opened with 'kos open'
     kos attach ID                   connect your terminal to an open app (Ctrl-C detaches)
     kos close ID                    stop an app opened with 'kos open'
+    kos control ID mouse move X Y / click BUTTON X Y / scroll DY X Y
+    kos control ID keyboard KEY [KEY...]   drive a booted device with a command
+    kos boot desktop                choose among open apps (no desktop otherwise)
     kos desktop install             pack, scan, install + permit the taskbar, App Library, mouse, keyboard, display, wallpaper
     kos boot desktop [--graphical]  the desktop screen + App Library + search; right mouse = App Library, Windows key = search
     kos ls PATH / kos cat PATH      browse/view real dirs and zips - never extracted
@@ -35,6 +38,7 @@
     kos scan watch DIR...           scan every file written here until Ctrl-C (password to start)
     kos update all --from DIR       update every installed app that's newer in DIR, scanned first
     kos optimize                    recompress apps, prune dead state, reclaim disk space
+    kos mv SRC DST                  move a file: separate passwords for move, optimize, scan
     kos cell start NAME --kernel K --initrd I [--cpus 2,3] [--memory 256]
     kos cell list | kos cell stop NAME
     kos doctor                      which kernel protections are available
@@ -77,11 +81,15 @@ from .cells import CellError
 from .kapp import MANIFEST, KApp, KAppError, has_program_below, pack, pack_tree
 from .paths import Paths
 from .permit import PermitError
+from .protect import ProtectError
 from .prompt import NoTTY, TTYPrompter, eprint
 from .registry import RegistryError
 from .runtimes import LanguageError
 from .sandbox import SandboxError, report
 from .store import SEAL_KEY_LABEL, AppStore, TamperedError, VirusFoundError
+from .admin import AdminError
+from .autonomy import AutonomyError
+from .watch import WatchError
 from .system import SystemBridge, bridge_for, close_instance, open_background
 from .vfs import VFSError
 
@@ -91,6 +99,29 @@ def _authority(paths: Paths) -> tuple[Authority, TTYPrompter]:
     return Authority(paths, prompter), prompter
 
 
+def _authorize_or_redeem(paths: Paths, args, action: str, target: str):
+    """The one place `--token` is handled: with a token, this needs no
+    terminal and no password at all - only a temporary grant a human
+    already, explicitly issued in advance (see `kos autonomy`). Without
+    one, it's the normal live password prompt. Only a short allowlist of
+    actions can ever be redeemed this way - see `kos/autonomy.py`."""
+    token = getattr(args, "token", None)
+    if token:
+        from .autonomy import AutonomyStore
+        return AutonomyStore(paths).redeem(token, action, target)
+    return _authority(paths)[0].authorize(action, target)
+
+
+def _authorize_or_redeem_privileged(paths: Paths, args, action: str, target: str):
+    """Like `_authorize_or_redeem`, but for the higher, `--privileged-token`
+    tier (`kos/autonomy.py`'s `PRIVILEGED_ACTIONS`) - the only kind of grant
+    that can actually derive `kapp-seal`, because minting one needed the
+    admin password specifically."""
+    token = getattr(args, "privileged_token", None)
+    if token:
+        from .autonomy import AutonomyStore
+        return AutonomyStore(paths).redeem_privileged(token, action, target)
+    return _authority(paths)[0].authorize(action, target)
 def _view(paths: Paths, what: str) -> None:
     """Looking at what is installed, open, logged or owed needs the password too: the audit log and
     the activity feed show what you did and which apps you run. Refused before anything is printed."""
@@ -182,6 +213,22 @@ def cmd_pack(args, paths: Paths) -> int:
 
 
 def cmd_install(args, paths: Paths) -> int:
+    """Normally: pass the live `Authority` straight through, unchanged -
+    `AppStore._install` parses the file and asks for the password against
+    the app's real name in one step, exactly as it always has. Only with
+    `--privileged-token` do we need to look at the name *first*, so the
+    grant we redeem is checked against exactly the app actually being
+    installed, not just whatever the grant's issuer typed by hand."""
+    token = getattr(args, "privileged_token", None)
+    if token:
+        from .autonomy import AutonomyStore
+        from .kapp import KApp
+        name = KApp.from_file(Path(args.file)).manifest.name
+        grant_or_authority = AutonomyStore(paths).redeem_privileged(token, "app.install", name)
+    else:
+        grant_or_authority, _ = _authority(paths)
+    m = AppStore(paths).install(Path(args.file), grant_or_authority)
+    print(f"installed {m.name} {m.version} (modes: {', '.join(m.modes)}) - kept zipped, sealed")
     authority, _ = _authority(paths)
     src = Path(args.file)
     # A folder of programs (what `kos pack` wrote): each one is installed on its own, scanned and
@@ -398,7 +445,47 @@ def cmd_attach(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_control(args, paths: Paths) -> int:
+    """Send commands to a booted device on an open app instead of touching
+    a real mouse/keyboard - the same wire commands, the same password gate
+    (`device.control`, once per invocation) as physically booting one."""
+    from .control import ControlError, parse_args, send
+    from .registry import Registry
+
+    inst = Registry(paths).get(args.id)
+    if inst.status != "running":
+        raise KAppError(f"{args.id} is not running (status: {inst.status})")
+    commands = parse_args(args.device, args.words)  # validate before asking for the password
+    authority, _ = _authority(paths)
+    with authority.authorize("device.control", f"{inst.id} {args.device}"):
+        try:
+            send(inst.sock_path, commands)
+        except OSError as e:
+            raise ControlError(f"could not reach {inst.id}: {e}") from None
+    print(f"sent {len(commands) - 1} command(s) to {inst.id}'s {args.device}")
+    return 0
+
+
 def cmd_close(args, paths: Paths) -> int:
+    """Stop an open app - live, with the password, or unattended with a
+    `--token` from `kos autonomy grant app.close ID ...` issued earlier."""
+    import signal
+    import time as _time
+    from .registry import Registry
+
+    registry = Registry(paths)
+    inst = registry.get(args.id)
+    with _authorize_or_redeem(paths, args, "app.close", inst.id):
+        if inst.status == "running":
+            try:
+                os.kill(inst.broker_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for _ in range(20):  # give the broker a moment to shut the app down cleanly
+                if not os.path.exists(str(paths.state / "instances" / f"{inst.id}.json")):
+                    break
+                _time.sleep(0.1)
+        registry.remove(inst.id)
     authority, _ = _authority(paths)
     inst = close_instance(paths, authority, args.id)
     print(f"closed {inst.id}")
@@ -426,6 +513,21 @@ def cmd_boot(args, paths: Paths) -> int:
     from .desktop import Desktop, DesktopError
     from .registry import Registry
 
+    _authorize_or_redeem(paths, args, "device.desktop", "").close()
+    registry = Registry(paths)
+    insts = [i for i in registry.list() if i.status == "running"]
+    if not insts:
+        print("no apps open (kos open NAME first)")
+        return 0
+    with RawTerminal() as term:
+        term.write("\x1b[?1049l")  # desktop chooser is plain scrollback, not alt-screen
+    print("\r\nKOS desktop - open apps:\r\n")
+    for n, i in enumerate(insts, 1):
+        print(f"  {n}. {i.name} [{i.mode}]  ({i.id})\r")
+    print("\r\nq to cancel\r\n")
+    choice = input("attach to: ").strip()
+    if not choice or choice == "q":
+        return 0
     mode = "graphical" if args.graphical else "tui"
     authority, prompter = _authority(paths)
     authority.authorize("device.desktop").close()
@@ -753,7 +855,7 @@ def cmd_permit(args, paths: Paths) -> int:
         _refuse_group(paths, args.name)       # before any password: there is nothing to approve
     authority, _ = _authority(paths)
     action = "app.revoke" if args.revoke else "app.permit"
-    with authority.authorize(action, args.name):
+    with _authorize_or_redeem(paths, args, action, args.name):
         if args.revoke:
             PermitStore(paths).revoke(args.name)
             print(f"revoked: {args.name} may no longer run")
@@ -767,6 +869,100 @@ def cmd_permit(args, paths: Paths) -> int:
     return 0
 
 
+def cmd_scan(args, paths: Paths) -> int:
+    """`kos scan file PATH` checks one file or zip right now, no password
+    needed (it's read-only, like `kos list`). `kos scan watch DIR...` is
+    different: starting it needs the password, the same as starting a
+    kernel cell, because from that point on it keeps running and acting -
+    scanning every file written under those directories - until you stop
+    it. `kos scan protect DIR` goes further: the directory is locked (no
+    write access for anyone, not even you) the instant you protect it, and
+    stays locked except while a `kos scan watch` covering it is actively
+    running - that's what "needs the password to start, but blocks you from
+    moving a file in if you don't let it start" means literally."""
+    from .protect import ProtectStore, held_unlock
+    from .scan import scan_file
+
+    if args.scan_cmd == "protect":
+        ProtectStore(paths).protect(args.dir, _authority(paths)[0])
+        print(f"locked: {os.path.realpath(args.dir)} - nothing can be written there "
+              f"until 'kos scan watch' is running against it")
+        return 0
+
+    if args.scan_cmd == "unprotect":
+        ProtectStore(paths).unprotect(args.dir, _authority(paths)[0])
+        print(f"unlocked permanently: {os.path.realpath(args.dir)}")
+        return 0
+
+    if args.scan_cmd == "protected":
+        rows = ProtectStore(paths).list()
+        if not rows:
+            print("no protected directories")
+        for r in rows:
+            print(r.path)
+        return 0
+
+    if args.scan_cmd == "jobs":
+        from .watch import WatchRegistry
+        jobs = WatchRegistry(paths).list()
+        if not jobs:
+            print("no background scan watches running")
+        for j in jobs:
+            print(f"{j.id:16} {j.status:9} pid={j.pid or '-':<7} {', '.join(j.dirs)}")
+        return 0
+
+    if args.scan_cmd == "stop":
+        import signal
+        import time as _time
+        from .watch import WatchRegistry
+        registry = WatchRegistry(paths)
+        job = registry.get(args.job_id)
+        authority, _ = _authority(paths)
+        with authority.authorize("scan.watch", job.id):
+            if job.status == "running":
+                try:
+                    os.kill(job.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                for _ in range(20):
+                    if not os.path.exists(str(paths.state / "watchjobs" / f"{job.id}.json")):
+                        break
+                    _time.sleep(0.1)
+            registry.remove(job.id)
+        print(f"stopped {job.id}")
+        return 0
+
+    if args.scan_cmd == "watch":
+        from .watch import ScanHit, quarantine_hit, run_watch, spawn_background
+        for d in args.dirs:
+            if not os.path.isdir(d):
+                raise KAppError(f"not a directory: {d}")
+        _authorize_or_redeem(paths, args, "scan.watch", ", ".join(args.dirs)).close()
+        store = ProtectStore(paths)
+        real_dirs = [os.path.realpath(d) for d in args.dirs]
+        protected_dirs = [d for d in real_dirs if store.is_protected(d)]
+
+        if args.background:
+            paths.ensure()
+            log_path = paths.logs / f"scan-{Path(real_dirs[0]).name}-{os.getpid()}.log"
+            job = spawn_background(real_dirs, protected_dirs, paths, log_path)
+            print(f"watching in the background as {job.id} - {', '.join(real_dirs)}")
+            print(f"  kos scan jobs   |   kos scan stop {job.id}")
+            return 0
+
+        for d in protected_dirs:
+            print(f"unlocked (protected): {d}")
+        print(f"watching {', '.join(args.dirs)} - every file written here is scanned. "
+              "Ctrl-C to stop; a protected directory relocks the instant this stops.")
+
+        def on_hit(hit: "ScanHit") -> None:
+            try:
+                where = quarantine_hit(paths, hit)
+                print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()} - "
+                     f"quarantined to {where}")
+            except OSError as e:
+                print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()} - "
+                     f"could NOT be quarantined ({e}) - still on disk")
 def cmd_dirs(args, paths: Paths) -> int:
     """Where an app's stuff lives: cache (wiped), data (kept), run (live state)."""
     from .appdirs import AppDirs
@@ -779,6 +975,19 @@ def cmd_dirs(args, paths: Paths) -> int:
     return 0
 
 
+        contexts = [held_unlock(d, d in protected_dirs) for d in real_dirs]
+        try:
+            for ctx in contexts:
+                ctx.__enter__()
+            try:
+                run_watch(args.dirs, on_hit, lambda: False, on_scan=on_scan)
+            except KeyboardInterrupt:
+                print("\nstopped")
+        finally:
+            for ctx in reversed(contexts):
+                ctx.__exit__(None, None, None)
+            for d in protected_dirs:
+                print(f"relocked (protected): {d}")
 def cmd_aios(args, paths: Paths) -> int:
     """AI OS: `kos aios status` lists the four layers; `kos aios gui|app|kernel|skill WORDS...` runs one
     request on a layer. No password: NeuroClaw's own approvals decide what happens."""
@@ -838,6 +1047,116 @@ def cmd_scan(args, paths: Paths) -> int:
     def on_hit(hit: "ScanHit") -> None:
         print(f"\x1b[1;31mFLAGGED\x1b[0m {hit.path}: {hit.result.summary()}")
 
+def cmd_admin(args, paths: Paths) -> int:
+    """A second, higher-privileged password. Setting one up needs the
+    owner's password (you must already have full access to grant more of
+    it), and logging in with it - at the real console, via kos-init - gives
+    a root shell instead of the owner's uid-1000 one. This reverses the
+    'no root login exists' design from the first version of KOS,
+    deliberately, off by default, only for someone who explicitly creates
+    it with the keys they already hold."""
+    from .admin import AdminError, AdminStore
+
+    store = AdminStore(paths)
+    if args.admin_cmd == "status":
+        info = store.info()
+        if info.exists:
+            import time as _t
+            print(f"admin account exists, created "
+                 f"{_t.strftime('%Y-%m-%d %H:%M:%S', _t.localtime(info.created_at))}")
+        else:
+            print("no admin account (owner-only - the default)")
+        return 0
+    if args.admin_cmd == "setup":
+        authority, prompter = _authority(paths)
+        with authority.authorize("admin.create") as grant:
+            admin_password = _new_password(prompter)
+            store.create(admin_password, grant.raw_master())
+        print("admin account created. Logging in with this password at the console "
+             "gives a root shell instead of the owner's.")
+        return 0
+    if args.admin_cmd == "remove":
+        authority, _ = _authority(paths)
+        store.remove(authority)
+        print("admin account removed")
+        return 0
+    raise KAppError("usage: kos admin setup|remove|status")
+
+
+def cmd_autonomy(args, paths: Paths) -> int:
+    """Temporary, scoped permission for unattended use - see kos/autonomy.py
+    for the full two-tier design: a normal grant can never touch
+    install/run/optimize; a *privileged* grant (needs the admin password)
+    genuinely can, because it's the one thing carrying real seal-derivation
+    power - use --privileged deliberately, briefly, and narrowly."""
+    from .autonomy import AUTONOMOUS_ACTIONS, AutonomyStore, PRIVILEGED_ACTIONS
+
+    store = AutonomyStore(paths)
+    if args.autonomy_cmd == "list":
+        import time as _t
+        grants = store.list()
+        privileged = store.list_privileged()
+        if not grants and not privileged:
+            print("no autonomous grants issued")
+        for g in grants:
+            left = max(0, g.expires_at - _t.time())
+            print(f"{g.id:20} {g.action:14} {g.target:24} "
+                 f"{g.uses_remaining}/{g.max_uses} uses, {left:.0f}s left")
+        for g in privileged:
+            left = max(0, g["expires_at"] - _t.time())
+            print(f"{g['id']:20} {g['action']:14} {g['target']:24} "
+                 f"{g['uses_remaining']}/{g['max_uses']} uses, {left:.0f}s left  [PRIVILEGED]")
+        return 0
+    if args.autonomy_cmd == "actions":
+        print("actions that can ever be granted for autonomous use (kos autonomy grant):")
+        for a in sorted(AUTONOMOUS_ACTIONS):
+            print(f"  {a}")
+        print("\nactions that can ever be granted PRIVILEGED (kos autonomy grant-privileged, "
+             "needs the admin password):")
+        for a in sorted(PRIVILEGED_ACTIONS):
+            print(f"  {a}")
+        print("\neverything else always needs the real password, typed, at that moment.")
+        return 0
+    if args.autonomy_cmd == "grant-privileged":
+        authority, _ = _authority(paths)
+        g_id = store.issue_privileged(args.action, args.target, authority,
+                                      duration_s=args.for_seconds, max_uses=args.uses)
+        print(f"PRIVILEGED grant issued: {g_id}")
+        print(f"  ...--privileged-token {g_id}")
+        print(f"  good for {args.uses} use(s), expires in {args.for_seconds:.0f}s")
+        print("  this genuinely carries install/run/optimize power until it expires - "
+             "treat the grant file like a password.")
+        return 0
+    if args.autonomy_cmd == "revoke-privileged":
+        authority, _ = _authority(paths)
+        store.revoke_privileged(args.grant_id, authority)
+        print(f"revoked privileged grant {args.grant_id}")
+        return 0
+    if args.autonomy_cmd == "grant":
+        authority, _ = _authority(paths)
+        g = store.issue(args.action, args.target, authority,
+                        duration_s=args.for_seconds, max_uses=args.uses)
+        usage = {
+            "app.close": f"kos close {args.target} --token {g.id}",
+            "app.permit": f"kos permit {args.target} --token {g.id}",
+            "app.revoke": f"kos permit {args.target} --revoke --token {g.id}",
+            "cell.start": f"kos cell start {args.target} ... --token {g.id}",
+            "cell.stop": f"kos cell stop {args.target} --token {g.id}",
+            "scan.watch": f"kos scan watch {args.target} --token {g.id}",
+            "device.desktop": f"kos boot desktop --token {g.id}",
+        }.get(args.action, f"--token {g.id}")
+        print(f"granted: {g.id}")
+        print(f"  {usage}")
+        print(f"  good for {args.uses} use(s), expires in {args.for_seconds:.0f}s")
+        return 0
+    if args.autonomy_cmd == "revoke":
+        authority, _ = _authority(paths)
+        store.revoke(args.grant_id, authority)
+        print(f"revoked {args.grant_id}")
+        return 0
+    raise KAppError("usage: kos autonomy grant|list|revoke|actions")
+
+
     def on_scan(path: str) -> None:
         print(f"scanned: {path}")
 
@@ -847,9 +1166,54 @@ def cmd_scan(args, paths: Paths) -> int:
         print("\nstopped")
 def cmd_optimize(args, paths: Paths) -> int:
     from .optimize import optimize
-    authority, _ = _authority(paths)
-    report = optimize(paths, authority)
+    report = optimize(paths, _authorize_or_redeem_privileged(paths, args, "disk.optimize", ""))
     print(report.summary())
+    return 0
+
+
+def cmd_mv(args, paths: Paths) -> int:
+    """Move or rename a file through KOS instead of around it: three
+    separate password prompts, one per step - move, then optimize, then
+    scan the new location - and declining any one of them stops the whole
+    command right there (raises, same as every other declined action in
+    KOS). Whatever already happened before the decline stands; it is never
+    undone, because undoing something already done would itself be an
+    action nobody authorized. So: decline step 1 and nothing moves at all;
+    decline step 2 and the move already happened but nothing is optimized;
+    decline step 3 and the move (and optimize, if you allowed it) already
+    happened but the moved file is left unscanned.
+    """
+    import shutil
+    from .optimize import optimize
+    from .scan import scan_file
+
+    src, dst = os.path.abspath(args.src), os.path.abspath(args.dst)
+    if not os.path.exists(src):
+        raise KAppError(f"no such file: {args.src}")
+    if os.path.isdir(dst):
+        dst = os.path.join(dst, os.path.basename(src))
+
+    authority, _ = _authority(paths)
+    with authority.authorize("fs.move", f"{src} -> {dst}"):
+        try:
+            os.replace(src, dst)
+        except OSError:
+            shutil.move(src, dst)
+    print(f"moved: {src} -> {dst}")
+
+    report = optimize(paths, authority)
+    print(f"optimize: {report.summary()}")
+
+    with authority.authorize("fs.verify", dst):
+        if os.path.isdir(dst):
+            results = [scan_file(p) for p in Path(dst).rglob("*") if p.is_file()]
+            flagged = [r for r in results if not r.clean]
+            print(f"scan: {len(results)} file(s) checked, {len(flagged)} flagged")
+            for r in flagged:
+                print(f"  {r.summary()}")
+        else:
+            result = scan_file(Path(dst))
+            print(f"scan: {result.summary()}")
     return 0
 
 
@@ -862,15 +1226,14 @@ def cmd_cell(args, paths: Paths) -> int:
             state = "running" if c["running"] else "dead"
             print(f"{c['name']:16} cid={c['cid']:<4} cpus={c['cpus']} {c['memory_mb']}M {state}")
         return 0
-    authority, _ = _authority(paths)
     if args.cell_cmd == "start":
         spec = CellSpec(name=args.name, kernel=args.kernel, initrd=args.initrd,
                         memory_mb=args.memory, cpus=[int(c) for c in args.cpus.split(",")])
-        rec = mgr.start(spec, authority)
+        rec = mgr.start(spec, _authorize_or_redeem(paths, args, "cell.start", spec.name))
         print(f"cell {rec['name']} started: its own kernel on cores {rec['cpus']}, "
               f"vsock cid {rec['cid']}")
     else:
-        mgr.stop(args.name, authority)
+        mgr.stop(args.name, _authorize_or_redeem(paths, args, "cell.stop", args.name))
         print(f"cell {args.name} stopped")
     return 0
 
@@ -1343,6 +1706,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-o", "--output", required=True)
     s = sub.add_parser("install", help="install a .kapp, or every .kapp in a folder (each asks for the password)")
     s.add_argument("file")
+    s.add_argument("--privileged-token", help="redeem a privileged autonomy grant (needs admin)")
     s = sub.add_parser("update", help="update an app (or all of them): update APP.kapp | update all --from DIR")
     s.add_argument("file", help="a .kapp path, or the literal word 'all'")
     s.add_argument("--from", dest="from_dir", help="directory to check for updates (with 'all')")
@@ -1378,6 +1742,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s = sub.add_parser("close", help="stop an app opened with 'kos open'")
     s.add_argument("id")
+    s.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
+    s = sub.add_parser("boot", help="boot desktop: choose among open apps")
+    s.add_argument("what", choices=["desktop"])
+    s.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
     s = sub.add_parser("boot", help="boot the desktop: the taskbar + App Library, made of apps")
     s.add_argument("what", choices=["desktop"])
     s.add_argument("--graphical", action="store_true", help="draw the desktop graphically")
@@ -1396,6 +1764,33 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--revoke", action="store_true", help="take away permission instead of granting it")
     s.add_argument("--list", action="store_true", help="list every app with permission to run")
+    s.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
+    s = sub.add_parser("admin", help="a second, higher-privileged password (root at login)")
+    sad = s.add_subparsers(dest="admin_cmd", required=True)
+    sad.add_parser("setup", help="create the admin account (needs the owner's password)")
+    sad.add_parser("remove", help="remove it (needs the owner's password specifically)")
+    sad.add_parser("status", help="does one exist (no password needed)")
+    s = sub.add_parser("autonomy", help="temporary, scoped permission for unattended use")
+    sa = s.add_subparsers(dest="autonomy_cmd", required=True)
+    sg = sa.add_parser("grant", help="issue a temporary permission (needs the password)")
+    sg.add_argument("action", help="e.g. app.close, cell.start - see 'kos autonomy actions'")
+    sg.add_argument("target")
+    sg.add_argument("--for", dest="for_seconds", type=float, default=3600,
+                    help="seconds until it expires (default 3600)")
+    sg.add_argument("--uses", type=int, default=1, help="how many times it can be redeemed")
+    sgp = sa.add_parser("grant-privileged",
+                        help="issue a PRIVILEGED permission - needs the ADMIN password")
+    sgp.add_argument("action", help="e.g. app.install, disk.optimize - see 'kos autonomy actions'")
+    sgp.add_argument("target")
+    sgp.add_argument("--for", dest="for_seconds", type=float, default=3600,
+                     help="seconds until it expires (default 3600)")
+    sgp.add_argument("--uses", type=int, default=1, help="how many times it can be redeemed")
+    sa.add_parser("list", help="list active grants, both tiers (no password needed)")
+    sa.add_parser("actions", help="list which actions can ever be granted (no password needed)")
+    sr = sa.add_parser("revoke", help="revoke a grant immediately")
+    sr.add_argument("grant_id")
+    srp = sa.add_parser("revoke-privileged", help="revoke a privileged grant immediately")
+    srp.add_argument("grant_id")
     s = sub.add_parser("grant", help="let an app into a shared folder (space:NAME), or list who has access")
     s.add_argument("app", nargs="?")
     s.add_argument("resource", nargs="?")
@@ -1409,9 +1804,24 @@ def build_parser() -> argparse.ArgumentParser:
     ss = s.add_subparsers(dest="scan_cmd", required=True)
     sf = ss.add_parser("file", help="scan one file or zip right now (no password needed)")
     sf.add_argument("path")
-    sw = ss.add_parser("watch", help="scan every file written under these directories until Ctrl-C")
+    sw = ss.add_parser("watch", help="scan every file written under these directories until stopped")
     sw.add_argument("dirs", nargs="+")
+    sw.add_argument("--background", action="store_true",
+                    help="run in the background (like 'kos open'); see 'kos scan jobs'/'stop'")
+    sw.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
+    sp = ss.add_parser("protect", help="lock a directory: no writes until a watch covers it")
+    sp.add_argument("dir")
+    su_ = ss.add_parser("unprotect", help="unlock a directory permanently")
+    su_.add_argument("dir")
+    ss.add_parser("protected", help="list locked directories (no password needed)")
+    ss.add_parser("jobs", help="list background scan watches (no password needed)")
+    sst = ss.add_parser("stop", help="stop a background scan watch")
+    sst.add_argument("job_id")
     s = sub.add_parser("optimize", help="reclaim disk space: recompress apps, prune dead state")
+    s.add_argument("--privileged-token", help="redeem a privileged autonomy grant (needs admin)")
+    s = sub.add_parser("mv", help="move/rename a file: separate passwords for move, optimize, scan")
+    s.add_argument("src")
+    s.add_argument("dst")
     s = sub.add_parser("cell", help="manage parallel kernel cells")
     cs = s.add_subparsers(dest="cell_cmd", required=True)
     c = cs.add_parser("start")
@@ -1420,9 +1830,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--initrd", required=True)
     c.add_argument("--cpus", default="1")
     c.add_argument("--memory", type=int, default=256)
+    c.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
     cs.add_parser("list")
     c = cs.add_parser("stop")
     c.add_argument("name")
+    c.add_argument("--token", help="redeem an autonomy grant instead of asking for the password")
     sub.add_parser("doctor", help="report kernel security features")
     sub.add_parser("security", help="check everything KOS can verify about itself (no password, read-only)")
     s = sub.add_parser("firmware", help="management processors (Intel ME, AMD PSP, BMC) and the boot gate")
@@ -1519,6 +1931,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+COMMANDS = {"setup": cmd_setup, "passwd": cmd_passwd, "pack": cmd_pack,
+            "install": cmd_install, "update": cmd_update, "view": cmd_view, "remove": cmd_remove,
+            "list": cmd_list, "run": cmd_run, "open": cmd_open, "ps": cmd_ps, "attach": cmd_attach,
+            "close": cmd_close, "boot": cmd_boot, "ls": cmd_ls, "cat": cmd_cat,
+            "explore": cmd_explore, "activity": cmd_activity,
+            "permit": cmd_permit, "autonomy": cmd_autonomy, "admin": cmd_admin,
+            "scan": cmd_scan, "optimize": cmd_optimize, "mv": cmd_mv,
+            "cell": cmd_cell, "doctor": cmd_doctor, "audit": cmd_audit}
 def cmd_skills(args, paths: Paths) -> int:
     """`kos skills` is the Skill Maker app (a preview). `kos skills --out DIR` stays here: each SKILL.md is a
     guarded write (administrator keyboard, scan, optimize), and the exclusive keyboard is not something an app
@@ -1602,6 +2022,11 @@ def main(argv: list[str] | None = None) -> int:
     except (TamperedError, VirusFoundError, WriteBlocked, VaultTamperedError) as e:
         eprint(f"\x1b[1;31mSECURITY: {e}\x1b[0m")
         return 3
+    except (AuthorizationDenied, AuthError, PermitError, ProtectError) as e:
+        eprint(f"denied: {e}")
+        return 2
+    except (KAppError, SandboxError, CellError, RegistryError, VFSError, WatchError,
+           AutonomyError, AdminError, NoTTY, OSError) as e:
     except (AuthorizationDenied, AuthError, PermitError, AdminError) as e:
         eprint(f"denied: {e}")
         return 2

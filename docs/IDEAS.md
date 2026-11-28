@@ -9,6 +9,15 @@ land instead of getting lost in chat.
 
 ## Backlog - not started yet
 
+- **`--privileged-token` for `run`/`open`/`update`.** Only `install` and
+  `optimize` accept one today. The other three each have extra live logic
+  (network-permission prompts, `PermitStore` checks, `update all`'s
+  directory scan) that needs its own careful pass to stay correct under
+  the token path, not just the same quick plumbing `install`/`optimize`
+  got.
+- **Multiple named admin keyslots.** Right now there's exactly one; a
+  second `kos admin setup` refuses. Independently-named, independently-
+  revocable admins would need the keyslot storage to become a small list.
 - **Local device mesh.** Paired KOS machines, encrypted peer links, handoff, then camera and tether sharing. Design and four open owner decisions are in `docs/MESH.md`; no code yet. Blocked on a crypto dependency and the firmware-gate question.
 - **Backup follow-ups.** Encrypt blob bodies with a password-derived key
   instead of relying on LUKS2 + 0700 (needs a streaming AEAD; stdlib has none,
@@ -84,11 +93,6 @@ land instead of getting lost in chat.
   antivirus. A pluggable, updatable signature source (still scanned
   through the same recursion, still gated the same way) would be the
   natural next step if this needs to catch more than the heuristics do.
-- **`kos scan watch` as a background instance.** Right now it only runs in
-  the foreground of the terminal that started it. Giving it the same
-  `kos open`/broker treatment as apps - start it, walk away, `kos ps`
-  shows it, `kos close` stops it - would match how everything else
-  long-running in KOS already works.
 - **Rust port of the security core.** Already written down in
   `ARCHITECTURE.md` as a known gap: Python can't guarantee a password or
   derived key is wiped from every copy the interpreter makes.
@@ -103,6 +107,15 @@ land instead of getting lost in chat.
   builder are all written but have only run in a container with no VM
   support. First real target: boot the produced image in QEMU with OVMF
   and confirm the two password gates and `run hello` actually work.
+- **`kos cp`/`kos write`, alongside `kos mv`.** The three-password
+  move/optimize/scan pipeline covers moving something; a copy or a
+  from-scratch write through the same pipeline doesn't exist yet.
+- **fanotify-based, mount-wide protection.** `kos scan protect` enforces
+  with plain file mode, which is real but directory-scoped and only
+  binding on non-root processes. A `FAN_OPEN_PERM`-based enforcer would let
+  the kernel itself hold an open *pending* until KOS has scanned the file's
+  content, which is a stronger and more general mechanism than a mode bit -
+  worth it if directory-level locking turns out not to be enough.
 
 ## Backlog - from the addresses / extensions / layers round
 
@@ -145,6 +158,80 @@ land instead of getting lost in chat.
 
 ## Shipped
 
+- **Admin keyslot + root login + privileged autonomy.** `kos admin setup`
+  (owner password only) adds a second password that unlocks the *same*
+  master key (LUKS-style keyslots), off by default. Logging in with it at
+  the console gives a root shell instead of the owner's - the deliberate,
+  gated reversal of "no root login exists." `kos autonomy grant-privileged`
+  needs that admin password specifically and mints a grant that genuinely
+  can install/run/optimize unattended, because it carries the real seal
+  key - unlike a normal grant, whose `.key()` always raises. Verified
+  end-to-end over a real pty and a genuinely stdin-less subprocess: admin
+  setup, owner correctly refused from minting a privileged grant, admin
+  successfully mints one, and a fully unattended `kos install` succeeds
+  with zero password prompts. 12 tests cover the crypto (owner and admin
+  unlock to the identical master), the owner-only actions
+  (`admin.remove`/`auth.change`) refusing even a valid admin password, and
+  a real gap caught and fixed during development: a privileged grant
+  minted for one app name could not be redeemed to install a different one
+  just because the same grant id was reused, since the target for
+  `app.install` isn't known until the file is parsed. **The admin keyslot
+  itself only ever lasts until the next reboot** - it lives on `/run`
+  (tmpfs), which `kos-init` mounts fresh and empty on every boot, so root
+  access and privileged autonomy are re-decided every session rather than
+  a standing account on disk (already-issued privileged grants are
+  unaffected - they carry their own seal key and keep working for their
+  own remaining duration independent of whether the admin account that
+  minted them still exists).
+- **Autonomous action, without ever storing the password.** `kos autonomy
+  grant ACTION TARGET --for N --uses M` needs the real password once, to
+  mint a temporary permission - never the password itself, which is never
+  written to disk. `kos close ID --token GRANT` (also `cell.start`/`stop`,
+  `app.permit`/`revoke`, `scan.watch`'s start, `boot desktop`) can then
+  redeem it later with zero password and zero terminal, proven end-to-end
+  with a real subprocess given `stdin=DEVNULL` - genuinely no way to type
+  anything, and it still worked. The permanent limit, not a gap to close
+  later: a redeemed grant's `.key()` always raises, so it can never derive
+  `kapp-seal` or any other master-key material - meaning it structurally
+  cannot install, update, run, open, or optimize anything, no matter what
+  the allowlist is ever extended to include. 10 tests cover issuance
+  requiring the real password, the allowlist rejecting everything else,
+  successful redemption, the key-derivation refusal, use-count exhaustion,
+  expiry, wrong action/target, a tampered grant file's HMAC failing, and
+  revocation.
+- **`kos control`/`kos attach` no longer share one broker slot, `kos scan
+  watch --background`, `kos mv` for whole directories.** `kos control` now
+  has its own door into the broker (`Broker.control_sock_path`), so sending
+  a control command no longer bumps a live `kos attach` off its connection
+  - verified by holding an attach open, sending a control command, and
+  confirming the attach both survived and saw the reply. `kos scan watch
+  DIR --background` runs the exact same watch loop (including protected-
+  directory unlock/relock) detached, with `kos scan jobs`/`kos scan stop
+  ID` to manage it - the same fork+daemonize+registry pattern `kos open`
+  already used for apps. `kos mv` moving a whole directory tree, not just
+  one file, turned out to already work (`shutil.move` and the scan step's
+  recursive walk both already handled it) - confirmed by test rather than
+  needing new code.
+- **`kos scan protect`/`unprotect`, `kos control`, `kos mv`.** A protected
+  directory is locked (mode 0500 - no write for anyone) the instant you
+  protect it and stays that way except while a `kos scan watch` covering it
+  is actively running, which is what "needs the password to start, but
+  blocks the move if you don't let it start" turned into: enforced by the
+  kernel's own permission check, not just observed after the fact - a
+  flagged file dropped in while unlocked is quarantined immediately, not
+  just reported. Verified for real: a non-root write into a protected
+  directory is refused, the same write succeeds the moment the watch is
+  running, and the directory relocks the instant the watch stops, by any
+  path (Ctrl-C, error, or otherwise). `kos control ID mouse|keyboard ...`
+  sends the exact same commands a real boot + physical input would, gated
+  by the exact same password, once per invocation, with no batching that
+  would let one password authorize an unbounded stream of later input -
+  the honest alternative to a literal per-keystroke prompt, which is not
+  just impractical but logically impossible (entering a password is itself
+  a sequence of keystrokes). `kos mv SRC DST` is a three-step pipeline -
+  move, then `optimize`, then scan the destination - each step its own
+  password prompt; declining any step stops the whole thing right there,
+  and whatever already happened before that point is never undone.
 - **Backup, as a KOS app (`kos backup`, `examples/backup`).** The Universal
   Backup System's core idea - content-addressed dedup - brought in under KOS's
   rules. Engine in `kos/backup.py`: bodies stored once per SHA-256, scanned

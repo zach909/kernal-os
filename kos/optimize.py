@@ -78,6 +78,9 @@ def _recompress_kapp(kapp_path: Path, seal_path: Path, seal_key: bytes) -> int:
     return original - len(new_data)
 
 
+def optimize(paths: Paths, grant_or_authority) -> OptimizeReport:
+    """`grant_or_authority` is an `Authority` (live password) or an
+    already-open grant (e.g. a redeemed privileged autonomy token)."""
 def optimize(paths: Paths, authority: Authority, grant: Optional[Grant] = None) -> OptimizeReport:
     """``grant``: a password grant the caller already obtained for a larger
     operation that includes this one (the guarded file write). It is only used
@@ -86,6 +89,9 @@ def optimize(paths: Paths, authority: Authority, grant: Optional[Grant] = None) 
 
     # 1. Recompress every installed app's zip to the best compression, and
     #    re-seal it at the new bytes so it still verifies afterward.
+    cm = grant_or_authority.authorize("disk.optimize") \
+        if isinstance(grant_or_authority, Authority) else grant_or_authority
+    with cm as grant:
     if grant is not None:
         seal_key = grant.key(SEAL_KEY_LABEL)
     else:

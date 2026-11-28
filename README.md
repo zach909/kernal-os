@@ -499,7 +499,21 @@ kos spaces                  opens the Shared Folders app: who has access to what
 kos dirs APP                an app's cache / data / run folders
 kos scan file PATH          opens the Scanner app (it asks the password to read the file)
 kos scan watch DIR...       scan every file written here until Ctrl-C (password to start)
+kos scan watch DIR... --background   same, but backgrounded like 'kos open'
+kos scan jobs / kos scan stop ID     list / stop a background watch
 kos update all --from DIR   update every installed app that's newer in DIR, all scanned first
+kos optimize                 recompress apps, prune dead state, reclaim disk space
+kos mv SRC DST                one password each for move, optimize, and scan - decline any, it stops there
+kos scan protect DIR          lock a directory: no writes for anyone until a watch covers it
+kos scan unprotect DIR        unlock it permanently
+kos control ID mouse|keyboard ...   drive a booted device with a command (same password, same gate)
+kos autonomy grant ACTION TARGET --for 3600 --uses 1   issue a temporary, unattended permission
+kos autonomy list / actions / revoke ID                see/limit what autonomy can ever do
+kos close ID --token GRANT   (also cell start/stop, scan watch, permit, boot desktop) - no password, no TTY
+kos admin setup / status / remove       a second, higher-privileged password (root shell at login)
+kos autonomy grant-privileged ACTION TARGET   needs the ADMIN password - genuinely can install/run/optimize
+kos install FILE --privileged-token GRANT     (also: kos optimize) - fully unattended, admin-authorized
+kos cell start NAME --kernel K --initrd I --cpus 2,3
 kos optimize                 opens the Storage and Disk Management app: recompress apps, prune dead state
 kos admin [status|boot|lock] the elevated administrator keyboard (boots at login)
 kos convert                 opens the Debian Converter app (static programs only)
@@ -596,6 +610,41 @@ desktop view unless you ask for one with `kos boot desktop`.
 (including `.kapp` apps) as one continuous tree - `cd`-ing into a zip is
 just another `cd`, and nothing is ever extracted to disk to look at it.
 
+**Autonomous action, without ever storing the password.** `kos autonomy
+grant app.close hello-abc123 --for 3600 --uses 1` needs your real password
+once, right then, to mint a *temporary permission* - not the password
+itself, which is never written down anywhere. That permission can later be
+redeemed - `kos close hello-abc123 --token GRANT_ID` - by a cron job or any
+other unattended process, with no terminal and no password at all, but only
+for the exact action it names, only until it expires or runs out of uses.
+The set of actions that can ever be granted this way is short and fixed
+(`kos autonomy actions`) and deliberately excludes anything that installs,
+updates, runs, or opens an app, or optimizes - those verify or derive a
+cryptographic seal, and a redeemed grant is built so it structurally cannot
+do that (see `kos/autonomy.py`). That boundary is the whole design, not a
+missing feature.
+
+**A second, higher-privileged password, and what it deliberately unlocks.**
+`kos admin setup` (needs the owner's password) creates an admin account -
+off by default, until someone with full owner access explicitly makes one.
+It reverses two things from the very first version of KOS, on purpose:
+logging in with the admin password at the real console gives a **root
+shell** instead of the owner's unprivileged one, and `kos autonomy
+grant-privileged ACTION TARGET` (admin password only) issues a grant that
+genuinely **can** install, run, update, or optimize things unattended,
+because it carries the real seal key rather than being blocked from ever
+deriving one. Both are real, tested, and off unless you turn them on:
+`kos admin status` shows whether one exists; nothing about the owner's own
+password or its normal grants changes if you never create one. **The admin
+account itself only ever lasts until the next reboot** - its keyslot lives
+on `/run` (tmpfs), not the persistent disk, so `kos-init` mounting a fresh,
+empty `/run` on every boot wipes it unconditionally, before anyone has even
+logged in. Root access and privileged autonomy are something you re-decide
+every session, never a standing account sitting on disk. Treat a privileged
+grant file the same way you'd treat a password - anyone who can read it can
+act with it until it expires.
+
+Included apps: `examples/hello` (text + graphical + cmd-mode demo) and
 Included apps: `examples/backup` (a front-end for `kos backup`: `kos pack
 examples/backup -o backup.kapp && kos install backup.kapp && kos permit backup`,
 then `run backup` - `r` lists, `a` adds a path, `d` removes; each asks the OS for
@@ -823,6 +872,16 @@ Secure Boot: enroll the key you signed with, or the stick will be refused.
   fork+daemonize broker, over a real pty), `cmd` mode, zip `cd`/browsing,
   the scanner (EICAR + heuristics, recursing into zips), install/update
   quarantine, the inotify watcher, permits, per-run cache wipe-on-exit
+  (verified over a real pty: gone after a clean exit), `kos optimize`'s
+  recompress-and-reseal, `kos scan protect`/`watch` actually blocking a
+  non-root write and auto-quarantining a flagged one (verified over a real
+  pty, including confirming the lock does nothing against root - only
+  matters, correctly, once the owner runs as uid 1000), `kos control`
+  driving a real running app through the broker, and `kos mv`'s three
+  independent password prompts (declining any one stops it there, proven
+  by test).
+* **Written but not yet booted:** the initramfs, kos-init as real PID 1, the
+  image builder, framebuffer/evdev on real hardware, starting KVM cells (no
   (verified over a real pty: gone after a clean exit), and `kos optimize`'s
   recompress-and-reseal.
 * **Also tested here (this round):** the line shell (many languages, code

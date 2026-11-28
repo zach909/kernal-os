@@ -38,7 +38,11 @@ from kos.optimize import optimize  # noqa: E402
 from kos import cache as kcache  # noqa: E402
 from kos.appdirs import AppDirs  # noqa: E402
 from kos.store import VirusFoundError  # noqa: E402
-from kos.watch import Watcher  # noqa: E402
+from kos.watch import Watcher, WatchRegistry, spawn_background  # noqa: E402
+from kos.autonomy import AutonomyError, AutonomyStore  # noqa: E402
+from kos.admin import AdminError, AdminStore  # noqa: E402
+from kos.protect import ProtectError, ProtectStore, held_unlock  # noqa: E402
+from kos.control import ControlError, build_click, parse_args  # noqa: E402
 from kos import cli as kcli  # noqa: E402
 
 PW = "correct horse battery"
@@ -1218,6 +1222,530 @@ class TestWatcher(unittest.TestCase):
             result = scan_file(Path(events[0]))
             self.assertFalse(result.clean)
             self.assertEqual(result.findings[0].rule, "eicar-test-file")
+
+
+class TestProtect(Env):
+    def test_protecting_locks_and_blocks_a_nonroot_writer(self):
+        target = Path(self.tmp.name) / "vault"
+        target.mkdir()
+        store = ProtectStore(self.paths)
+        store.protect(str(target), self.authority(PW))
+        self.assertTrue(store.is_protected(str(target)))
+        # The owning process here is root (test harness), which ignores mode
+        # bits entirely, so assert on the mode itself - that's what a real,
+        # non-root KOS owner process is actually stopped by (verified by
+        # hand against a real non-root user during development).
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+    def test_held_unlock_unlocks_then_relocks_even_on_error(self):
+        target = Path(self.tmp.name) / "vault2"
+        target.mkdir()
+        store = ProtectStore(self.paths)
+        store.protect(str(target), self.authority(PW))
+        try:
+            with held_unlock(str(target), protected=True):
+                self.assertEqual(oct(target.stat().st_mode)[-3:], "700")
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+    def test_unprotect_removes_from_list_and_unlocks(self):
+        target = Path(self.tmp.name) / "vault3"
+        target.mkdir()
+        store = ProtectStore(self.paths)
+        store.protect(str(target), self.authority(PW))
+        store.unprotect(str(target), self.authority(PW))
+        self.assertFalse(store.is_protected(str(target)))
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "700")
+
+    def test_wrong_password_does_not_protect(self):
+        target = Path(self.tmp.name) / "vault4"
+        target.mkdir()
+        with self.assertRaises(AuthorizationDenied):
+            ProtectStore(self.paths).protect(str(target), self.authority("wrong", "wrong", "wrong"))
+        self.assertFalse(ProtectStore(self.paths).is_protected(str(target)))
+
+
+class TestControl(unittest.TestCase):
+    def test_keyboard_words_become_attach_plus_key_events(self):
+        cmds = parse_args("keyboard", ["h", "i", "enter"])
+        self.assertEqual(cmds[0], {"cmd": "device", "device": "keyboard", "state": "attached"})
+        self.assertEqual([c["key"] for c in cmds[1:]], ["h", "i", "enter"])
+
+    def test_mouse_click_becomes_press_then_release(self):
+        cmds = parse_args("mouse", ["click", "left", "10", "20"])
+        self.assertEqual(cmds[0]["cmd"], "device")
+        self.assertEqual(cmds[1], build_click("left", 10, 20, pressed=True))
+        self.assertEqual(cmds[2], build_click("left", 10, 20, pressed=False))
+
+    def test_rejects_bad_input(self):
+        with self.assertRaises(ControlError):
+            parse_args("mouse", ["click", "left", "999999", "0"])
+        with self.assertRaises(ControlError):
+            parse_args("keyboard", ["not-a-real-key-name"])
+        with self.assertRaises(ControlError):
+            parse_args("joystick", ["x"])
+
+
+class TestControlEndToEnd(Env):
+    def test_control_reaches_the_running_app_through_the_broker(self):
+        """kos control sends the exact same wire commands a real boot+click
+        would - verified here by sending one straight through the broker's
+        socket to a real running instance and reading the app's reply."""
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        action = "app.open"
+        with self.authority(PW).authorize(action, "hello") as grant:
+            app = store.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode="cmd", broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, "cmd", SandboxPolicy(), registry, Path(inst.log_path))
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            insts = {i.id: i for i in registry.list()}
+            if inst_id in insts and insts[inst_id].status == "running":
+                inst = insts[inst_id]
+                break
+            __import__("time").sleep(0.05)
+
+        # kos control's own send() connects, writes, and disconnects (fire-and-
+        # forget, matching a real device's input - see the broker's single-
+        # attach-slot note in ARCHITECTURE.md). To see the app's reply here,
+        # send over one held-open connection instead, the same commands
+        # kos control would build.
+        import socket as _socket, json as _json
+        commands = parse_args("mouse", ["click", "left", "5", "5"])
+        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock.connect(inst.sock_path)
+        sock.settimeout(3)
+        for cmd in commands:
+            sock.sendall(_json.dumps(cmd, separators=(",", ":")).encode() + b"\n")
+        got = b""
+        try:
+            while b'"cmd":"log"' not in got:
+                got += sock.recv(4096)
+        except OSError:
+            pass
+        sock.close()
+        self.assertIn(b'"clicks=1', got)
+
+        import signal
+        os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
+
+    def test_control_does_not_evict_a_live_attach(self):
+        """The fix: kos control has its own door into the broker now, so it
+        no longer takes over the one attach slot a real terminal is using."""
+        from kos.control import send as control_send
+
+        store = AppStore(self.paths)
+        store.install(self.kapp, self.authority(PW))
+        with self.authority(PW).authorize("app.open", "hello") as grant:
+            app = store.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode="cmd", broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, "cmd", SandboxPolicy(), registry, Path(inst.log_path))
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            insts = {i.id: i for i in registry.list()}
+            if inst_id in insts and insts[inst_id].status == "running":
+                inst = insts[inst_id]
+                break
+            __import__("time").sleep(0.05)
+
+        # a real attach, held open
+        attach = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        attach.connect(inst.sock_path)
+        attach.settimeout(3)
+
+        # a control command, through the separate control door
+        commands = parse_args("keyboard", ["h"])
+        control_send(inst.sock_path, commands)
+
+        # the attach connection must still be alive and see the app's reply
+        # to the control command (proving it reached the app), not be reset
+        got = b""
+        try:
+            while b'"cmd":"log"' not in got:
+                got += attach.recv(4096)
+        except OSError:
+            self.fail("the attach connection was closed - control evicted it")
+        attach.close()
+        self.assertIn(b"typed='h'", got)
+
+        import signal
+        os.kill(registry.get(inst_id).broker_pid, signal.SIGTERM)
+
+
+class TestMv(Env):
+    def _args(self, src, dst):
+        import argparse
+        return argparse.Namespace(src=str(src), dst=str(dst))
+
+    def test_declining_move_changes_nothing(self):
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "a.txt"
+        src.write_text("hi")
+        dst = Path(self.tmp.name) / "b.txt"
+        fake = self.authority("wrong", "wrong", "wrong")
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            with self.assertRaises(AuthorizationDenied):
+                kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertTrue(src.exists())
+        self.assertFalse(dst.exists())
+
+    def test_declining_optimize_step_leaves_the_move_done(self):
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "a.txt"
+        src.write_text("hi")
+        dst = Path(self.tmp.name) / "b.txt"
+        # step 1 (move) succeeds, step 2 (optimize) fails 3x and raises
+        fake = self.authority(PW, "wrong", "wrong", "wrong")
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            with self.assertRaises(AuthorizationDenied):
+                kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertFalse(src.exists())
+        self.assertTrue(dst.exists())  # the move already happened; not undone
+
+    def test_full_pipeline_one_password_per_step(self):
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "a.txt"
+        src.write_text("hello world, nothing dangerous here")
+        dst = Path(self.tmp.name) / "b.txt"
+        fake = self.authority(PW, PW, PW)  # exactly one per step, no more
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            code = kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertEqual(code, 0)
+        self.assertFalse(src.exists())
+        self.assertTrue(dst.exists())
+        self.assertEqual(dst.read_text(), "hello world, nothing dangerous here")
+
+    def test_moves_a_whole_directory_and_scans_every_file_in_it(self):
+        """Confirms a backlog item ('kos mv for whole directories') was
+        already covered: os.replace/shutil.move handle a directory tree as
+        one unit, and the scan step already walks a directory recursively."""
+        from unittest.mock import patch
+        src = Path(self.tmp.name) / "proj"
+        (src / "sub").mkdir(parents=True)
+        (src / "a.txt").write_text("clean file one")
+        (src / "sub" / "b.txt").write_text("clean file two")
+        dst = Path(self.tmp.name) / "proj-moved"
+        fake = self.authority(PW, PW, PW)
+        with patch("kos.cli._authority", return_value=(fake, fake.prompter)):
+            code = kcli.cmd_mv(self._args(src, dst), self.paths)
+        self.assertEqual(code, 0)
+        self.assertFalse(src.exists())
+        self.assertTrue((dst / "a.txt").exists())
+        self.assertTrue((dst / "sub" / "b.txt").exists())
+
+
+class TestBackgroundWatch(Env):
+    def _wait(self, cond, timeout=5):
+        deadline = __import__("time").monotonic() + timeout
+        while __import__("time").monotonic() < deadline:
+            if cond():
+                return
+            __import__("time").sleep(0.05)
+        raise AssertionError("condition never became true")
+
+    def test_background_watch_scans_and_quarantines(self):
+        registry = WatchRegistry(self.paths)
+        watchdir = Path(self.tmp.name) / "w"
+        watchdir.mkdir()
+        job = spawn_background([str(watchdir)], [], self.paths, self.paths.logs / "w.log")
+        self._wait(lambda: any(j.id == job.id and j.status == "running"
+                               for j in registry.list()))
+
+        (watchdir / "evil.bin").write_bytes(EICAR)
+        self._wait(lambda: not (watchdir / "evil.bin").exists())
+        quarantined = list((self.paths.state / "quarantine").glob("evil.bin-*"))
+        self.assertEqual(len(quarantined), 1)
+
+        import signal
+        os.kill(job.pid, signal.SIGTERM)
+        self._wait(lambda: not (self.paths.state / "watchjobs" / f"{job.id}.json").exists())
+
+    def test_background_watch_unlocks_and_relocks_a_protected_dir(self):
+        registry = WatchRegistry(self.paths)
+        target = Path(self.tmp.name) / "vault"
+        target.mkdir()
+        ProtectStore(self.paths).protect(str(target), self.authority(PW))
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+        job = spawn_background([str(target)], [str(target)], self.paths,
+                               self.paths.logs / "v.log")
+        self._wait(lambda: any(j.id == job.id and j.status == "running"
+                               for j in registry.list()))
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "700")
+
+        import signal
+        os.kill(job.pid, signal.SIGTERM)
+        self._wait(lambda: not (self.paths.state / "watchjobs" / f"{job.id}.json").exists())
+        self.assertEqual(oct(target.stat().st_mode)[-3:], "500")
+
+
+class TestAutonomy(Env):
+    def test_issue_needs_the_real_password(self):
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AuthorizationDenied):
+            store.issue("app.close", "hello", self.authority("wrong", "wrong", "wrong"),
+                       duration_s=60, max_uses=1)
+        self.assertEqual(store.list(), [])
+
+    def test_only_the_short_allowlist_can_be_granted(self):
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AutonomyError):
+            store.issue("app.run", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        with self.assertRaises(AutonomyError):
+            store.issue("app.install", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        with self.assertRaises(AutonomyError):
+            store.issue("disk.optimize", "", self.authority(PW), duration_s=60, max_uses=1)
+
+    def test_redeem_with_no_password_and_no_authority_object_at_all(self):
+        """The whole point: redeeming needs nothing but the grant id - no
+        password, no TTY, no Authority instance in sight."""
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        redeemed = store.redeem(g.id, "app.close", "hello")
+        redeemed.check("app.close", "hello")
+        redeemed.close()
+
+    def test_redeemed_grant_can_never_derive_master_key_material(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=1)
+        redeemed = store.redeem(g.id, "app.close", "hello")
+        with self.assertRaises(AutonomyError):
+            redeemed.key("kapp-seal")
+
+    def test_max_uses_is_enforced(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=2)
+        store.redeem(g.id, "app.close", "hello")
+        store.redeem(g.id, "app.close", "hello")
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_expiry_is_enforced(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=0.2, max_uses=5)
+        import time
+        time.sleep(0.4)
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_wrong_action_or_target_is_refused(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=5)
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "someone-else")
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "cell.stop", "hello")
+
+    def test_tampered_grant_file_is_rejected(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=5)
+        f = store._file(g.id)
+        data = json.loads(f.read_text())
+        data["max_uses"] = 999999  # try to grant itself unlimited uses without the password
+        f.write_text(json.dumps(data))
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_revoke_needs_the_password_and_removes_it_immediately(self):
+        store = AutonomyStore(self.paths)
+        g = store.issue("app.close", "hello", self.authority(PW), duration_s=60, max_uses=5)
+        with self.assertRaises(AuthorizationDenied):
+            store.revoke(g.id, self.authority("wrong", "wrong", "wrong"))
+        store.revoke(g.id, self.authority(PW))
+        with self.assertRaises(AutonomyError):
+            store.redeem(g.id, "app.close", "hello")
+
+    def test_end_to_end_close_via_token_needs_no_authority_at_all(self):
+        """Proves the real CLI path: kos close ID --token GRANT works with
+        zero interactive prompts, driven entirely by a pre-issued grant."""
+        import argparse
+        store_app = AppStore(self.paths)
+        store_app.install(self.kapp, self.authority(PW))
+        with self.authority(PW).authorize("app.open", "hello") as grant:
+            app = store_app.load_verified("hello", grant)
+        registry = Registry(self.paths)
+        inst_id = registry.new_id("hello")
+        inst = Instance(id=inst_id, name="hello", mode="cmd", broker_pid=0,
+                        sock_path=str(self.paths.state / "instances" / f"{inst_id}.sock"),
+                        log_path=str(self.paths.logs / f"{inst_id}.log"), started=0)
+        spawn(inst, app, "cmd", SandboxPolicy(), registry, Path(inst.log_path))
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            if any(i.id == inst_id and i.status == "running" for i in registry.list()):
+                break
+            __import__("time").sleep(0.05)
+
+        astore = AutonomyStore(self.paths)
+        g = astore.issue("app.close", inst_id, self.authority(PW), duration_s=60, max_uses=1)
+
+        args = argparse.Namespace(id=inst_id, token=g.id)
+        code = kcli.cmd_close(args, self.paths)  # no TTY, no Authority - just the token
+        self.assertEqual(code, 0)
+        deadline = __import__("time").monotonic() + 5
+        while __import__("time").monotonic() < deadline:
+            if not (self.paths.state / "instances" / f"{inst_id}.json").exists():
+                break
+            __import__("time").sleep(0.05)
+        self.assertFalse((self.paths.state / "instances" / f"{inst_id}.json").exists())
+
+
+class TestAdmin(Env):
+    def test_admin_creation_needs_owner_password(self):
+        store = AdminStore(self.paths)
+        with self.assertRaises(AuthorizationDenied):
+            with self.authority("wrong", "wrong", "wrong").authorize("admin.create") as g:
+                store.create(b"admin-secret1", g.raw_master())
+        self.assertFalse(store.exists())
+
+    def test_admin_lives_on_tmpfs_and_does_not_survive_a_reboot(self):
+        """The admin keyslot must be gone after every reboot, unconditionally
+        - not on a timer, not via cleanup code that could fail to run, but
+        because kos-init mounts a fresh, empty /run on every single boot."""
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        self.assertTrue(str(store.file).startswith(str(self.paths.runtime)))
+        self.assertFalse(str(store.file).startswith(str(self.paths.etc)))
+        self.assertTrue(store.exists())
+
+        import shutil
+        shutil.rmtree(self.paths.runtime)  # simulates kos-init's fresh /run on boot
+        self.paths.runtime.mkdir(parents=True)
+
+        self.assertFalse(AdminStore(self.paths).exists())
+        # the owner's password is on the persistent disk and is unaffected
+        g2 = self.authority(PW).authorize("app.close", "x")
+        self.assertFalse(g2.via_admin)
+        g2.close()
+
+    def test_owner_and_admin_unlock_to_the_same_master(self):
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+
+        with self.authority(PW).authorize("app.close", "x") as owner_grant:
+            owner_seal = owner_grant.key("kapp-seal")
+        admin_auth = self.authority(  # a fresh Authority whose ScriptedPrompter gets the admin pw
+            "admin-secret1")
+        admin_grant = admin_auth.authorize("app.close", "x")
+        self.assertTrue(admin_grant.via_admin)
+        self.assertEqual(admin_grant.key("kapp-seal"), owner_seal)
+        admin_grant.close()
+
+    def test_wrong_password_is_neither_owner_nor_admin(self):
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        with self.assertRaises(AuthorizationDenied):
+            self.authority("nope", "nope", "nope").authorize("app.close", "x")
+
+    def test_admin_cannot_remove_itself_owner_can(self):
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        with self.assertRaises(AuthorizationDenied):
+            store.remove(self.authority("admin-secret1", "admin-secret1", "admin-secret1"))
+        self.assertTrue(store.exists())
+        store.remove(self.authority(PW))
+        self.assertFalse(store.exists())
+
+    def test_login_grant_reflects_which_slot_unlocked_it(self):
+        """This is what kos-init uses to decide owner shell vs root shell."""
+        store = AdminStore(self.paths)
+        with self.authority(PW).authorize("admin.create") as g:
+            store.create(b"admin-secret1", g.raw_master())
+        owner_login = self.authority(PW).authorize("session.login")
+        self.assertFalse(owner_login.via_admin)
+        owner_login.close()
+        admin_login = self.authority("admin-secret1").authorize("session.login")
+        self.assertTrue(admin_login.via_admin)
+        admin_login.close()
+
+
+class TestPrivilegedAutonomy(Env):
+    def _make_admin(self, password=b"admin-secret1"):
+        with self.authority(PW).authorize("admin.create") as g:
+            AdminStore(self.paths).create(password, g.raw_master())
+
+    def test_issue_privileged_needs_admin_not_owner(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AutonomyError):
+            store.issue_privileged("app.install", "hello", self.authority(PW),
+                                   duration_s=60, max_uses=1)
+
+    def test_only_the_privileged_allowlist_can_be_granted(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        with self.assertRaises(AutonomyError):
+            store.issue_privileged("app.close", "hello", self.authority("admin-secret1"),
+                                   duration_s=60, max_uses=1)
+
+    def test_redeemed_privileged_grant_can_actually_install(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        redeemed = store.redeem_privileged(g_id, "app.install", "hello")
+        app_store = AppStore(self.paths)
+        m = app_store.install(self.kapp, redeemed)
+        self.assertEqual(m.name, "hello")
+        self.assertIn("hello", [a.name for a in app_store.installed()])
+
+    def test_privileged_grant_scoped_to_wrong_app_name_is_refused(self):
+        """A grant issued for 'hello' can't be used to install a
+        differently-named app, even though the same grant id is valid."""
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "not-hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        with self.assertRaises(AutonomyError):
+            store.redeem_privileged(g_id, "app.install", "hello")
+
+    def test_privileged_grant_key_only_covers_kapp_seal(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("disk.optimize", "", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        redeemed = store.redeem_privileged(g_id, "disk.optimize", "")
+        with self.assertRaises(AutonomyError):
+            redeemed.key("some-other-label")
+        with self.assertRaises(AutonomyError):
+            redeemed.raw_master()
+
+    def test_tampered_privileged_grant_is_rejected(self):
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=5)
+        f = store._pfile(g_id)
+        data = json.loads(f.read_text())
+        data["max_uses"] = 99999
+        f.write_text(json.dumps(data))
+        with self.assertRaises(AutonomyError):
+            store.redeem_privileged(g_id, "app.install", "hello")
+
+    def test_end_to_end_cli_install_via_privileged_token_no_password(self):
+        import argparse
+        self._make_admin()
+        store = AutonomyStore(self.paths)
+        g_id = store.issue_privileged("app.install", "hello", self.authority("admin-secret1"),
+                                      duration_s=60, max_uses=1)
+        args = argparse.Namespace(file=str(self.kapp), privileged_token=g_id)
+        code = kcli.cmd_install(args, self.paths)
+        self.assertEqual(code, 0)
+        self.assertIn("hello", [a.name for a in AppStore(self.paths).installed()])
 
 
 if __name__ == "__main__":

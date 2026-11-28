@@ -65,7 +65,17 @@ ACTIONS: dict[str, str] = {
     "app.update.all": "update all apps",
     "app.install.all": "install the OS's own apps",
     "scan.watch": "start virus scan watcher",
+    "scan.protect": "lock directory until scanner runs",
+    "scan.unprotect": "unlock directory permanently",
+    "device.control": "send a command to a booted device",
+    "fs.move": "move or rename a file",
+    "fs.verify": "scan a file after changing it",
     "disk.optimize": "optimize disk space",
+    "autonomy.grant": "issue a temporary autonomous permission",
+    "autonomy.revoke": "revoke an autonomous permission",
+    "autonomy.grant.privileged": "issue a PRIVILEGED autonomous permission",
+    "admin.create": "create an admin account",
+    "admin.remove": "remove the admin account",
     "cell.start": "start kernel cell",
     "cell.stop": "stop kernel cell",
     "file.write": "write file",
@@ -550,12 +560,14 @@ class AuditLog:
 
 
 class Grant:
-    """Proof that the owner typed the password for one specific action."""
+    """Proof that a valid password (the owner's, or an admin's - see
+    ``via_admin``) was typed for one specific action."""
 
-    def __init__(self, action: str, target: str, master: SecretBytes):
+    def __init__(self, action: str, target: str, master: SecretBytes, via_admin: bool = False):
         self.action = action
         self.target = target
         self._master = master
+        self.via_admin = via_admin
 
     def check(self, action: str, target: str) -> None:
         if not self._master:
@@ -569,6 +581,15 @@ class Grant:
             raise AuthorizationDenied("grant already closed")
         return subkey(self._master, label)
 
+    def raw_master(self) -> bytes:
+        """A copy of the actual master key, not a derived subkey. Narrowly
+        needed for admin-slot wrapping (the new slot has to unlock to the
+        exact same master everything else already derives from) - not
+        meaningfully more powerful than ``key()`` already is, since that
+        can derive an HMAC of the master under any label you choose."""
+        if not self._master:
+            raise AuthorizationDenied("grant already closed")
+        return bytes(self._master.raw)
     def chip_master(self, chip_secret: bytes) -> SecretBytes:
         """The master key this grant's password gives once a chip secret is mixed in (kos/chip.py).
         Only meaningful while no chip is enrolled: the master is then the plain scrypt key."""
@@ -603,6 +624,11 @@ class Authority:
             self._throttle = Throttle(self.paths, base=self.store.throttle_base())
         return self._throttle
 
+    # Actions only the owner's own password can authorize, even if an admin
+    # slot exists - an admin cannot use their own password to erase the
+    # record of their own elevation, or to remove the owner's password.
+    OWNER_ONLY = frozenset({"admin.remove", "auth.change"})
+
     def authorize(self, action: str, target: str = "") -> Grant:
         if action not in ACTIONS:
             raise AuthorizationDenied(f"unknown action {action!r}")
@@ -616,8 +642,16 @@ class Authority:
                 self.audit.record(action, target, "cancelled")
                 raise AuthorizationDenied("cancelled")
             master = self.store.verify(password)
+            via_admin = False
+            if master is None and action not in self.OWNER_ONLY:
+                from .admin import AdminStore
+                admin_master = AdminStore(self.paths).unlock(password)
+                if admin_master is not None:
+                    master, via_admin = admin_master, True
             if master is not None:
                 self.throttle.success()
+                self.audit.record(action, target, "granted-admin" if via_admin else "granted")
+                return Grant(action, target, master, via_admin=via_admin)
                 self.audit.record(action, target, "granted", key=subkey(master, AUDIT_KEY_LABEL))
                 return Grant(action, target, master)
             self.throttle.fail()
