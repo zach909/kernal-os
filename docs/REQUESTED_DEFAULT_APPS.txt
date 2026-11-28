@@ -1,0 +1,67 @@
+ANDROID Phone Messages Contacts Camera Photos Google Chrome Google Play
+Store Gmail Google Maps Google Drive Google Calendar Google Meet Google
+TV YouTube YouTube Music Google Wallet Google Home Google News Google
+Keep Google Files Google Clock Calculator Recorder Settings Files Safety
+Device Health Services Google Assistant / Gemini
+
+IPHONE (iOS) Phone Messages FaceTime Contacts App Store Safari Camera
+Photos Mail Calendar Reminders Notes Maps Weather Clock Calculator Voice
+Memos Podcasts Music Apple TV Books News Stocks Wallet Health Fitness
+Home Find My Settings Files Shortcuts Translate Measure Compass Tips
+Journal Freeform Passwords Siri Magnifier
+
+MAC (macOS) Finder Safari Mail Messages FaceTime Contacts Calendar
+Reminders Notes Maps Photos Preview QuickTime Player Music Apple TV
+Podcasts Books News Stocks Weather Calculator Clock Voice Memos TextEdit
+Terminal Activity Monitor Disk Utility System Information Console
+Keychain Access Screenshot Shortcuts Automator Script Editor Font Book
+Migration Assistant Time Machine Photo Booth Freeform Home Find My App
+Store System Settings Passwords Siri
+
+WINDOWS 11 File Explorer Microsoft Edge Microsoft Store Settings Windows
+Security Windows Terminal Command Prompt PowerShell Notepad Paint Photos
+Snipping Tool Calculator Clock Calendar Media Player Camera Sound
+Recorder Maps (availability varies) Phone Link Quick Assist Remote
+Desktop Windows Backup OneDrive Microsoft 365 Outlook Microsoft Teams
+Xbox Game Bar Feedback Hub Get Help Tips Character Map Task Manager
+Resource Monitor Disk Management System Configuration
+
+LINUX (UBUNTU-STYLE DESKTOP) Files Firefox App Center Settings Terminal
+Text Editor Calculator Calendar Clocks Camera Image Viewer Document
+Viewer System Monitor Disk Usage Analyzer Disks Archive Manager
+Passwords and Keys Software Updater Firmware Updater Help Logs Fonts
+Characters Screenshot Additional Drivers Language Support Startup
+Applications Power Statistics
+
+OPTIONAL LINUX APPLICATIONS Thunderbird LibreOffice Writer LibreOffice
+Calc LibreOffice Impress LibreOffice Draw LibreOffice Math Rhythmbox
+Videos Document Scanner Remmina Shotwell Backups Transmission
+
+APPLE VISION PRO (visionOS / iVR) App Store Encounter Dinosaurs Files
+Freeform Keynote Mail Messages Mindfulness Music Notes Photos Safari
+Settings Tips TV Books Calendar Home Maps News Podcasts Reminders
+Shortcuts Stocks Voice Memos
+
+GOOGLE VR (HISTORICAL DAYDREAM / CARDBOARD ECOSYSTEM) VR Home VR Browser
+VR Store VR Cinema VR Photos VR Videos VR Games VR Experiences VR
+YouTube VR Street View VR Settings VR Controller Setup VR Tutorial
+
+GOOGLE GLASS Camera Photo Capture Video Capture Voice Commands
+Notifications Messaging Phone Calls Navigation Maps Calendar Contacts
+Video Calling Translation Search Settings Device Setup Wi-Fi Setup
+Bluetooth Setup Display Controls
+
+APPLE SMART GLASSES CONCEPT (iGLASSES - PROPOSED, NOT AN OFFICIAL
+PRODUCT) Camera Photos Video Messages Phone FaceTime Contacts Calendar
+Reminders Maps Navigation Weather Clock Notifications Siri Voice
+Assistant Music Podcasts Translate Search Visual Search Object
+Recognition Text Recognition Live Captions Directions Settings Device
+Pairing Battery Display Controls Privacy Controls
+
+NOTES App availability varies by device model, operating-system version,
+manufacturer, region, and installation choices. Google Daydream is
+discontinued; its section describes historical VR application
+categories, not a current default installation. Google Glass is a
+historical platform; its section describes software capabilities and app
+categories. Apple has not released an official product called iGlasses;
+that section is a proposed smart-glasses app collection.

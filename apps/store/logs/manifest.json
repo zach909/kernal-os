@@ -1,0 +1,11 @@
+{
+  "name": "store.logs",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Read system logs (Console, Logs)."
+}

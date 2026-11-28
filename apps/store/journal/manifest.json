@@ -1,0 +1,13 @@
+{
+  "name": "store.journal",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "description": "Dated diary entries: each is stamped with today's UTC date. Plain text, no photos, places, prompts or reminders."
+}

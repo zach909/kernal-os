@@ -1,0 +1,11 @@
+{
+  "name": "store.cloud-drive",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Files kept online (Google Drive, OneDrive)."
+}

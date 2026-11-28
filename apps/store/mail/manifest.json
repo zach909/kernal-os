@@ -1,0 +1,11 @@
+{
+  "name": "store.mail",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Read and write email (Mail, Gmail, Outlook and Thunderbird are one function)."
+}

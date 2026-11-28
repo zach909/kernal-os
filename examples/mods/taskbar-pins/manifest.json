@@ -1,0 +1,12 @@
+{
+  "name": "taskbar-pins",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "kind": "mod",
+  "extends": "taskbar",
+  "description": "Mod for the taskbar: pins two apps and recolors the bar"
+}

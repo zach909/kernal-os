@@ -1,0 +1,13 @@
+{
+  "name": "store.contacts",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "description": "Name, phone and email records kept in the app's own storage. Local only: no sync, groups, photos or merging. Not shared with other apps (no shared folder)."
+}

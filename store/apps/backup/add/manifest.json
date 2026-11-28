@@ -1,0 +1,9 @@
+{
+  "name": "backup.add",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["ask:backup_add"],
+  "description": "Backs up one file or folder (scanned first). It can only ask to add."
+}

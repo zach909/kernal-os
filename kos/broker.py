@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import cache, loader
 from .kapp import KApp
@@ -40,6 +40,15 @@ from .registry import Instance, Registry
 from .sandbox import SandboxPolicy
 
 MAX_APP_READ = 1 << 16
+FALLBACK_POLL = 1.0   # only used on kernels without pidfd_open (< 5.3)
+
+
+def _pidfd(pid: int) -> Optional[int]:
+    """A descriptor that becomes readable the moment ``pid`` exits, or None."""
+    try:
+        return os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        return None
 
 
 def control_sock_path(sock_path: str) -> str:
@@ -63,7 +72,9 @@ def daemonize(log_path: Path) -> None:
 
 class Broker:
     def __init__(self, inst: Instance, registry: Registry, app_channel: socket.socket,
-                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None):
+                 app_proc: subprocess.Popen, cache_dir: Optional[Path] = None,
+                 on_exit: Optional[Callable[[], None]] = None):
+        self.on_exit = on_exit
         self.inst = inst
         self.registry = registry
         self.app_channel = app_channel
@@ -86,9 +97,35 @@ class Broker:
         os.chmod(path, 0o600)
         s.listen(4)
         return s
+        self.listener.bind(inst.sock_path)
+        os.chmod(inst.sock_path, 0o600)
+        self.listener.listen(1)
+        self.attached: Optional[socket.socket] = None
+        self._stop = False
+        # Everything the broker waits for is a file descriptor, so an idle broker
+        # sleeps in select() with no timeout and wakes zero times per second:
+        # the app exiting (pidfd) and SIGTERM (a pipe the signal handler writes to).
+        self._pidfd = _pidfd(app_proc.pid)
+        self._wake_r, self._wake_w = os.pipe()
+        os.set_blocking(self._wake_r, False)
+        os.set_blocking(self._wake_w, False)
 
     def _handle_sigterm(self, signum, frame) -> None:
         self._stop = True
+
+    def _drain_wake(self) -> None:
+        try:
+            while os.read(self._wake_r, 64):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+
+    def _wait_exit(self, seconds: float) -> None:
+        """Give the app up to ``seconds`` to leave on its own; return as soon as it has."""
+        if self._pidfd is not None:
+            select.select([self._pidfd], [], [], seconds)
+        else:
+            time.sleep(seconds)
 
     def _pump_app(self) -> bool:
         """Read whatever the app sent. Returns False if the app is gone."""
@@ -114,6 +151,7 @@ class Broker:
         if not data:
             self.attached.close()
             self.attached = None
+            self._mark_attached(False)
             return
         try:
             self.app_channel.sendall(data)
@@ -128,6 +166,18 @@ class Broker:
             except OSError:
                 pass
         self.attached = conn
+        self._mark_attached(True)
+
+    def _mark_attached(self, yes: bool) -> None:
+        """Say in the registry whether someone is looking at this app, so a refresh never swaps it out
+        from under them (kos/norestart.py). Bookkeeping only: a failed write must not stop the instance."""
+        if self.inst.attached == yes:
+            return
+        self.inst.attached = yes
+        try:
+            self.registry.write(self.inst)
+        except OSError as e:
+            print(f"kos-broker: could not record attach state: {e!r}", file=sys.stderr)
 
     def _accept_control(self) -> None:
         conn, _ = self.control_listener.accept()
@@ -158,10 +208,15 @@ class Broker:
     def run(self) -> None:
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, signal.SIG_IGN)  # only `kos close` stops a broker
+        # A handler alone only sets a flag - select() is restarted after it - so also
+        # have the signal poke the pipe: select() returns at once, with no race
+        # between "check the flag" and "go to sleep".
+        signal.set_wakeup_fd(self._wake_w, warn_on_full_buffer=False)
         self.inst.app_pid = self.app_proc.pid
         self.inst.status = "running"
         self.registry.write(self.inst)
         app_alive = True
+        timeout = None if self._pidfd is not None else FALLBACK_POLL
         try:
             while not self._stop:
                 if self.app_proc.poll() is not None:
@@ -169,10 +224,20 @@ class Broker:
                 fds = ([self.listener, self.control_listener, self.app_channel]
                       + ([self.attached] if self.attached else [])
                       + list(self._control_pending))
+                fds = [self.listener, self.app_channel, self._wake_r]
+                if self._pidfd is not None:
+                    fds.append(self._pidfd)
+                if self.attached:
+                    fds.append(self.attached)
                 try:
-                    r, _, _ = select.select(fds, [], [], 1.0)
+                    r, _, _ = select.select(fds, [], [], timeout)
                 except InterruptedError:
                     continue
+                if self._wake_r in r:
+                    self._drain_wake()
+                    continue            # the loop condition looks at _stop
+                if self._pidfd is not None and self._pidfd in r:
+                    break               # the app exited
                 if self.listener in r:
                     self._accept()
                 if self.control_listener in r:
@@ -194,7 +259,11 @@ class Broker:
                 self.app_channel.sendall(b'{"cmd":"quit"}\n')
             except OSError:
                 pass
-            time.sleep(0.3)
+            self._wait_exit(0.3)
+            # up to 0.3s for a clean exit, but stop waiting the moment it happens
+            end = time.monotonic() + 0.3
+            while self.app_proc.poll() is None and time.monotonic() < end:
+                time.sleep(0.01)
         if self.app_proc.poll() is None:
             try:
                 os.killpg(self.app_proc.pid, signal.SIGTERM)
@@ -219,8 +288,27 @@ class Broker:
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+        try:
+            signal.set_wakeup_fd(-1)
+        except (ValueError, OSError):
+            pass
+        for fd in (self._pidfd, self._wake_r, self._wake_w):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        try:
+            os.unlink(self.inst.sock_path)
+        except FileNotFoundError:
+            pass
         if self.cache_dir is not None:
             cache.wipe(self.cache_dir)
+        if self.on_exit is not None:
+            try:
+                self.on_exit()
+            except Exception as e:      # never let bookkeeping stop the instance from being removed
+                print(f"kos-broker: on_exit: {e!r}", file=sys.stderr)
         self.registry.remove(self.inst.id)
 
 
@@ -242,9 +330,10 @@ def spawn(inst: Instance, app: KApp, mode: str, policy: SandboxPolicy,
     try:
         inst.broker_pid = os.getpid()
         daemonize(log_path)
-        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir), policy, log_path)
+        proc = loader.launch(loader.plan(app, b.fileno(), mode, cache_dir, inst.address),
+                             policy, log_path)
         b.close()
-        Broker(inst, registry, a, proc, cache_dir).run()
+        Broker(inst, registry, a, proc, cache_dir, on_exit=policy.on_exit).run()
     except BaseException as e:  # pragma: no cover - last-resort broker crash path
         try:
             print(f"kos-broker: {e!r}", file=sys.stderr)

@@ -25,10 +25,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .kapp import KApp
+from .address import check_launch
+from .kapp import KApp, wire_mode
 from .sandbox import SandboxPolicy
 
 SDK_DIR = str(Path(__file__).resolve().parent.parent)
+
+# memfd sealing constants. Linux kernel ABI (include/uapi/linux/fcntl.h), stable
+# forever; Python's ``fcntl`` only exports them on some versions, and without
+# them every app launch used to crash before the sandbox even started.
+F_ADD_SEALS = getattr(fcntl, "F_ADD_SEALS", 1024 + 9)
+F_GET_SEALS = getattr(fcntl, "F_GET_SEALS", 1024 + 10)
+F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW, F_SEAL_WRITE = 0x1, 0x2, 0x4, 0x8
+ALL_SEALS = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE
 
 _BOOTSTRAP = r"""
 import sys, importlib
@@ -47,8 +56,10 @@ def sealed_memfd(label: str, data: bytes) -> int:
         while view:
             n = os.write(fd, view)
             view = view[n:]
-        fcntl.fcntl(fd, fcntl.F_ADD_SEALS,
-                    fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, F_ADD_SEALS, ALL_SEALS)
+        # Fail closed: never hand out a memfd the kernel did not actually seal.
+        if fcntl.fcntl(fd, F_GET_SEALS) & ALL_SEALS != ALL_SEALS:
+            raise OSError("memfd sealing did not take effect")
         os.lseek(fd, 0, os.SEEK_SET)
     except BaseException:
         os.close(fd)
@@ -73,20 +84,24 @@ class LaunchPlan:
         self.owned_fds.clear()
 
 
-def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None) -> LaunchPlan:
+def plan(app: KApp, channel_fd: int, mode: str, cache_dir: Optional[Path] = None,
+         address: str = "") -> LaunchPlan:
     m = app.manifest
+    check_launch(address)        # defence in depth: callers already checked it
     kapp_fd = sealed_memfd(m.name, app.data)
     owned = [kapp_fd]
     env = {
         "KOS_CHANNEL_FD": str(channel_fd),
         "KOS_KAPP_FD": str(kapp_fd),
         "KOS_APP": m.name,
-        "KOS_MODE": mode,
+        "KOS_MODE": wire_mode(mode),
         "LANG": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
     }
     if cache_dir is not None:
         env["KOS_CACHE_DIR"] = str(cache_dir)
+    if address:
+        env["KOS_ADDRESS"] = address       # path+query of the kos:// address; data for the app
     if m.runtime == "python":
         exe = os.path.realpath(sys.executable)
         argv = [exe, "-I", "-S", "-B", "-c", _BOOTSTRAP,

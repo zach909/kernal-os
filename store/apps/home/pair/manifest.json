@@ -1,0 +1,9 @@
+{
+  "name": "home.pair",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["uses:home"],
+  "description": "Adds one smart home device (name, room, kind) to the 'home' shared folder. It cannot control or remove devices."
+}

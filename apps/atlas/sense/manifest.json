@@ -1,0 +1,14 @@
+{
+  "name": "atlas.sense",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "uses:atlas",
+    "service:sensor"
+  ],
+  "description": "Reads every plugged-in sensor once (smell, heat, humidity, pressure, light) and writes the readings to the 'atlas' folder."
+}

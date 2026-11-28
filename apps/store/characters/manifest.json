@@ -1,0 +1,11 @@
+{
+  "name": "store.characters",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Browse Unicode by code point with names (Character Map, Characters and the character viewer are one function). Browse only: it cannot paste into another app. Names come from Python's Unicode database."
+}

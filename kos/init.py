@@ -4,9 +4,12 @@ unlocked the encrypted disk and switched to it).
 What it does, in order:
   1. Mount the kernel pseudo-filesystems with restrictive options.
   2. Apply kernel hardening sysctls.
-  3. Ask for the password again (second gate). First boot: choose one.
-  4. Start the owner's shell, as an unprivileged user, on the console.
-  5. When the shell exits, lock: back to the password prompt.
+  3. Firmware gate: if a management processor (Intel ME, AMD PSP, a BMC) is
+     running below the OS and is not provably off, say so and refuse to go on
+     (kos/firmware.py; the pre-boot environment already refused once).
+  4. Ask for the password again (second gate). First boot: choose one.
+  5. Start the owner's shell, as an unprivileged user, on the console.
+  6. When the shell exits, lock: back to the password prompt.
 
 What it deliberately does NOT do: start any service, daemon, network, timer or
 anything else on its own. There is no autostart list to edit, because there is
@@ -20,15 +23,21 @@ import ctypes
 import fcntl
 import grp
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import termios
 import time
 
-from .auth import AuthError, Authority, AuthorizationDenied, PasswordStore
+from pathlib import Path
+
+from . import firmware
+from .admin import AdminKeyboard, requirements
+from .auth import AuditLog, AuthError, Authority, AuthorizationDenied, PasswordStore
 from .paths import Paths
 from .prompt import TTYPrompter
+from .requires import Ledger, Unsatisfied
 
 _libc = ctypes.CDLL(None, use_errno=True)
 MS_NOSUID, MS_NODEV, MS_NOEXEC = 2, 4, 8
@@ -110,6 +119,20 @@ def start_shell(console: str, as_root: bool = False) -> int:
     user = "root" if as_root else "owner"
     env = {"HOME": "/root" if as_root else "/home/owner", "USER": user,
            "TERM": os.environ.get("TERM", "linux"),
+# After login every line is a command (see kos/lang.py), not a program for /bin/sh.
+DEFAULT_SHELL = "/opt/kos/bin/kos line"
+
+
+def shell_argv() -> list[str]:
+    argv = shlex.split(os.environ.get("KOS_SHELL", DEFAULT_SHELL))
+    # only a POSIX shell wants -l; the line shell takes its own flags
+    if os.path.basename(argv[0]) in ("sh", "ash", "bash", "dash"):
+        argv.append("-l")
+    return argv
+
+
+def start_shell(console: str) -> int:
+    env = {"HOME": "/home/owner", "USER": "owner", "TERM": os.environ.get("TERM", "linux"),
            "PATH": "/opt/kos/bin:/usr/local/bin:/usr/bin:/bin", "KOS_ROOT": "/",
            "LANG": "C.UTF-8"}
     groups = _owner_groups()
@@ -126,7 +149,7 @@ def start_shell(console: str, as_root: bool = False) -> int:
             os.setresuid(OWNER_UID, OWNER_UID, OWNER_UID)
         # as_root: already uid 0 (kos-init is PID 1); nothing to drop.
 
-    proc = subprocess.Popen([shell, "-l"], env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
+    proc = subprocess.Popen(shell_argv(), env=env, cwd=env["HOME"] if os.path.isdir(env["HOME"])
                             else "/", preexec_fn=child_setup, close_fds=True)
     # PID 1 must reap every orphan, not just the shell.
     while True:
@@ -138,6 +161,59 @@ def start_shell(console: str, as_root: bool = False) -> int:
             return os.waitstatus_to_exitcode(status)
 
 
+def firmware_gate(paths: Paths, prompter, root: Path = Path("/")) -> firmware.Verdict:
+    """Look for management processors, alert, cut the OS's side of them, and
+    refuse to continue if any is still running (policy ``enforce``)."""
+    verdict = firmware.enforce(root)
+    audit = AuditLog(paths)
+    for f in verdict.findings:
+        audit.record("firmware.gate", f.where, f"{f.kind}:{f.state}")
+    if verdict.findings or verdict.caveat:
+        prompter.info("\nKOS firmware check:\n  " + "\n  ".join(verdict.lines()))
+    if verdict.ok:
+        return verdict
+    audit.record("firmware.gate", "", "refused-to-boot")
+    prompter.info("\nThe OS does not have complete control of this machine, so it will not boot.\n"
+                  "A management processor is running below it and could not be switched off from\n"
+                  "here. Disable it in the firmware (BIOS switch, me_cleaner/HAP, coreboot), or\n"
+                  "build the image with kos.firmware=warn to boot anyway. Power the machine off.")
+    if os.getpid() != 1:
+        raise SystemExit(70)
+    while True:           # PID 1 must not exit; there is no shell to fall back to
+        time.sleep(3600)
+
+
+def kernel_gate(paths: Paths, prompter, k=None) -> bool:
+    """Claim the KOS kernel for the core (kos/kernel.py). Returns True if the core is claimed.
+
+    On a boot that requires the KOS kernel (``kos.require_kernel=1`` on the signed command line)
+    a stock kernel, or a refused claim, stops the boot: apps would run without the firewall."""
+    from . import kernel
+    k = k or kernel.default()
+    audit = AuditLog(paths)
+    problem = ""
+    if not k.present():
+        problem = "this is not the KOS kernel (no KOS security module)"
+    else:
+        try:
+            k.claim_core()
+            audit.record("kernel.core", "", "claimed")
+            return True
+        except kernel.KernelError as e:
+            problem = str(e)
+    audit.record("kernel.core", "", f"not-claimed: {problem}")
+    if not k.required():
+        prompter.info(f"\nKOS kernel: {problem}. Apps run in the sandbox only: no firewall, "
+                      "no device gate. (Boot with kos.require_kernel=1 to refuse this.)")
+        return False
+    prompter.info(f"\nKOS kernel: {problem}.\nThis boot requires it, so KOS will not start. "
+                  "Power the machine off.")
+    if os.getpid() != 1:
+        raise SystemExit(71)
+    while True:
+        time.sleep(3600)
+
+
 def login_loop(paths: Paths, console: str) -> None:
     prompter = TTYPrompter(console)
     store = PasswordStore(paths)
@@ -146,15 +222,31 @@ def login_loop(paths: Paths, console: str) -> None:
         from .cli import _new_password
         store.create(_new_password(prompter)).wipe()
     authority = Authority(paths, prompter)
+    keyboard = AdminKeyboard(paths)
     while True:
+        keyboard.shutdown()  # nothing elevated survives a lock (or a crash and restart)
         prompter.info(BANNER)
         try:
             grant = authority.authorize("session.login")
+            # The one password typed here asks to unlock. Unlocking *requires*
+            # the elevated administrator keyboard, which requires the kernel
+            # (kos/requires.py): the chain is satisfied, deepest first, with
+            # this same password - no second prompt - or the computer stays locked.
+            with authority.authorize("session.login") as grant:
+                brought_up = requirements(
+                    keyboard, grant, firmware=lambda: firmware.probe().reason()).ensure("session.unlock")
+            if "admin.keyboard" in brought_up:
+                prompter.info("Administrator keyboard booted.")
         except AuthorizationDenied:
             prompter.info("Locked.")
             time.sleep(2)
             continue
-        except AuthError as e:
+        except Unsatisfied as e:
+            keyboard.shutdown()
+            prompter.info(f"Locked - cannot unlock: {e}")
+            time.sleep(5)
+            continue
+        except (AuthError, OSError) as e:
             prompter.info(f"auth error: {e}")
             time.sleep(5)
             continue
@@ -165,6 +257,13 @@ def login_loop(paths: Paths, console: str) -> None:
         else:
             prompter.info("Unlocked. Type 'run APP' or 'run graphical APP'. Exit the shell to lock.\n")
         start_shell(console, as_root=as_root)
+        owed = Ledger(paths).owed()
+        if owed:
+            prompter.info(f"{len(owed)} earlier write(s) still owe a scan/optimize: type 'settle'.")
+        prompter.info("Unlocked. Every line you type is a command - say what you want "
+                      "('help' lists them). 'exit' locks.\n")
+        start_shell(console)
+        keyboard.shutdown()
         prompter.info("\nSession ended - locked.")
 
 
@@ -176,6 +275,8 @@ def main() -> None:
         harden()
     console = os.environ.get("KOS_CONSOLE", "/dev/console")
     paths = Paths.from_env()
+    firmware_gate(paths, TTYPrompter(console))
+    kernel_gate(paths, TTYPrompter(console))
     while True:
         try:
             login_loop(paths, console)

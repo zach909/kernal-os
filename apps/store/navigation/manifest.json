@@ -1,0 +1,11 @@
+{
+  "name": "store.navigation",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Turn-by-turn guidance while you move. Needs location sensors and a map source."
+}

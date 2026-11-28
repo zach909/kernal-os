@@ -1,0 +1,9 @@
+{
+  "name": "kernel",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui"],
+  "permissions": ["ask:kernel"],
+  "description": "The kernel as an app: what Linux protects (Landlock, namespaces, seccomp, KVM cells) and the administrator keyboard. Read-only."
+}

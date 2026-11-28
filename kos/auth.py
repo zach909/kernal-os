@@ -27,6 +27,8 @@ perform the action call ``grant.check(action, target)`` so a grant for
 from __future__ import annotations
 
 import base64
+import contextlib
+import fcntl
 import hashlib
 import hmac
 import json
@@ -44,6 +46,7 @@ ACTIONS: dict[str, str] = {
     "session.login": "log in",
     "auth.change": "change password",
     "app.install": "install app",
+    "app.pack": "pack an app folder into a .kapp",
     "app.update": "update app",
     "app.remove": "remove app",
     "file.view": "view file",
@@ -57,7 +60,10 @@ ACTIONS: dict[str, str] = {
     "app.close": "close app",
     "app.permit": "give app permission to run",
     "app.revoke": "revoke app's permission to run",
+    "space.grant": "give an app access to a shared folder",
+    "space.revoke": "take an app's access to a shared folder away",
     "app.update.all": "update all apps",
+    "app.install.all": "install the OS's own apps",
     "scan.watch": "start virus scan watcher",
     "scan.protect": "lock directory until scanner runs",
     "scan.unprotect": "unlock directory permanently",
@@ -72,6 +78,76 @@ ACTIONS: dict[str, str] = {
     "admin.remove": "remove the admin account",
     "cell.start": "start kernel cell",
     "cell.stop": "stop kernel cell",
+    "file.write": "write file",
+    "code.run": "run code",
+    "runtime.add": "add a programming language to run code in",
+    "runtime.remove": "remove a programming language you added",
+    "admin.boot": "boot the administrator keyboard",
+    "backup.add": "back up",
+    "backup.list": "list backups",
+    "backup.remove": "remove backup",
+    "backup.restore": "restore backup",
+    "applink.add": "back up an app as a download address",
+    "applink.list": "list app download addresses",
+    "applink.remove": "forget an app download address",
+    "applink.fetch": "download a linked app",
+    "folders.create": "create the standard data folders",
+    "app.convert": "convert a Debian package into an app",
+    "skill.make": "make agent skills from the installed apps and commands",
+    "audit.verify": "check the authorization log for tampering",
+    "app.extend": "switch on an extension for an app",
+    "app.mod": "let a mod modify a system app",
+    "app.unextend": "switch off an extension or mod",
+    # what the system apps ask for (kos/services.py): each shows or changes private state
+    "audit.read": "view the authorization log",
+    "activity.read": "view recent activity",
+    "security.check": "run the security check",
+    "system.read": "read system information",
+    "firewall.read": "view the firewall",
+    "firewall.change": "change the firewall",
+    "cell.list": "list kernel cells",
+    "app.list": "list installed apps and their permissions",
+    "space.list": "list who may use which shared folder",
+    "ai.ask": "send text to the AI",
+    "ai.config": "set up or look at the AI connection",
+    "state.view": "look at what is installed, open or logged",
+    "hardware.scan": "look at every piece of hardware and record it in the permission store",
+    "firmware.flash": "rewrite a chip's firmware with a KOS firmware image",
+    "chip.enroll": "tie this computer's password to its security chip (TPM)",
+    "chip.remove": "stop using the security chip (TPM) with the password",
+    "chip.recover": "recover the password's security chip secret with the recovery key",
+    "overlay.order": "set the load order of mod file layers",
+    "overlay.view": "look at the merged mod file layers",
+    "compute.list": "look at the compute devices",
+    "compute.choose": "choose a device for a task",
+    # linked devices, sync, migration and the agent runner (kos/linkdev.py, syncer.py, migrate.py, agentrun.py)
+    "link.add": "link another device to this one",
+    "link.remove": "unlink a device",
+    "link.list": "look at the linked devices",
+    "link.scope": "pause or resume a linked device",
+    "link.identity": "create or unlock this device's identity",
+    "link.connect": "connect to a linked device",
+    "link.listen": "let a linked device connect to this one",
+    "sync.read": "look at what is synced with a linked device",
+    "sync.run": "sync a shared folder with a linked device",
+    "sync.apply": "change files here to match a linked device",
+    "migrate.export": "pack everything you have into a migration bundle",
+    "migrate.import": "unpack a migration bundle onto this computer",
+    "agent.run": "run a local AI agent",
+    "agent.tool": "let a local AI agent use a tool",
+    # senses and the zip runner (kos/camera.py, kos/sensors.py, kos/filewalk.py, kos/ziprun.py)
+    "camera.list": "look at which cameras are plugged in",
+    "camera.capture": "take pictures with a camera",
+    "sensor.list": "look at which sensors are plugged in",
+    "sensor.read": "read a sensor",
+    "sensor.sweep": "read every sensor",
+    "clock.read": "read the clock",
+    "zip.run": "run the program in a zip file",
+    # no reboot (kos/norestart.py): swap out-of-date apps for new files without restarting the machine
+    "norestart.read": "see which apps are out of date and whether a reboot is really needed",
+    "norestart.refresh": "swap out-of-date apps for their new files now",
+    "norestart.auto": "let the OS swap out-of-date apps by itself while this computer is unlocked",
+    "norestart.stop": "stop the OS swapping out-of-date apps by itself",
 }
 
 
@@ -114,15 +190,22 @@ class KdfParams:
         return params
 
 
-def derive_master(password: bytes, params: KdfParams) -> SecretBytes:
+def derive_master(password: bytes, params: KdfParams, chip_secret: Optional[bytes] = None) -> SecretBytes:
+    """scrypt(password); with a security chip enrolled, mixed with the chip's secret (kos/chip.py)."""
     maxmem = 256 * params.r * params.n * max(1, params.p) + (1 << 24)
     key = hashlib.scrypt(password, salt=params.salt, n=params.n, r=params.r,
                          p=params.p, maxmem=maxmem, dklen=32)
+    if chip_secret is not None:
+        from .chip import mix
+        key = mix(chip_secret, key)
     return SecretBytes(key)
 
 
 def subkey(master: SecretBytes, label: str) -> bytes:
     return hmac.new(master.raw, b"kos:v1:" + label.encode(), hashlib.sha256).digest()
+
+
+_KEEP = object()
 
 
 class PasswordStore:
@@ -148,16 +231,47 @@ class PasswordStore:
             raise AuthError("password must be at least 8 characters")
         params = params or KdfParams.fresh()
         master = derive_master(password, params)
-        self.write(params, master, throttle_base)
+        self.write(params, master, throttle_base, chip=None)
         return master
 
-    def write(self, params: KdfParams, master: SecretBytes, throttle_base: float = 1.0) -> None:
+    def params(self) -> KdfParams:
+        return KdfParams.from_json(self._load()["kdf"])
+
+    def matches(self, master: SecretBytes) -> bool:
+        """Does this master key match the stored verifier?"""
+        expected = base64.b64decode(self._load()["verifier"])
+        return hmac.compare_digest(subkey(master, "verifier"), expected)
+
+    def chip_block(self) -> Optional[dict]:
+        """The security-chip block of auth.json, or None when no chip is enrolled."""
+        block = self._load().get("chip")
+        return block if isinstance(block, dict) else None
+
+    def chip_secret(self) -> Optional[bytes]:
+        """The chip's secret, read from the chip (None when no chip is enrolled)."""
+        block = self.chip_block()
+        if block is None:
+            return None
+        from .chip import unseal_for
+        return unseal_for(block)
+
+    def write(self, params: KdfParams, master: SecretBytes, throttle_base: float = 1.0,
+              chip: object = _KEEP) -> None:
+        """Save the verifier. ``chip`` is the chip block to store; left out, the existing one is kept
+        (so ``kos passwd`` cannot drop the chip); ``None`` removes it."""
         doc = {
             "version": 1,
             "kdf": params.to_json(),
             "verifier": base64.b64encode(subkey(master, "verifier")).decode(),
             "throttle_base": throttle_base,
         }
+        if chip is _KEEP:
+            try:
+                chip = self.chip_block()
+            except AuthError:
+                chip = None
+        if chip is not None:
+            doc["chip"] = chip
         self.paths.ensure()
         atomic_write(self.paths.auth_file, json.dumps(doc, indent=2).encode())
 
@@ -165,7 +279,11 @@ class PasswordStore:
         doc = self._load()
         params = KdfParams.from_json(doc["kdf"])
         expected = base64.b64decode(doc["verifier"])
-        master = derive_master(password, params)
+        chip_secret = None
+        if isinstance(doc.get("chip"), dict):
+            from .chip import unseal_for
+            chip_secret = unseal_for(doc["chip"])       # ChipError (an AuthError) if the chip says no
+        master = derive_master(password, params, chip_secret)
         if hmac.compare_digest(subkey(master, "verifier"), expected):
             return master
         master.wipe()
@@ -225,27 +343,220 @@ class Throttle:
             pass
 
 
+GENESIS = "0" * 64
+AUDIT_KEY_LABEL = "audit-chain"
+_TAIL_CHUNK = 64 << 10
+_LOCK_WAIT = 5.0
+_FACTS = ("t", "action", "target", "outcome")
+
+
+def _link(prev: str, entry: dict) -> str:
+    """Hash of one entry, committing to the entry before it."""
+    facts = json.dumps({k: entry[k] for k in _FACTS}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(prev.encode() + b"\n" + facts.encode()).hexdigest()
+
+
+def _anchor(key: bytes, h: str) -> str:
+    return hmac.new(key, h.encode(), hashlib.sha256).hexdigest()
+
+
+@dataclass
+class ChainReport:
+    entries: int = 0        # lines in the file
+    legacy: int = 0         # written before the chain existed: unprotected
+    chained: int = 0
+    anchored: int = 0       # chained lines carrying a password-derived MAC
+    anchors_checked: bool = False   # a key was given and every anchor matched
+    trimmed: bool = False   # the file starts mid-chain (optimize dropped older lines)
+    problem: Optional[str] = None
+    bad_line: Optional[int] = None  # 1-based
+
+    @property
+    def ok(self) -> bool:
+        return self.problem is None
+
+
 class AuditLog:
-    """Append-only record of every authorization decision. Contains no secrets."""
+    """Append-only, tamper-evident record of every authorization decision.
+    Contains no secrets.
+
+    Each line commits to the one before it (``p`` is the previous ``h``; ``h`` is
+    SHA-256 over ``p`` and the entry), so editing, deleting or reordering a line
+    breaks the chain from there on. A line written while the owner's password was
+    in hand (a grant) also carries ``m``, an HMAC of ``h`` under a key derived from
+    the password. Anyone can recompute a plain chain after editing it; nobody can
+    recompute ``m`` without the password, so rewriting history *before* a grant
+    is noticed by :meth:`verify` given the key.
+
+    Limits, stated plainly: a forger who also relabels every grant, or who cuts
+    the end off the log, is not caught - nothing outside this file remembers what
+    it should say. And ``optimize`` trims old lines, so the chain is checked from
+    the first line that is left."""
 
     def __init__(self, paths: Paths):
         self.file = paths.logs / "audit.log"
 
-    def record(self, action: str, target: str, outcome: str) -> None:
+    # --- writing ----------------------------------------------------------
+    @contextlib.contextmanager
+    def _locked(self):
+        """The log open for appending and exclusively locked, and guaranteed to be
+        the file that is at ``self.file`` now (``trim`` replaces the file)."""
         self.file.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"t": round(time.time(), 3), "action": action,
-                           "target": target, "outcome": outcome})
-        fd = os.open(self.file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        deadline = time.monotonic() + _LOCK_WAIT
+        while True:
+            fd = os.open(self.file, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
+            try:
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() > deadline:
+                            raise OSError("audit log is locked by another process") from None
+                        time.sleep(0.005)
+                try:
+                    current = os.fstat(fd).st_ino == os.stat(self.file).st_ino
+                except FileNotFoundError:
+                    current = False
+                if current:
+                    yield fd
+                    return
+            finally:
+                os.close(fd)        # also releases the lock
+            if time.monotonic() > deadline:
+                raise OSError("audit log kept changing under us")
+
+    @staticmethod
+    def _last_line(fd: int) -> bytes:
+        end = os.fstat(fd).st_size
+        buf = b""
+        while end > 0:
+            start = max(0, end - _TAIL_CHUNK)
+            buf = os.pread(fd, end - start, start) + buf
+            end = start
+            body = buf.rstrip(b"\n")
+            cut = body.rfind(b"\n")
+            if cut >= 0 or start == 0:
+                return body[cut + 1:]
+        return b""
+
+    def _head(self, fd: int) -> str:
+        """Hash of the newest chained line (GENESIS if there is none yet). A corrupt
+        or old-format last line starts a fresh chain - ``verify`` reports the
+        damage; recording an event must never fail because of it."""
         try:
-            os.write(fd, line.encode() + b"\n")
-        finally:
-            os.close(fd)
+            h = json.loads(self._last_line(fd)).get("h")
+        except (ValueError, AttributeError):
+            return GENESIS
+        return h if isinstance(h, str) and len(h) == 64 else GENESIS
+
+    def record(self, action: str, target: str, outcome: str, key: Optional[bytes] = None) -> None:
+        """Append one decision. Pass ``key`` (``grant.key(AUDIT_KEY_LABEL)``) when the
+        password was just verified, so the line is anchored to it."""
+        facts = {"t": round(time.time(), 3), "action": action, "target": target, "outcome": outcome}
+        with self._locked() as fd:
+            prev = self._head(fd)
+            entry = dict(facts, p=prev, h=_link(prev, facts))
+            if key is not None:
+                entry["m"] = _anchor(key, entry["h"])
+            data = json.dumps(entry, separators=(",", ":")).encode() + b"\n"
+            while data:
+                data = data[os.write(fd, data):]
+
+    def trim(self, keep: int) -> int:
+        """Keep only the newest ``keep`` lines; returns how many were dropped. The
+        chain stays valid from the first line kept."""
+        with self._locked() as fd:
+            lines = [l for l in os.pread(fd, os.fstat(fd).st_size, 0).split(b"\n") if l]
+            if len(lines) <= keep:
+                return 0
+            atomic_write(self.file, b"\n".join(lines[-keep:]) + b"\n")
+            return len(lines) - keep
+
+    # --- reading ----------------------------------------------------------
+    @staticmethod
+    def _parse(raw: bytes) -> Optional[dict]:
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            return None
+        return e if isinstance(e, dict) and all(k in e for k in _FACTS) else None
 
     def entries(self) -> list[dict]:
         try:
-            return [json.loads(l) for l in self.file.read_text().splitlines() if l]
+            data = self.file.read_bytes()
         except FileNotFoundError:
             return []
+        return [e for e in map(self._parse, data.split(b"\n")) if e]
+
+    def tail(self, n: int) -> list[dict]:
+        """The newest ``n`` entries, reading only the end of the file."""
+        if n <= 0:
+            return []
+        try:
+            fd = os.open(self.file, os.O_RDONLY | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return []
+        try:
+            end, buf = os.fstat(fd).st_size, b""
+            while end > 0 and buf.count(b"\n") <= n:
+                start = max(0, end - _TAIL_CHUNK)
+                buf = os.pread(fd, end - start, start) + buf
+                end = start
+        finally:
+            os.close(fd)
+        lines = buf.split(b"\n")
+        if end > 0:
+            lines = lines[1:]       # the first piece is the end of a line we did not read
+        return [e for e in map(self._parse, lines) if e][-n:]
+
+    def verify(self, key: Optional[bytes] = None) -> ChainReport:
+        """Check the chain (and, given ``key``, every password anchor)."""
+        rep = ChainReport()
+        try:
+            data = self.file.read_bytes()
+        except FileNotFoundError:
+            return rep
+
+        def fail(n: int, why: str) -> ChainReport:
+            rep.problem, rep.bad_line = why, n
+            return rep
+
+        prev: Optional[str] = None
+        for n, raw in enumerate(data.split(b"\n"), 1):
+            if not raw.strip():
+                continue
+            rep.entries += 1
+            e = self._parse(raw)
+            if e is None:
+                return fail(n, "not a valid log entry (damaged or inserted)")
+            if "h" not in e:
+                if prev is not None:
+                    return fail(n, "an unchained line after the chain began (inserted or rewritten)")
+                rep.legacy += 1
+                continue
+            p, h = e.get("p"), e["h"]
+            if not (isinstance(p, str) and isinstance(h, str)):
+                return fail(n, "malformed chain fields")
+            if prev is None:
+                rep.trimmed = p != GENESIS
+            elif p != prev:
+                return fail(n, "chain broken: this line does not follow the one before it "
+                               "(a line was deleted, moved or edited)")
+            if h != _link(p, e):
+                return fail(n, "line does not match its hash (it was edited)")
+            prev = h
+            rep.chained += 1
+            m = e.get("m")
+            if e["outcome"] == "granted" and m is None:
+                return fail(n, "a grant is missing its password anchor (removed or rewritten)")
+            if m is not None:
+                rep.anchored += 1
+                if key is not None and not (isinstance(m, str) and hmac.compare_digest(m, _anchor(key, h))):
+                    return fail(n, "password anchor does not match: history was rewritten "
+                                   "without the password")
+        rep.anchors_checked = key is not None
+        return rep
 
 
 class Grant:
@@ -279,6 +590,13 @@ class Grant:
         if not self._master:
             raise AuthorizationDenied("grant already closed")
         return bytes(self._master.raw)
+    def chip_master(self, chip_secret: bytes) -> SecretBytes:
+        """The master key this grant's password gives once a chip secret is mixed in (kos/chip.py).
+        Only meaningful while no chip is enrolled: the master is then the plain scrypt key."""
+        from .chip import mix
+        if not self._master:
+            raise AuthorizationDenied("grant already used")
+        return SecretBytes(mix(chip_secret, bytes(self._master.raw)))
 
     def close(self) -> None:
         self._master.wipe()
@@ -334,6 +652,8 @@ class Authority:
                 self.throttle.success()
                 self.audit.record(action, target, "granted-admin" if via_admin else "granted")
                 return Grant(action, target, master, via_admin=via_admin)
+                self.audit.record(action, target, "granted", key=subkey(master, AUDIT_KEY_LABEL))
+                return Grant(action, target, master)
             self.throttle.fail()
             self.audit.record(action, target, "bad-password")
             self.prompter.info("Wrong password.")

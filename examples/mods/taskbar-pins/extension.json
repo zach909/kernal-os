@@ -1,0 +1,15 @@
+{
+  "entries": [
+    {
+      "label": "Browser",
+      "address": "kos://web"
+    },
+    {
+      "label": "Hello",
+      "address": "kos://hello?mode=graphical"
+    }
+  ],
+  "colors": {
+    "accent": "#c2410c"
+  }
+}

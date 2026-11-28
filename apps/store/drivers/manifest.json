@@ -1,0 +1,11 @@
+{
+  "name": "store.drivers",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Choose drivers for hardware."
+}

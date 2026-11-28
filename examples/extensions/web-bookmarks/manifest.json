@@ -1,0 +1,12 @@
+{
+  "name": "web-bookmarks",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "kind": "extension",
+  "extends": "web",
+  "description": "Extension for the web browser: three bookmarks on its start page"
+}

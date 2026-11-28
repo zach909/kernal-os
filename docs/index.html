@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kernal-os (KOS) - Password-First Secure Linux Operating System</title>
+<meta name="description" content="KOS (kernal-os) is an open-source, security-first Linux operating system: every action needs your password, apps run sealed in a Landlock sandbox, with a built-in malware scanner and a multilingual command shell.">
+<meta name="keywords" content="kernal os, kernel os, KOS, secure linux operating system, password operating system, Landlock sandbox, LUKS2, KVM micro-VM, malware scanner, open source OS">
+<link rel="canonical" href="https://zach909.github.io/kernal-os/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="kernal-os (KOS) - Password-First Secure Linux Operating System">
+<meta property="og:description" content="Open-source Linux OS where nothing happens without your password: sandboxed sealed apps, malware scanning, multi-kernel cells.">
+<meta property="og:url" content="https://zach909.github.io/kernal-os/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"kernal-os (KOS)",
+"alternateName":["kernal os","kernel os","KOS"],
+"description":"A security-first operating system built on the Linux kernel where every action requires a password.",
+"codeRepository":"https://github.com/zach909/kernal-os","programmingLanguage":"Python",
+"runtimePlatform":"Linux","url":"https://zach909.github.io/kernal-os/"}
+</script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#555;--ac:#0b57d0}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--mut:#aaa;--ac:#8ab4f8}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:2rem 16px}
+a{color:var(--ac)}p.l{color:var(--mut)}
+</style>
+</head>
+<body>
+<main>
+<h1>kernal-os (KOS)</h1>
+<p class="l">A password-first, security-focused operating system built on the Linux kernel.</p>
+<p>Nothing happens without your password. There are no background services, no cached logins and no autostart.</p>
+<h2>Features</h2>
+<ul>
+<li><strong>Password on everything</strong> - scrypt-derived key, full audit log.</li>
+<li><strong>Sealed apps</strong> - zip files that are never unzipped, run from memory in a Landlock + namespace sandbox.</li>
+<li><strong>Malware scanner</strong> - every install, update and write is scanned first.</li>
+<li><strong>Multi-kernel cells</strong> - separate Linux kernels in KVM micro-VMs on their own CPU cores.</li>
+<li><strong>Every line is a command</strong> - English, Spanish, French, German, Portuguese, Italian, Russian, Chinese, Japanese.</li>
+<li><strong>Encrypted boot</strong> - LUKS2 disk unlocked from a signed pre-boot environment.</li>
+</ul>
+<p><a href="https://github.com/zach909/kernal-os">Source code and documentation on GitHub</a> ·
+<a href="ARCHITECTURE.html">Architecture</a></p>
+</main>
+</body>
+</html>

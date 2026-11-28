@@ -1,0 +1,13 @@
+{
+  "name": "store.reminders",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "description": "A checklist: add items, tick them off, delete them. No due dates, alerts, lists or repeats: nothing here can wake an app at a time."
+}

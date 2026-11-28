@@ -1,0 +1,11 @@
+{
+  "name": "store.notifications",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Show alerts from apps. Apps never call each other, so a notification centre needs its own design."
+}

@@ -39,32 +39,44 @@ class Rule:
     pattern: re.Pattern
     severity: str  # "high" | "medium"
     note: str
+    # Literal byte strings, at least one of which must appear in any text the
+    # pattern can match. A plain ``in`` check runs at memchr speed, so a file that
+    # holds none of them skips the (much slower) regex without changing the result.
+    needs: tuple = ()
 
 
 RULES: list[Rule] = [
     Rule("eicar-test-file", re.compile(re.escape(EICAR)), "high",
-         "the standard antivirus test signature"),
+         "the standard antivirus test signature",
+         needs=(b"EICAR-STANDARD",)),
     Rule("reverse-shell", re.compile(
         rb"(?:/bin/(?:ba)?sh\s+-i\s+>&|nc\s+-e\s+/bin/|"
         rb"socket\.socket.{0,40}connect.{0,80}dup2|"
         rb"bash\s+-i\s*>&\s*/dev/tcp/)", re.DOTALL), "high",
-        "opens an interactive shell over a raw network socket"),
+        "opens an interactive shell over a raw network socket",
+        needs=(b"/bin/", b"dup2", b"/dev/tcp/")),
     Rule("obfuscated-exec", re.compile(
         rb"exec\s*\(\s*(?:__import__\(['\"]base64['\"]\)|base64)\.[bB]64decode", re.DOTALL),
-        "high", "decodes and executes hidden code at runtime"),
+        "high", "decodes and executes hidden code at runtime",
+        needs=(b"b64decode", b"B64decode")),
     Rule("eval-of-decoded-data", re.compile(
         rb"eval\s*\(\s*(?:base64|codecs|zlib)\.\w+\("), "high",
-        "runs decoded/decompressed data as code instead of data"),
+        "runs decoded/decompressed data as code instead of data",
+        needs=(b"eval",)),
     Rule("credential-file-read", re.compile(
         rb"open\s*\(\s*['\"](?:/etc/shadow|/etc/passwd|[^'\"]*/\.ssh/id_(?:rsa|ed25519))['\"]"),
-        "high", "reads a credentials or key file by a hardcoded path"),
+        "high", "reads a credentials or key file by a hardcoded path",
+        needs=(b"/etc/shadow", b"/etc/passwd", b"/.ssh/id_")),
     Rule("fork-bomb", re.compile(rb":\(\)\{\s*:\|:&\s*\};:|while\s+True:\s*os\.fork\("),
-         "high", "unbounded self-replicating process spawn"),
+         "high", "unbounded self-replicating process spawn",
+         needs=(b":()", b"os.fork(")),
     Rule("setuid-root-drop", re.compile(rb"os\.chmod\([^)]*,\s*0o?[4-7][0-7]{3}\)"),
-         "medium", "sets a setuid/setgid bit on a file"),
+         "medium", "sets a setuid/setgid bit on a file",
+         needs=(b"os.chmod(",)),
     Rule("outbound-curl-pipe-shell", re.compile(
         rb"curl[^|\n]{0,80}\|\s*(?:sudo\s+)?(?:ba)?sh"), "high",
-        "downloads and immediately executes a remote script"),
+        "downloads and immediately executes a remote script",
+        needs=(b"curl",)),
 ]
 
 
@@ -96,6 +108,8 @@ class ScanResult:
 def _scan_bytes(path: str, data: bytes) -> list[Finding]:
     out = []
     for rule in RULES:
+        if rule.needs and not any(n in data for n in rule.needs):
+            continue
         if rule.pattern.search(data):
             out.append(Finding(path, rule.name, rule.severity, rule.note))
     return out

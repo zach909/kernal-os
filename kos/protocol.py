@@ -10,12 +10,30 @@ treated as hostile: size-limited, schema-checked, and every string is stripped
 of control characters so an app cannot inject terminal escape sequences.
 
 OS -> app
-    {"cmd": "hello", "mode": "tui"|"graphical", "width": W, "height": H}
+    {"cmd": "hello", "mode": "tui"|"graphical"|"cmd", "width": W, "height": H}
+                       (a ``text`` session is told "tui": the text layer shows the same ``screen`` commands)
     {"cmd": "key", "key": "a" | "enter" | "backspace" | "up" | ...}
     {"cmd": "pointer", "x": X, "y": Y}
     {"cmd": "button", "button": "left"|"middle"|"right", "pressed": bool, "x": X, "y": Y}
     {"cmd": "scroll", "dy": -1|1, "x": X, "y": Y}
     {"cmd": "device", "device": "mouse"|"keyboard", "state": "attached"}
+    {"cmd": "apps", "installed": [{name, version, description, modes, permitted, kind, extends}],
+                    "open": [{id, name, mode, status}]}                  (answer to request apps)
+    {"cmd": "extensions", "items": [{name, version, kind, entries: [{label, address}], colors: {..}}],
+                          "skipped": [{name, why}]}
+                       sent once after hello, only if an extension (for an ordinary app) or a mod (for a
+                       system app) was switched on for *this* app with `kos extend`. Data, never code:
+                       what to do with it is up to the app. See extensions.py.
+    {"cmd": "answer", "ok": bool, "lines": [str], "model": str, "detail": str}              (answer to request ask)
+    {"cmd": "result", "action": str, "ok": bool, "detail": str, "id": str?}   (answer to a request)
+    {"cmd": "status", "topic": "mouse"|"keyboard"|"display", "ok": true, "fields": [[name, value], ...]}
+                                                       (answer to request status; read-only, no password)
+    {"cmd": "kernel", "protections": {name: bool|int}, "cells": [{name, cid, cpus, memory_mb, running}],
+                      "admin": str}                              (answer to request kernel; read-only)
+    {"cmd": "vault", "id": N, "ok": bool, "detail": str, "value": str?, "keys": [str]?, "spaces": [..]?}
+                                                       (answer to a vault command)
+    {"cmd": "service", "id": N, "ok": bool, "detail": str, "data": {..}}
+                                                       (answer to a service call; see servicespec.py)
     {"cmd": "quit"}
 
 app -> OS
@@ -25,22 +43,69 @@ app -> OS
            | ["line", x0, y0, x1, y1, color] | ["text", x, y, str, color, scale?]
         color = "#rrggbb"
     {"cmd": "log", "msg": str}
+    {"cmd": "request", "action": "apps"}                       list installed + open apps
+    {"cmd": "request", "action": "open", "app": NAME, "mode": "tui"|"text"|"graphical"|"cmd"}
+    {"cmd": "request", "action": "open", "address": "kos://NAME[/path][?query]", "mode": ...}
+                                         the same, as an address (see address.py); the app is told the path
+    {"cmd": "request", "action": "status", "topic": "mouse"|"keyboard"|"display"}
+                                         ask the OS how that part of THIS session stands (booted or not,
+                                         which backend, the screen size). Read-only; needs 'ask:status' or
+                                         'system'. This is how the mouse, keyboard and display apps work:
+                                         they never open a device, they ask.
+    {"cmd": "request", "action": "focus", "id": INSTANCE}      switch the desktop to an open app
+    {"cmd": "request", "action": "close", "id": INSTANCE}
+    {"cmd": "request", "action": "kernel"}                     what the Linux kernel protects (needs ask:kernel)
+    {"cmd": "request", "action": "admin"}                      is the administrator keyboard on? (needs 'admin')
+    {"cmd": "request", "action": "write", "path": ABSOLUTE_PATH, "text": str}
+                                         write a file as the administrator (needs the 'admin' permission).
+                                         The OS refuses unless the administrator keyboard is booted, then asks
+                                         for the password naming the file and the app, then scans and
+                                         optimizes. The app never gets more than ok / not ok.
+    {"cmd": "request", "action": "ask", "text": str, "context": str?, "source": str?}
+                                         ask the AI (needs the 'ai' permission; the OS asks for the
+                                         password and says what leaves the computer). The answer is text.
+    {"cmd": "vault", "id": N, "op": "put"|"get"|"list"|"delete"|"spaces", "key": str?, "value": str?, "space": str?, "store": "cookies"|"passwords"?}
+                                         durable storage: the app's private data ('storage' permission) or a
+                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant)
+    {"cmd": "service", "id": N, "name": "audit.tail", "args": {..}}
+                                         ask the OS for one of the functions in servicespec.SPECS (the audit log, the
+                                         security check, the firewall, ...). Needs the manifest permission
+                                         ``service:GROUP``; the password, where one is needed, is typed in the OS's
+                                         own prompt. Every argument is checked against the spec; none is trusted.
+                                         shared space (manifest 'owns:NAME'/'uses:NAME' + the owner's grant), or - with "store" - the app's
+                                         cookie jar ('cookies' permission) or saved passwords ('passwords'
+                                         permission): separate stores, never reachable through 'storage'
     {"cmd": "exit", "code": int}
+
+``request`` is how an app does anything beyond drawing: it *asks*. The OS only
+listens if the app's manifest has the ``system`` permission, the app was
+permitted to run, and - for anything that starts or stops something - the owner
+types the password in the OS's own prompt.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import socket
 from typing import Any
+
+from .address import AddressError, parse as parse_address
+from .servicespec import SPECS, SpecError
+from .kapp import ID_RE, INSTANCE_RE
 
 MAX_LINE = 1 << 20
 MAX_LINES = 500
 MAX_LINE_CHARS = 1000
 MAX_OPS = 5000
 MAX_COORD = 16384
+MAX_ADMIN_TEXT = 200_000      # one admin write from an app; a bigger file is written with `kos write`
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_APP_NAME_RE = ID_RE
+_INSTANCE_RE = INSTANCE_RE
+REQUEST_MODES = ("tui", "text", "graphical", "cmd")
+STATUS_TOPICS = ("mouse", "keyboard", "display")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
 
@@ -54,16 +119,36 @@ def clean_text(s: Any, limit: int) -> str:
     return _CONTROL_RE.sub("", s)[:limit]
 
 
+def escape_text(s: str, limit: int = 4096) -> str:
+    """Make untrusted text safe to print on the owner's terminal.
+
+    Unlike :func:`clean_text` nothing is dropped: each control or bidi character
+    becomes a visible ``\\xNN`` / ``\\uNNNN``. A hostile file or zip-entry name
+    therefore cannot move the cursor, clear the screen or fake a password prompt
+    - and cannot pass for a different name either."""
+    return _CONTROL_RE.sub(
+        lambda m: "\\x%02x" % ord(m.group()) if ord(m.group()) < 0x100 else "\\u%04x" % ord(m.group()),
+        str(s))[:limit]
+
+
 def _int(v: Any, lo: int = -MAX_COORD, hi: int = MAX_COORD) -> int:
-    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+    if type(v) is not int or not lo <= v <= hi:
         raise ProtocolError(f"expected an integer in [{lo}, {hi}]")
     return v
 
 
-def _color(v: Any) -> str:
-    if not isinstance(v, str) or not _COLOR_RE.match(v):
+@functools.lru_cache(maxsize=4096)
+def _color_str(v: str) -> str:
+    if not _COLOR_RE.match(v):
         raise ProtocolError("expected a color like '#1e90ff'")
     return v.lower()
+
+
+def _color(v: Any) -> str:
+    # Frames repeat a handful of colours thousands of times; validate each once.
+    if not isinstance(v, str):
+        raise ProtocolError("expected a color like '#1e90ff'")
+    return _color_str(v)
 
 
 def _op(op: Any) -> list:
@@ -73,7 +158,12 @@ def _op(op: Any) -> list:
     if kind == "clear" and len(op) == 2:
         return ["clear", _color(op[1])]
     if kind == "rect" and len(op) == 6:
-        return ["rect", _int(op[1]), _int(op[2]), _int(op[3], 0), _int(op[4], 0), _color(op[5])]
+        _, x, y, w, h, c = op
+        if (type(x) is int and type(y) is int and type(w) is int and type(h) is int
+                and -MAX_COORD <= x <= MAX_COORD and -MAX_COORD <= y <= MAX_COORD
+                and 0 <= w <= MAX_COORD and 0 <= h <= MAX_COORD):
+            return ["rect", x, y, w, h, _color(c)]
+        return ["rect", _int(x), _int(y), _int(w, 0), _int(h, 0), _color(c)]
     if kind == "line" and len(op) == 6:
         return ["line", *(_int(v) for v in op[1:5]), _color(op[5])]
     if kind == "text" and len(op) in (5, 6):
@@ -82,13 +172,144 @@ def _op(op: Any) -> list:
     raise ProtocolError(f"bad draw op {kind!r}")
 
 
+def _request(msg: dict) -> dict:
+    action = msg.get("action")
+    if action == "apps":
+        return {"cmd": "request", "action": "apps"}
+    if action == "open":
+        mode, launch = msg.get("mode", "tui"), ""
+        if "address" in msg:
+            if "app" in msg:
+                raise ProtocolError("request.open takes an app or an address, not both")
+            try:
+                addr = parse_address(msg["address"])
+            except AddressError as e:
+                raise ProtocolError(f"request.address: {e}") from None
+            app, launch, mode = addr.app, addr.launch, addr.mode or mode
+        else:
+            app = msg.get("app")
+        if not isinstance(app, str) or not _APP_NAME_RE.match(app):
+            raise ProtocolError("request.app must be an app name")
+        if mode not in REQUEST_MODES:
+            raise ProtocolError("request.mode must be tui, text, graphical or cmd")
+        return {"cmd": "request", "action": "open", "app": app, "mode": mode, "address": launch}
+    if action in ("focus", "close"):
+        ident = msg.get("id")
+        if not isinstance(ident, str) or not _INSTANCE_RE.match(ident):
+            raise ProtocolError("request.id must be an open instance id")
+        return {"cmd": "request", "action": action, "id": ident}
+    if action == "ask":
+        from . import ai
+        extra = set(msg) - {"cmd", "action", "text", "context", "source"}
+        if extra:
+            raise ProtocolError(f"request.ask has no field {sorted(extra)[0]!r}")
+        for k in ("context", "source"):
+            if k in msg and not isinstance(msg[k], str):
+                raise ProtocolError(f"request.{k} must be text")
+        if not isinstance(msg.get("text"), str):
+            raise ProtocolError("request.text must be text")
+        if len(msg["text"]) > ai.MAX_QUESTION or len(msg.get("context", "")) > ai.MAX_CONTEXT:
+            raise ProtocolError("request.ask is too long")
+        return {"cmd": "request", "action": "ask", "text": clean_text(msg["text"], ai.MAX_QUESTION),
+                "context": clean_text(msg.get("context", ""), ai.MAX_CONTEXT),
+                "source": clean_text(msg.get("source", ""), ai.MAX_SOURCE)}
+    if action == "status":
+        extra = set(msg) - {"cmd", "action", "topic"}
+        if extra:
+            raise ProtocolError(f"request.status has no field {sorted(extra)[0]!r}")
+        topic = msg.get("topic")
+        if not isinstance(topic, str) or topic not in STATUS_TOPICS:
+            raise ProtocolError(f"request.topic must be one of {STATUS_TOPICS}")
+        return {"cmd": "request", "action": "status", "topic": topic}
+    if action in ("kernel", "admin"):
+        extra = set(msg) - {"cmd", "action"}
+        if extra:
+            raise ProtocolError(f"request.{action} has no field {sorted(extra)[0]!r}")
+        return {"cmd": "request", "action": action}
+    if action == "write":
+        extra = set(msg) - {"cmd", "action", "path", "text"}
+        if extra:
+            raise ProtocolError(f"request.write has no field {sorted(extra)[0]!r}")
+        path, text = msg.get("path"), msg.get("text")
+        # the path is shown in the password prompt: absolute, bounded, and no control characters
+        if (not isinstance(path, str) or not path.startswith("/") or len(path) > 1024
+                or _CONTROL_RE.search(path)):
+            raise ProtocolError("request.path must be an absolute file path")
+        if not isinstance(text, str) or len(text) > MAX_ADMIN_TEXT:
+            raise ProtocolError(f"request.text must be text of at most {MAX_ADMIN_TEXT} characters")
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ProtocolError("request.text must be valid text") from None
+        return {"cmd": "request", "action": "write", "path": path, "text": text}
+    if action == "backup":
+        return {"cmd": "request", "action": "backup"}
+    if action == "backup_add":
+        path = msg.get("path")
+        if not isinstance(path, str) or not path or len(path) > 1024 or "\x00" in path:
+            raise ProtocolError("request.path must be a file or folder path")
+        return {"cmd": "request", "action": "backup_add", "path": path}
+    if action == "backup_remove":
+        ident = msg.get("id")
+        if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{12}", ident):
+            raise ProtocolError("request.id must be a backup item id")
+        return {"cmd": "request", "action": "backup_remove", "id": ident}
+    raise ProtocolError(f"unknown request {action!r}")
+
+
+VAULT_OPS = ("put", "get", "list", "delete", "spaces")
+VAULT_STORES = ("cookies", "passwords")
+_SPACE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_VAULT_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MAX_VAULT_VALUE = 400_000
+
+
+def _vault(msg: dict) -> dict:
+    op, ident = msg.get("op"), msg.get("id")
+    if op not in VAULT_OPS:
+        raise ProtocolError(f"vault.op must be one of {VAULT_OPS}")
+    ident = _int(ident, 0, 2**31)
+    out = {"cmd": "vault", "op": op, "id": ident}
+    if msg.get("space") is not None:
+        if not isinstance(msg["space"], str) or not _SPACE_RE.match(msg["space"]) or op == "spaces":
+            raise ProtocolError("vault.space must be a plain space name (and not used with 'spaces')")
+        out["space"] = msg["space"]
+    if msg.get("store") is not None:
+        if msg["store"] not in VAULT_STORES or op == "spaces" or "space" in out:
+            raise ProtocolError(f"vault.store must be one of {VAULT_STORES} (not used with 'space' or 'spaces')")
+        out["store"] = msg["store"]
+    if op not in ("list", "spaces"):
+        key = msg.get("key")
+        if not isinstance(key, str) or not _VAULT_KEY_RE.match(key):
+            raise ProtocolError("vault.key must be a plain lowercase name")
+        out["key"] = key
+    if op == "put":
+        value = msg.get("value")
+        if not isinstance(value, str) or len(value) > MAX_VAULT_VALUE:
+            raise ProtocolError("vault.value must be text")
+        out["value"] = value        # data, never displayed by the OS: not stripped
+    return out
+
+
+def _service(msg: dict) -> dict:
+    name, ident = msg.get("name"), _int(msg.get("id"), 0, 2**31)
+    spec = SPECS.get(name) if isinstance(name, str) else None
+    if spec is None:
+        raise ProtocolError("service.name is not a service")
+    try:
+        args = spec.check(msg.get("args", {}))
+    except SpecError as e:
+        raise ProtocolError(f"service.args: {e}") from None
+    return {"cmd": "service", "id": ident, "name": name, "args": args}
+
+
 def validate_app_message(msg: Any, mode: str) -> dict:
     if not isinstance(msg, dict) or not isinstance(msg.get("cmd"), str):
         raise ProtocolError("message must be an object with a 'cmd'")
     cmd = msg["cmd"]
     if mode == "cmd" and cmd in ("screen", "frame"):
         raise ProtocolError("cmd mode has no drawing surface; use log")
-    if cmd == "screen" and mode == "tui":
+    if cmd == "screen" and mode in ("tui", "text"):
         lines = msg.get("lines", [])
         if not isinstance(lines, list) or len(lines) > MAX_LINES:
             raise ProtocolError("screen.lines must be a list of at most 500 strings")
@@ -103,9 +324,21 @@ def validate_app_message(msg: Any, mode: str) -> dict:
         return {"cmd": "frame", "ops": [_op(o) for o in ops]}
     if cmd == "log":
         return {"cmd": "log", "msg": clean_text(msg.get("msg", ""), 2000)}
+    if cmd == "request":
+        return _request(msg)
+    if cmd == "vault":
+        return _vault(msg)
+    if cmd == "service":
+        return _service(msg)
     if cmd == "exit":
         return {"cmd": "exit", "code": _int(msg.get("code", 0), 0, 255)}
     raise ProtocolError(f"command {cmd!r} not allowed in {mode} mode")
+
+
+def _no_decimal(token: str):
+    """The no-decimals rule on the wire: a number with a point or exponent, or NaN/Infinity,
+    is refused before any validator sees it (the protocol only ever carries whole numbers)."""
+    raise ValueError("decimal number")
 
 
 class Channel:
@@ -123,7 +356,7 @@ class Channel:
     def send(self, obj: dict) -> None:
         if self.closed:
             return
-        data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
+        data = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode() + b"\n"
         try:
             self.sock.setblocking(True)
             self.sock.settimeout(2.0)
@@ -154,7 +387,7 @@ class Channel:
             del self._buf[:i + 1]
             if line.strip():
                 try:
-                    out.append(json.loads(line))
+                    out.append(json.loads(line, parse_float=_no_decimal, parse_constant=_no_decimal))
                 except ValueError:
                     raise ProtocolError("app sent invalid JSON") from None
         if len(self._buf) > MAX_LINE:

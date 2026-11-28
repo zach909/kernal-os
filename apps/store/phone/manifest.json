@@ -1,0 +1,11 @@
+{
+  "name": "store.phone",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Place and answer calls. Needs a modem and audio."
+}

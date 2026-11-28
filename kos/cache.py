@@ -9,14 +9,13 @@ import os
 import secrets
 from pathlib import Path
 
+from .appdirs import AppDirs
 from .paths import Paths
 
 
 def alloc(paths: Paths, name: str) -> Path:
-    base = paths.state / "cache"
-    base.mkdir(parents=True, exist_ok=True)
-    os.chmod(base, 0o700)
-    d = base / f"{name}-{secrets.token_hex(4)}"
+    base = AppDirs(paths, name).ensure().cache
+    d = base / secrets.token_hex(4)
     d.mkdir(mode=0o700)
     return d
 

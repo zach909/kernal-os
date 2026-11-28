@@ -1,0 +1,11 @@
+{
+  "name": "store.live-captions",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Show speech as text as it happens."
+}

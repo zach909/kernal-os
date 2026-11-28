@@ -1,0 +1,11 @@
+{
+  "name": "store.visual-search",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Recognise objects and read text the camera sees (Visual Search, Object and Text Recognition)."
+}

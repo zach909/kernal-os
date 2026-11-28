@@ -1,0 +1,11 @@
+{
+  "name": "store.freeform",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "A free-form whiteboard of text, shapes and pictures. Needs pointer drawing on a 2D canvas; the canvas exists but no whiteboard app does yet."
+}

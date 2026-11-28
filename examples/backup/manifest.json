@@ -1,0 +1,9 @@
+{
+  "name": "backup",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": ["tui", "graphical"],
+  "permissions": ["system"],
+  "description": "Deduplicated, scanned backups: each file body stored once. Every action asks the OS for your password."
+}

@@ -1,0 +1,71 @@
+---
+name: kos-graphics
+description: How KOS draws - the graphics layer between an app's draw commands and the screen. Use when changing or debugging screen output, frames, the trusted password overlay, the text/graphical/cmd surfaces, fonts, or the framebuffer/terminal/headless backends in kernal-os.
+---
+
+# KOS graphics
+
+**This does:** turns an app's draw commands into pixels, and draws the
+password overlay and pointer on top where the app can't touch them.
+
+**So the AI:** validates every new draw op and bounds it, never lets app
+pixels land after the overlay, and tests with the headless backend because
+this container has no screen.
+
+An app never draws. It sends `screen` (text page) or `frame` (shapes) commands;
+the OS rasterizes them into a framebuffer **it owns**, then draws the things
+only the OS may draw on top: the mouse pointer and the trusted password overlay.
+
+```
+app --screen/frame--> protocol.py (validated) --> surface --> backend --> screen
+                                                   ^ OS draws pointer + overlay last
+```
+
+## Where things are
+
+| Piece | File |
+|---|---|
+| Framebuffer, pointer, overlay (`Modal`), backends | `kos/display.py` |
+| Text page surface (`run NAME`) | `kos/tui.py` |
+| Raw command stream, no drawing (`run cmd NAME`) | `kos/cmdsurface.py` |
+| Built-in bitmap font | `kos/font.py` |
+| What an app may send | `kos/protocol.py` |
+
+Backends: `FbdevBackend` (real `/dev/fb0`), `TerminalBackend` (truecolor
+terminal, two pixels per cell), `HeadlessBackend` (memory; tests).
+
+## What an app may send
+
+`frame` ops only: `clear`, `rect`, `line`, `text`, each with a `#rrggbb` color.
+Limits live in `protocol.py` (`MAX_OPS`, `MAX_COORD`, `MAX_LINES`,
+`MAX_LINE_CHARS`). Text is stripped of control characters so an app cannot
+inject terminal escape sequences. `cmd` mode refuses `screen`/`frame` entirely.
+
+## GPUI-style drawing (`kos/ui.py`, app side)
+
+Apps describe a tree (`div().flex_col().p(8).bg(..).rounded(4).child(text(..))`), `Canvas.paint(root, w, h)`
+measures, lays out (whole-number flexbox: `//`, remainder to the last item) and paints it into the same
+`clear/rect/line/text` ops, then `frame.hit(x, y)` names the element id under a click. It adds **no wire op**:
+`protocol.py` still validates every op, the frame budget and overlay are unchanged. Over budget drops rounded
+corners first, then raises. Tests: `tests/test_ui.py`.
+
+## Rules that apply here
+
+- **The password overlay is the OS's.** It is drawn last, the app receives no
+  input while it is up, and the app cannot draw over it. Never add a path that
+  lets app pixels land after the overlay, or that lets an app read the overlay.
+- Any new draw op needs schema validation in `validate_app_message`, a size
+  bound, and a hostile-input test (wrong types, huge values, control chars).
+- Never trust an app-supplied string on screen; run it through `clean_text`.
+- Encryption: the frame channel is plain JSON today (see `kos-rules`).
+
+## The guard (`kos/guard.py`)
+
+`frame-budget`: more than 1,000,000 draw ops in a second (200 full frames) ends the app. It is checked
+in `Session.handle_app` after the frame is validated. A budget is a guess, not a measurement. The text
+layer (`kos-text`) sits just under this one: `text` mode never receives `frame`.
+
+## Testing without hardware
+
+Use `HeadlessBackend` and `GraphicalSurface` (see `TestDisplayAndInput` in
+`tests/test_kos.py`). This container has no `/dev/fb0`.

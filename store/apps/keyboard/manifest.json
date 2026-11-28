@@ -1,0 +1,14 @@
+{
+  "name": "keyboard",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui",
+    "graphical"
+  ],
+  "permissions": [
+    "ask:status"
+  ],
+  "description": "Shows the keyboard: whether the OS forwards keys to the app, how it is read, what the OS keeps. Read-only; it asks the OS and cannot change anything."
+}

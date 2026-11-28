@@ -1,0 +1,11 @@
+{
+  "name": "store.device-health",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Report battery, storage and device health."
+}

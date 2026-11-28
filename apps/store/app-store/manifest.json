@@ -1,0 +1,11 @@
+{
+  "name": "store.app-store",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Lists every app in the Store with what it does and how much of the job it really does. A list only: it cannot install anything (`kos install` asks the password; no service lets an app do that)."
+}

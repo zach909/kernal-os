@@ -17,7 +17,9 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .auth import Authority
+from typing import Optional
+
+from .auth import AuditLog, Authority, Grant
 from .kapp import KApp, compute_seal
 from .paths import Paths, atomic_write
 from .registry import Registry
@@ -79,6 +81,10 @@ def _recompress_kapp(kapp_path: Path, seal_path: Path, seal_key: bytes) -> int:
 def optimize(paths: Paths, grant_or_authority) -> OptimizeReport:
     """`grant_or_authority` is an `Authority` (live password) or an
     already-open grant (e.g. a redeemed privileged autonomy token)."""
+def optimize(paths: Paths, authority: Authority, grant: Optional[Grant] = None) -> OptimizeReport:
+    """``grant``: a password grant the caller already obtained for a larger
+    operation that includes this one (the guarded file write). It is only used
+    to derive the re-seal key; the caller still owns closing it."""
     report = OptimizeReport()
 
     # 1. Recompress every installed app's zip to the best compression, and
@@ -86,7 +92,11 @@ def optimize(paths: Paths, grant_or_authority) -> OptimizeReport:
     cm = grant_or_authority.authorize("disk.optimize") \
         if isinstance(grant_or_authority, Authority) else grant_or_authority
     with cm as grant:
+    if grant is not None:
         seal_key = grant.key(SEAL_KEY_LABEL)
+    else:
+        with authority.authorize("disk.optimize") as own:
+            seal_key = own.key(SEAL_KEY_LABEL)
     for kapp_path in sorted(paths.apps.glob("*.kapp")):
         seal_path = kapp_path.with_suffix(".seal")
         saved = _recompress_kapp(kapp_path, seal_path, seal_key)
@@ -107,15 +117,14 @@ def optimize(paths: Paths, grant_or_authority) -> OptimizeReport:
     # 3. Prune registry entries for brokers that are already gone.
     report.dead_instances_pruned = Registry(paths).prune()
 
-    # 4. Trim the audit log to the most recent N lines.
-    audit_file = paths.logs / "audit.log"
-    if audit_file.exists():
-        lines = audit_file.read_text().splitlines()
-        if len(lines) > AUDIT_RETENTION_LINES:
-            keep = lines[-AUDIT_RETENTION_LINES:]
-            before = audit_file.stat().st_size
-            atomic_write(audit_file, ("\n".join(keep) + "\n").encode())
-            report.audit_lines_trimmed = len(lines) - len(keep)
-            report.bytes_reclaimed += max(0, before - audit_file.stat().st_size)
+    # 4. Trim the audit log to the most recent N lines. Done under the log's own lock,
+    #    so a line recorded meanwhile is not lost, and the hash chain stays valid.
+    audit = AuditLog(paths)
+    if audit.file.exists():
+        before = audit.file.stat().st_size
+        dropped = audit.trim(AUDIT_RETENTION_LINES)
+        if dropped:
+            report.audit_lines_trimmed = dropped
+            report.bytes_reclaimed += max(0, before - audit.file.stat().st_size)
 
     return report

@@ -1,0 +1,11 @@
+{
+  "name": "store.books",
+  "version": "1.0",
+  "runtime": "python",
+  "entry": "app:main",
+  "modes": [
+    "tui"
+  ],
+  "permissions": [],
+  "description": "Read books and listen to audiobooks."
+}
