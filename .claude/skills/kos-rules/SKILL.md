@@ -1,11 +1,14 @@
 ---
 name: kos-rules
+description: The rules every change to kernal-os (KOS) must follow - everything needs verification, everything is an app, every connection is blocked by default and encrypted, the graphics -> clicks -> app commands -> kernel -> hardware pipeline is encrypted, and apps have no APIs to each other (shared folders with permissions, or OS commands). Use before adding or changing any command, app, protocol message, device, sandbox, network, firewall or browser code in this repo, or when two apps need to work together, and before calling such a change done.
 description: The rules every change to kernal-os (KOS) must follow - everything needs verification, everything is an app, everything is separate (one app per function and per screen), every connection is blocked by default and encrypted, and the graphics -> clicks -> app commands -> kernel -> hardware pipeline is encrypted. Use before adding or changing any command, app, protocol message, device, sandbox, network, firewall or browser code in this repo, and before calling such a change done.
 ---
 
 # KOS rules
 
 **This does:** sets the rules every change to KOS must follow
+(verification, everything is an app, connections blocked and encrypted, the
+pipeline encrypted, no APIs between apps).
 (verification, everything is an app, everything is separate, connections blocked
 and encrypted, the pipeline encrypted, fractions not decimals, proofs, data
 encrypted at rest with an error on any break).
@@ -53,6 +56,21 @@ disagree, say so and fix whichever is wrong. Do not paper over it.
    no encrypted-to-plain redirect. The browser tells the user on every page
    that websites can see their IP address.
 5. **The whole pipeline is encrypted.** See below.
+6. **No APIs between apps.** Never give one app a direct way to call another
+   (no app-to-app endpoints, sockets or message types). Two apps that need to
+   work together use one of two routes, with the OS in the middle of both:
+   1. **Shared folder** ("space", `kos/spaces.py`): the owner app says
+      `owns:NAME` in its manifest and creates it; a partner says `uses:NAME`;
+      the user lets it in with `kos grant APP space:NAME --level read|write`.
+      The permission store (`<state>/permissions/grants.json`) alone decides
+      who may read or write.
+   2. **Commands**: the app sends a command through the protocol
+      (`kos/protocol.py`, `request` for system functions) and the OS checks,
+      permissions and logs it.
+   If neither can do the job (for example live data between two machines),
+   report it as a gap in the README table. Do not add an API. Check
+   `kos spaces`, the README "Shared folders" section and `kos-command-protocol`
+   first.
 6. **Every layer guards itself** (`kos/guard.py`). Six layers, one guard each, none relying on its
    neighbour: graphics `frame-budget`, text `page-budget`, input `event-shape`, commands
    `message-budget` / `prompt-budget` / `failed-requests`, kernel `attest-process`, hardware
@@ -189,6 +207,8 @@ hostile-input test.
       logged; nothing opens a plain-text connection.
 - [ ] New app-facing message has schema validation and a test that hostile
       input is rejected.
+- [ ] Apps that cooperate do it through a shared folder or OS commands; no
+      new app-to-app endpoint, socket or message type.
 - [ ] Tests added for the rule you touched (a refusal test, not just a happy
       path).
 - [ ] Ran `python3 -m unittest discover -s tests`. The whole suite should pass.

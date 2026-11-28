@@ -1,5 +1,10 @@
 # The Silicon & Local Network Mesh: how it fits KOS
 
+**Status: design only. Nothing in this document is implemented.** No code, action,
+protocol message or test exists for any of it. This file says what the mesh would have
+to be to obey the rules in the README, where the original sketch conflicts with
+them, and what the owner must decide before any code is written. Per the README gaps
+table, it must not be described as a feature until it is built and tested.
 **Status: partly implemented (phases 1, 2 and the sync half of 3); the rest is still design only.**
 Built and tested: pairing and identity, an encrypted authenticated link over an ordinary network
 (loopback tested), and sync over that link: `kos/linkdev.py`, `kos/syncer.py`, `kos/migrate.py`, the
